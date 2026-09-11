@@ -113,8 +113,26 @@ Il doit être déréférencé (`peel`) vers le commit cible avant regroupement.
 
 ### 4.2 Ce qu'est une arête
 
-Une flèche de A vers B signifie **B est un descendant de A**. Les flèches
-pointent vers le descendant.
+Trois notions à ne jamais confondre — les mélanger est une source de bugs
+classique dans ce type de code :
+
+| Niveau | Formulation |
+|---|---|
+| Relation Git | `parent → child` (un commit pointe vers ses parents) |
+| Arête du graphe | `GraphEdge(ancestor, descendant)` — champs **nommés**, jamais `from`/`to` |
+| Rendu | la flèche est dessinée de l'ancêtre vers le descendant, donc du bas vers le haut |
+
+```python
+@dataclass(frozen=True)
+class GraphEdge:
+    ancestor: Oid       # le plus ancien
+    descendant: Oid     # le plus récent
+    skipped: int        # commits compressés entre les deux
+```
+
+Le modèle ne connaît que `ancestor`/`descendant`. La direction visuelle est une
+décision de `layout/` et `ui/` seuls : si le sens de dessin change un jour, le
+modèle n'est pas touché.
 
 **Le cas qui invalide l'approche naïve.** Considérons deux branches divergentes :
 
@@ -142,6 +160,26 @@ première classe, affichés avec leur OID court comme étiquette.
 
 Les arêtes sautent les commits intermédiaires : si deux nœuds sont séparés de
 200 commits sans ref ni jonction, une seule flèche les relie.
+
+### 4.2.1 La compression est visuelle, jamais sémantique
+
+Conséquence à ne pas manquer : si les commits compressés disparaissaient du
+modèle, il deviendrait impossible de les sélectionner, d'en copier le hash, d'en
+faire un cherry-pick ou d'en voir le contenu. L'outil perdrait l'essentiel de ce
+que Git permet.
+
+**Les commits intermédiaires restent donc dans le modèle.** Seul le rendu les
+masque.
+
+- Chaque arête connaît la liste ordonnée des OID qu'elle saute (`skipped` est le
+  décompte ; la liste elle-même est conservée).
+- Une arête portant au moins un commit sauté affiche le décompte comme
+  étiquette (« 200 commits »).
+- **Clic sur une arête** → panneau listant les commits sautés, chacun
+  sélectionnable et porteur du même menu contextuel qu'un nœud (§7.3).
+
+Le coût mémoire est celui d'une liste d'OID par arête — négligeable devant le
+DAG déjà chargé.
 
 ### 4.3 Couleurs
 
@@ -189,7 +227,8 @@ Quatre couches, chacune testable isolément.
 cli.py          → découverte du dépôt, parsing des arguments, démarrage Qt
   ↓
 core/           → accès Git (pygit2). Aucune dépendance Qt.
-  repository.py    ouverture, découverte, état du working tree
+  repository.py    ouverture, découverte
+  state.py         RepositoryState (§7.8)
   refs.py          collecte et typage des refs, déréférencement des tags
   graph.py         DAG, compression, DisplayNodes, arêtes (§6.1)
   operations.py    checkout, merge, reset, branch, cherry-pick…
@@ -203,6 +242,7 @@ ui/             → PySide6
   graph_view.py    QGraphicsView : rendu, zoom, panoramique
   graph_items.py   QGraphicsItem des nœuds et arêtes
   minimap.py       vue d'ensemble
+  watcher.py       surveillance de .git, anti-rebond (§7.9)
   dialogs/         un fichier par dialogue d'action
   theme.py         couleurs, polices, métriques
 ```
@@ -226,22 +266,59 @@ DAG Git complet → commits significatifs → compression → DisplayNodes → a
 Déréférencer les tags annotés (objet `tag` → `commit`) via `peel`. Les stashes
 sont collectés à part (voir étape 5).
 
-**Étape 2 — marquer les commits significatifs.** Parcourir le DAG depuis toutes
-les pointes de refs. Un commit est significatif s'il vérifie l'un de :
+**Étape 2 — marquer les commits significatifs.**
+
+*Intention* (ce qui doit être vrai, indépendamment de l'algorithme) :
+
+> Conserver l'ensemble **minimal** de commits préservant la connectivité
+> topologique entre les refs. Deux refs reliées dans le DAG Git doivent le
+> rester dans le graphe compressé, et tout point où l'histoire diverge ou
+> converge doit rester visible.
+
+*Implémentation v1.* Un commit est significatif s'il vérifie l'un de :
 
 - il porte une ref ;
-- c'est un merge-base entre deux pointes de refs ;
+- il appartient à l'ensemble des merge-bases entre deux pointes de refs ;
 - c'est un commit de merge dont au moins deux parents mènent à des refs
   distinctes ;
 - c'est une racine (aucun parent).
 
-**Étape 3 — compresser.** Chaque commit significatif devient un `DisplayNode`.
-Les segments linéaires entre eux sont remplacés par une arête unique portant le
-nombre de commits sautés (utilisable plus tard comme info-bulle).
+**Deux branches peuvent avoir plusieurs merge-bases.** Vérifié sur un dépôt à
+merges croisés : `git merge-base -a` en retourne deux là où `git merge-base`
+n'en retourne qu'un. L'implémentation doit donc utiliser l'équivalent de
+`merge-base --all` et traiter **tous** les résultats. Utiliser la forme
+singulière raterait des jonctions et reproduirait le défaut que §4.2 décrit.
 
-**Étape 4 — réduire transitivement.** Supprimer toute arête A→B s'il existe un
-chemin A→…→C→…→B dans le graphe compressé. Ne restent que les relations
-directes.
+**Les merges octopus existent.** Vérifié : `git merge b1 b2 b3` produit un commit
+à **quatre parents**. La règle ci-dessus est formulée en « au moins deux
+parents » et les couvre, mais toute implémentation supposant `parents[0]` et
+`parents[1]` seulement serait fausse. Les parents sont itérés, jamais indexés en
+dur.
+
+Cette formulation est l'implémentation v1, pas la définition. Si un benchmark
+montre qu'elle ne tient pas, elle est remplaçable sans toucher aux autres
+étapes — l'intention ci-dessus reste le contrat.
+
+**Étape 3 — compresser.** Chaque commit significatif devient un `DisplayNode`.
+Les segments linéaires entre eux sont remplacés par une arête unique conservant
+la **liste ordonnée** des OID sautés (§4.2.1).
+
+**Étape 4 — réduire transitivement.** Supprimer toute arête (A, B) s'il existe
+un chemin A→…→C→…→B dans le graphe compressé.
+
+**Les étapes 3 et 4 sont deux transformations distinctes**, et le code les garde
+séparées — `compress_linear_segments()` et `reduce_transitive_edges()`. Elles
+résolvent des problèmes différents :
+
+```
+Compression                     Réduction transitive
+A ─ c1 ─ c2 ─ c3 ─ B            A → B  et  A → C → B
+        ↓                               ↓
+A ──────────────── B            A → C → B
+   (skipped = 3)                   (A → B supprimée)
+```
+
+Les confondre produirait un code où corriger l'une casse l'autre.
 
 **Étape 5 — rattacher les stashes.** Chaque stash devient un `DisplayNode` relié
 par une seule arête à son **premier parent**, en ignorant ses deuxième et
@@ -308,22 +385,42 @@ retenue.
 
 ### 7.3 Menu contextuel — un nœud sélectionné
 
-Conformément à D1. Les entrées agissant sur une branche sont désactivées pour les
-nœuds stash et tag.
+Conformément à D1. Quatorze entrées à plat seraient illisibles : le menu est
+donc **hiérarchisé**, les actions les plus fréquentes restant au premier niveau.
 
-- **Show Log** — historique du commit
-- **Checkout / Switch** — bascule sur cette branche
-- **Create Branch here…**
-- **Create Tag here…**
-- **Merge into current branch…**
-- **Rebase current branch onto this…**
-- **Cherry-pick this commit…**
-- **Reset current branch to this…** (soft / mixed / hard)
-- **Revert this commit…**
-- **Delete branch** (branches locales et distantes)
-- **Rename branch…** (branches locales)
-- **Push…** / **Pull…** / **Fetch…**
-- **Copy commit hash**
+```
+Checkout / Switch
+──────────────────
+Create            ▸  Branch here…
+                     Tag here…
+Integrate         ▸  Merge into current branch…
+                     Rebase current branch onto this…
+                     Cherry-pick this commit…
+Undo              ▸  Reset current branch to this…  (soft / mixed / hard)
+                     Revert this commit…
+Remote            ▸  Push…
+                     Pull…
+                     Fetch
+Branch            ▸  Rename…
+                     Delete
+──────────────────
+Show Log
+Copy commit hash
+```
+
+Le regroupement est purement présentationnel : il ne change rien à
+`core/operations.py`.
+
+**Activation des entrées.** Chaque entrée est activée ou grisée selon le type de
+nœud **et** l'état du dépôt (§7.8) :
+
+| Condition | Effet |
+|---|---|
+| Nœud tag ou jonction | Rename, Delete, Push, Pull grisés |
+| Nœud stash | seuls Show Log, Copy hash, et Apply/Drop (v1.1) actifs |
+| Nœud = HEAD courant | Checkout, Merge, Rebase grisés (sans objet) |
+| Opération en cours (rebase, merge) | toutes les opérations modifiantes grisées, message indiquant l'état |
+| Arbre de travail sale | Checkout, Merge, Rebase grisés ou assortis d'un avertissement |
 
 ### 7.4 Menu contextuel — deux nœuds sélectionnés
 
@@ -369,6 +466,12 @@ vrai, quel que soit `success`.
 Cela évite à chaque appelant de l'UI d'envelopper les opérations dans un
 `try/except` et de deviner s'il faut rafraîchir.
 
+**Sur le nom `repository_changed`.** Il couvre volontairement plus que le DAG :
+un checkout ne crée aucun commit mais déplace HEAD, donc change le nœud vert du
+graphe. Un nom comme `graph_changed` serait plus étroit que la réalité qu'il
+décrit. Le champ signifie « l'affichage ne reflète plus le dépôt », ce qui inclut
+HEAD, les refs et l'état de §7.8.
+
 ### 7.7 Classes d'opérations
 
 Les opérations de §7.3 n'ont pas le même profil de risque. Trois classes, qui
@@ -385,6 +488,67 @@ de conflit, l'application n'a pas de résolveur intégré en v1. Elle affiche la
 liste des fichiers en conflit et indique que la résolution se fait hors de
 l'application, puis propose **Abandonner** (`merge --abort` ou équivalent) pour
 revenir à l'état antérieur.
+
+### 7.8 État du dépôt
+
+Le graphe seul ne suffit pas à décider quelles actions sont possibles. Un second
+modèle, indépendant du graphe et bien moins coûteux à calculer, porte l'état
+courant :
+
+```python
+@dataclass(frozen=True)
+class RepositoryState:
+    head_oid: Oid | None          # None si dépôt sans commit
+    head_branch: str | None       # None si HEAD détaché
+    detached: bool
+    has_unstaged_changes: bool
+    has_staged_changes: bool
+    has_conflicts: bool
+    operation_in_progress: str | None   # "merge", "rebase", "cherry-pick", …
+```
+
+C'est lui que consulte §7.3 pour activer ou griser les entrées de menu, et §7.5
+pour décider si une confirmation est nécessaire.
+
+`RepositoryState` est relu après chaque opération et à chaque rafraîchissement
+externe (§7.9). Il est bien moins coûteux à calculer que le graphe : quand seul
+l'état change (un fichier modifié dans l'éditeur), le graphe n'est pas
+reconstruit.
+
+### 7.9 Changements externes
+
+Un dépôt Git n'est jamais modifié uniquement par tortoisePy. Un `git commit`
+tapé dans le terminal pendant que la fenêtre est ouverte doit se voir — sans
+quoi l'affichage ment, et l'utilisateur agit sur un état périmé.
+
+**Mécanisme :** surveillance du système de fichiers sur le répertoire `.git`,
+via `QFileSystemWatcher`.
+
+Chemins surveillés :
+
+| Chemin | Détecte |
+|---|---|
+| `.git/HEAD` | checkout, changement de branche |
+| `.git/refs/` (récursif) | création, déplacement, suppression de refs |
+| `.git/packed-refs` | refs compactées |
+| `.git/index` | staging |
+| `.git/MERGE_HEAD`, `.git/rebase-merge/` | début et fin d'opérations |
+
+**Anti-rebond obligatoire.** Une seule commande Git produit plusieurs événements
+de fichier — un `git commit` touche l'index, `HEAD` et une ref. Sans
+temporisation, le graphe serait reconstruit trois fois. Un délai de **300 ms**
+après le dernier événement avant reconstruction.
+
+**Distinction lecture/reconstruction :** un changement sur `.git/index` seul
+relit `RepositoryState` sans reconstruire le graphe. Un changement sur `HEAD`,
+`refs/` ou `packed-refs` reconstruit le graphe.
+
+**Réentrance :** la surveillance est suspendue pendant qu'une opération lancée
+depuis l'application s'exécute, pour éviter qu'elle ne déclenche son propre
+rafraîchissement en plus de celui de §7.6.
+
+Le rafraîchissement préserve la sélection courante lorsque le nœud sélectionné
+existe encore après reconstruction.
 
 ## 8. Interface en ligne de commande
 
@@ -485,9 +649,19 @@ qu'ils cassent les approches naïves :
 8. Branches distantes avec plusieurs remotes
 9. Stash (2 et 3 parents)
 10. HEAD détaché, dont un cas sur un commit déjà porteur d'un tag
+11. **Merges croisés produisant deux merge-bases** — vérifié : `merge-base -a`
+    en retourne deux, `merge-base` un seul. Le fixture échoue si
+    l'implémentation n'utilise pas la forme « all ».
+12. **Octopus merge** — vérifié : `git merge b1 b2 b3` donne un commit à quatre
+    parents. Détecte toute indexation en dur sur `parents[0..1]`.
+13. **Stashes multiples** (`stash@{0..2}`) à premiers parents différents, dont
+    un dont le premier parent n'est atteignable depuis aucune ref
+14. **Commit portant simultanément** une branche locale, une branche distante
+    et un tag annoté (regroupement combiné)
+15. **Deux historiques indépendants** dans un même dépôt (racines multiples)
 
 Cas limites additionnels : dépôt vide sans aucun commit, dépôt sans branche,
-dépôt à racines multiples (historiques non liés).
+dépôt dont toutes les refs pointent sur un unique commit.
 
 ### 10.3 Invariants du graphe
 
@@ -509,9 +683,18 @@ Assertions sur les propriétés, jamais sur des coordonnées exactes :
 - Aucun chevauchement de rectangles de nœuds.
 - Déterminisme : deux exécutions sur le même dépôt donnent des coordonnées
   identiques.
-- **Stabilité locale** : ajouter une ref à un commit existant ne déplace pas
-  l'ensemble du graphe. Sans cette propriété, l'interface « saute » à chaque
-  opération et devient désagréable à l'usage.
+- Composantes déconnectées (historiques indépendants) : disposées côte à côte,
+  ordonnées par date du commit le plus récent de chaque composante,
+  décroissante. Sans cette règle, le déterminisme ne serait pas garanti.
+
+**Stabilité locale — objectif v1.1, pas invariant v1.** Il serait souhaitable
+qu'ajouter une ref à un commit ne déplace pas tout le graphe. Mais un nœud qui
+passe d'une à trois refs change de hauteur, et un layout global propage ce
+changement en cascade. Exiger cette propriété dès la v1 ferait passer un temps
+disproportionné sur le layout avant d'avoir un graphe qui fonctionne.
+
+La v1 garantit donc « même dépôt → même layout ». La stabilité sous modification
+locale est un objectif ultérieur.
 
 ### 10.5 Opérations et UI
 
@@ -545,5 +728,34 @@ Hors périmètre v1, documentées pour mémoire et par ordre de valeur estimée 
 | Langage | Python 3.13 | Vitesse d'itération sur un projet dont l'UI va beaucoup évoluer. Le travail lourd est en C (libgit2, Qt). |
 | Accès Git | pygit2 | Liaison à libgit2. Évite d'analyser la sortie texte de Git. |
 | UI | PySide6 | LGPL. API quasi identique à PyQt6. Voir D2. |
-| Rendu du graphe | QGraphicsView / QGraphicsScene | Zoom, panoramique et sélection fournis nativement ; adapté à des milliers d'éléments. |
+| Rendu du graphe | QGraphicsView / QGraphicsScene | Zoom, panoramique et sélection fournis nativement. Voir seuils ci-dessous. |
 | Tests | pytest, pytest-qt | Standard. |
+
+### 12.1 Seuils de performance
+
+« Des milliers d'éléments » est trop vague pour servir de critère. Les cibles
+v1, à mesurer sur les fixtures :
+
+| Grandeur | Cible v1 |
+|---|---|
+| Commits dans le DAG chargé | 100 000 |
+| `DisplayNode` après compression | 500 |
+| Arêtes après réduction | 1 000 |
+| Construction du graphe (dépôt à 200 refs) | < 2 s |
+| Reconstruction après opération | < 500 ms |
+| Rendu, zoom, panoramique | fluide, sans seuil chiffré |
+
+La compression est précisément ce qui rend ces chiffres tenables : un dépôt à
+100 000 commits et 200 refs produit quelques centaines de `DisplayNode`, pas
+100 000. Si un dépôt réel dépasse 500 nœuds affichés, c'est la stratégie de
+compression qu'il faudra revoir, pas le moteur de rendu.
+
+### 12.2 Risque connu : empaquetage
+
+`pygit2` embarque libgit2 en binaire natif, avec ses dépendances SSL et SSH.
+Combiné à PySide6 et PyInstaller sur macOS, c'est un point de friction connu.
+
+Le risque est accepté et reporté : empaqueter une application qui n'existe pas
+encore n'a pas de sens. Mais il est explicite — si la distribution à des tiers
+devient un objectif, prévoir un temps de mise au point non négligeable, et le
+valider par un essai d'empaquetage **avant** de s'engager sur une date.
