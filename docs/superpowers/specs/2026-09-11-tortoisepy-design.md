@@ -45,23 +45,24 @@ réellement interactif.*
 - Windows et Linux. Le code évite les dépendances spécifiques à macOS, mais seul
   macOS est testé et supporté en v1.
 
-## 3. Décisions à valider
+## 3. Décisions
 
-Ces points ont été tranchés par défaut faute d'arbitrage explicite. Ils sont
-signalés pour relecture.
+| # | Décision | Statut | Alternative écartée |
+|---|---|---|---|
+| D1 | Menu contextuel **enrichi** : le graphe garde le visuel de TortoiseGit, mais le clic droit propose les actions du Log Dialog (Checkout, Merge, Reset…) | **Validée** | Fidélité stricte : TortoiseGit n'offre que *Show Log* et *Compare Revisions* sur le Revision Graph |
+| D2 | **PySide6** (LGPL) plutôt que PyQt6 (GPL/commercial) | Acceptée par défaut | PyQt6, si la licence GPL n'est pas un problème |
+| D3 | Nom de commande : **`tgraph`** | Acceptée par défaut | `tortoisepy`, `ggraph` — disponibilité PyPI non vérifiée |
+| D4 | Confirmation obligatoire avant toute opération destructrice | Acceptée par défaut | Exécution directe |
 
-| # | Décision prise | Alternative écartée |
-|---|---|---|
-| D1 | Menu contextuel **enrichi** : le graphe garde le visuel de TortoiseGit, mais le clic droit propose les actions du Log Dialog (Checkout, Merge, Reset…) | Fidélité stricte : TortoiseGit n'offre que *Show Log* et *Compare Revisions* sur le Revision Graph |
-| D2 | **PySide6** (LGPL) plutôt que PyQt6 (GPL/commercial) | PyQt6, si la licence GPL n'est pas un problème |
-| D3 | Nom de commande : **`tgraph`** | `tortoisepy`, `ggraph` — disponibilité PyPI non vérifiée |
-| D4 | Lecture seule sur les opérations destructrices sans confirmation explicite | Exécution directe |
+**D1 est la décision structurante, et elle est validée.** TortoiseGit traite le
+Revision Graph comme une vue de consultation : sa documentation ne mentionne que
+deux entrées de menu contextuel. tortoisePy s'en écarte délibérément — c'est ce
+qui distingue le produit, comme énoncé en §1.
 
-**D1 est la décision structurante.** TortoiseGit traite le Revision Graph comme
-une vue de consultation : sa documentation ne mentionne que deux entrées de menu
-contextuel. Le besoin exprimé — « pouvoir y faire toutes les commandes git
-classiques » — impose d'aller au-delà de la fidélité stricte. Si la fidélité
-prime, D1 doit être inversée et le périmètre v1 se réduit fortement.
+D2, D3 et D4 n'ont pas fait l'objet d'un arbitrage explicite mais n'ont pas été
+contestés sur deux relectures. Toutes trois sont peu coûteuses à inverser : D3
+est une ligne de `pyproject.toml`, D4 un paramètre, D2 un changement d'import
+(l'API PyQt6 est quasi identique).
 
 ## 4. Le graphe : sémantique
 
