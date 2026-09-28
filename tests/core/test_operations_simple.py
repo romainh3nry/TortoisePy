@@ -215,3 +215,77 @@ def test_fetch_from_an_unreachable_remote_fails_cleanly(repo):
     result = fetch_remote(repo)
     assert result.success is False
     assert result.git_error
+
+
+def test_fetch_names_the_new_refs(repo, tmp_path):
+    """Savoir CE QUI est arrivé compte plus que savoir que c'est fini."""
+    from tortoisepy.core.operations import fetch_remote
+
+    source = tmp_path / "amont"
+    source.mkdir()
+    run_git(source, "init", "-q", "-b", "master")
+    (source / "f.txt").write_text("base\n")
+    run_git(source, "add", ".")
+    run_git(source, "commit", "-q", "-m", "base")
+
+    repo.remotes.create("origin", f"file://{source}")
+    fetch_remote(repo)
+
+    # nouveautés en amont APRÈS le premier fetch
+    run_git(source, "checkout", "-q", "-b", "feature-x")
+    (source / "g.txt").write_text("suite\n")
+    run_git(source, "add", ".")
+    run_git(source, "commit", "-q", "-m", "suite")
+    run_git(source, "tag", "v2.0")
+
+    result = fetch_remote(repo)
+    assert result.success is True
+    assert "feature-x" in result.summary
+    assert "v2.0" in result.summary
+
+
+def test_fetch_reports_progress(repo, tmp_path):
+    """La progression alimente la barre de l'interface."""
+    from tortoisepy.core.operations import fetch_remote
+
+    source = tmp_path / "amont-progress"
+    source.mkdir()
+    run_git(source, "init", "-q", "-b", "master")
+    for index in range(3):
+        (source / f"f{index}.txt").write_text(f"{index}\n")
+        run_git(source, "add", ".")
+        run_git(source, "commit", "-q", "-m", f"c{index}")
+
+    repo.remotes.create("origin", f"file://{source}")
+
+    seen = []
+    fetch_remote(repo, on_progress=lambda r, t: seen.append((r, t)))
+    assert seen, "le transfert doit rapporter son avancement"
+
+
+def test_short_ref_strips_the_prefix():
+    from tortoisepy.core.operations import _short_ref
+
+    assert _short_ref("refs/remotes/origin/feature") == "origin/feature"
+    assert _short_ref("refs/tags/v1.0") == "v1.0"
+    assert _short_ref("refs/heads/master") == "master"
+    assert _short_ref("inconnu") == "inconnu"
+
+
+def test_fetch_without_changes_says_so(repo, tmp_path):
+    """Deux fetchs d'affilée : le second ne doit rien annoncer de neuf."""
+    from tortoisepy.core.operations import fetch_remote
+
+    source = tmp_path / "amont-stable"
+    source.mkdir()
+    run_git(source, "init", "-q", "-b", "master")
+    (source / "f.txt").write_text("base\n")
+    run_git(source, "add", ".")
+    run_git(source, "commit", "-q", "-m", "base")
+
+    repo.remotes.create("origin", f"file://{source}")
+    fetch_remote(repo)
+
+    second = fetch_remote(repo)
+    assert second.repository_changed is False
+    assert "up to date" in second.summary

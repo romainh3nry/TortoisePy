@@ -51,11 +51,12 @@ def build_graph(
         for oid in sorted(significant)
     )
 
+    # La réduction vient AVANT la simplification : sans elle, des arêtes
+    # redondantes subsistent et font passer des jonctions pour des points
+    # d'articulation — mesuré, 14 jonctions revenaient sur un petit dépôt
+    # qui n'en gardait aucune.
     edges = reduce_transitive_edges(compress_linear_segments(repo, significant))
 
-    # Retire les jonctions sans intérêt visuel : sans cela, un historique où
-    # chaque branche part d'un point différent produit une colonne de rangs
-    # au lieu d'étaler les branches (§6.1).
     simplified = collapse_trivial_junctions(DisplayGraph(nodes=nodes, edges=edges))
 
     # Sur un dépôt réel, les jonctions étaient plus nombreuses que les refs

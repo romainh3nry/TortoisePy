@@ -15,6 +15,7 @@ from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
+    QProgressBar,
     QSplitter,
     QToolBar,
 )
@@ -34,6 +35,7 @@ from tortoisepy.ui.dialogs import (
     show_error,
 )
 from tortoisepy.ui.graph_view import GraphView
+from tortoisepy.ui.tasks import BackgroundTask, FetchWorker
 from tortoisepy.ui.theme import QtMeasurer
 from tortoisepy.ui.watcher import RepositoryWatcher
 
@@ -77,6 +79,17 @@ class MainWindow(QMainWindow):
         self.watcher.graph_changed.connect(self.refresh)
         self.watcher.state_changed.connect(self._refresh_state_only)
         self.watcher.start()
+
+        # Barre de progression discrète : le fetch tourne en fond, la
+        # navigation reste possible pendant ce temps.
+        self.progress = QProgressBar(self)
+        self.progress.setMaximumWidth(220)
+        self.progress.setTextVisible(True)
+        self.progress.hide()
+        self.statusBar().addPermanentWidget(self.progress)
+
+        self._task: BackgroundTask | None = None
+        self._fetch_summary: str | None = None
 
         self.setWindowTitle(self._title())
         self.resize(1400, 850)
@@ -253,6 +266,12 @@ class MainWindow(QMainWindow):
             copy=self._copy_to_clipboard,
         )
 
+        if action == "fetch_remote":
+            # Le fetch part dans un fil séparé : mesuré, il gelait
+            # l'interface 1,6 s même sans rien ramener.
+            self._start_fetch()
+            return
+
         with self.watcher.suspended():
             result = actions.execute_action(action, context)
 
@@ -264,6 +283,65 @@ class MainWindow(QMainWindow):
 
         if not result.success:
             show_error(self, result)
+
+    def _start_fetch(self) -> None:
+        """Lance un fetch en arrière-plan, avec progression."""
+        if self._task is not None and self._task.is_running():
+            self.statusBar().showMessage("Fetch already running", 3000)
+            return
+
+        from tortoisepy.core import operations
+
+        self.progress.setRange(0, 0)  # indéterminé tant que le total est inconnu
+        self.progress.setFormat("Fetching…")
+        self.progress.show()
+        self.statusBar().showMessage("Fetching…")
+
+        worker = FetchWorker(
+            lambda on_progress: operations.fetch_remote(
+                self.repository, on_progress=on_progress
+            )
+        )
+        self._task = BackgroundTask(worker, self)
+        self._task.progress.connect(self._on_fetch_progress)
+        self._task.finished.connect(self._on_fetch_finished)
+
+        # La surveillance reste suspendue jusqu'au retour : sans cela, les
+        # refs écrites par le fetch déclencheraient un rafraîchissement en
+        # plus de celui que nous faisons déjà (§7.9).
+        self.watcher.stop()
+        self._task.start()
+
+    def _on_fetch_progress(self, received: int, total: int) -> None:
+        if total > 0:
+            self.progress.setRange(0, total)
+            self.progress.setValue(received)
+            self.progress.setFormat(f"%v / %m objects")
+        else:
+            self.progress.setRange(0, 0)
+
+    def _on_fetch_finished(self, result) -> None:
+        self.progress.hide()
+        self.watcher.start()
+
+        if not result.success:
+            show_error(self, result)
+            self._update_status()
+            return
+
+        # Le message AVANT le rafraîchissement : celui-ci appelle
+        # `_update_status`, qui écraserait le résumé du fetch. Sur un gros
+        # dépôt, la reconstruction prend plusieurs secondes — le message
+        # disparaîtrait sans avoir été lu.
+        self._fetch_summary = result.summary
+
+        if result.repository_changed:
+            self.refresh()
+
+        # Réaffiché après le refresh, pour qu'il survive à `_update_status`.
+        # Le résumé nomme les refs arrivées : « new: origin/feature, v2.0 ».
+        self.statusBar().showMessage(result.summary, 15000)
+        self._fetch_summary = None
 
     def _copy_to_clipboard(self, text: str) -> None:
         clipboard = QGuiApplication.clipboard()

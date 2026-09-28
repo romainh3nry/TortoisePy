@@ -294,15 +294,84 @@ def _credentials(url: str):
     return None
 
 
+class FetchCallbacks(pygit2.RemoteCallbacks):
+    """Suit un fetch : progression du transfert et refs mises à jour.
+
+    `update_tips` est appelé pour chaque ref créée ou déplacée — c'est ce
+    qui permet de dire à l'utilisateur *ce qui* est arrivé, et pas
+    seulement que quelque chose est arrivé.
+    """
+
+    def __init__(self, url: str, on_progress=None):
+        super().__init__(credentials=_credentials(url))
+        self._on_progress = on_progress
+        self.new_refs: list[str] = []
+        self.updated_refs: list[str] = []
+        self.received_objects = 0
+        self.total_objects = 0
+
+    def transfer_progress(self, stats) -> None:
+        self.received_objects = stats.received_objects
+        self.total_objects = stats.total_objects
+        if self._on_progress is not None:
+            self._on_progress(stats.received_objects, stats.total_objects)
+
+    def update_tips(self, refname: str, old, new) -> None:
+        # Un OID nul signale une ref qui n'existait pas encore.
+        if old is None or str(old) == "0" * 40:
+            self.new_refs.append(refname)
+        else:
+            self.updated_refs.append(refname)
+
+
+def _short_ref(refname: str) -> str:
+    """`refs/remotes/origin/feature` → `origin/feature`, `refs/tags/v1` → `v1`."""
+    for prefix in ("refs/remotes/", "refs/tags/", "refs/heads/"):
+        if refname.startswith(prefix):
+            return refname[len(prefix):]
+    return refname
+
+
+def _describe(callbacks_list: list["FetchCallbacks"]) -> str:
+    """Phrase décrivant ce qu'un fetch a rapporté.
+
+    Nommer les refs, pas seulement les compter : « origin/feature,
+    v2.1 » renseigne, « 2 refs » beaucoup moins.
+    """
+    new = [_short_ref(r) for cb in callbacks_list for r in cb.new_refs]
+    updated = [_short_ref(r) for cb in callbacks_list for r in cb.updated_refs]
+
+    if not new and not updated:
+        return ""
+
+    parts: list[str] = []
+    if new:
+        shown = ", ".join(sorted(new)[:6])
+        more = f" +{len(new) - 6}" if len(new) > 6 else ""
+        parts.append(f"new: {shown}{more}")
+    if updated:
+        shown = ", ".join(sorted(updated)[:6])
+        more = f" +{len(updated) - 6}" if len(updated) > 6 else ""
+        parts.append(f"updated: {shown}{more}")
+
+    return " — ".join(parts)
+
+
 @guarded("Fetch")
 def fetch_remote(
-    repo: pygit2.Repository, remote_name: str | None = None
+    repo: pygit2.Repository,
+    remote_name: str | None = None,
+    on_progress=None,
 ) -> OperationResult:
     """Met à jour les refs distantes.
 
     Ne touche ni à l'arbre de travail, ni aux branches locales : c'est
     l'opération réseau la moins risquée. `remote_name` à `None` traite
     tous les remotes configurés.
+
+    `on_progress(received, total)` est appelé pendant le transfert. Il est
+    invoqué depuis le fil qui exécute le fetch : un appelant Qt doit donc
+    passer par un signal plutôt que toucher à l'interface directement.
     """
     names = (
         [remote_name] if remote_name else list(repo.remotes.names())
@@ -310,18 +379,18 @@ def fetch_remote(
     if not names:
         return failed("Fetch", "no remote configured")
 
-    received = 0
+    tracked: list[FetchCallbacks] = []
     for name in names:
         remote = repo.remotes[name]
-        callbacks = pygit2.RemoteCallbacks(
-            credentials=_credentials(remote.url)
-        )
-        stats = remote.fetch(callbacks=callbacks)
-        received += getattr(stats, "received_objects", 0)
+        callbacks = FetchCallbacks(remote.url, on_progress)
+        remote.fetch(callbacks=callbacks)
+        tracked.append(callbacks)
 
     label = names[0] if len(names) == 1 else f"{len(names)} remotes"
-    if received:
-        return succeeded(f"Fetched {received} objects from {label}")
+    changes = _describe(tracked)
 
-    # Rien reçu : le dépôt est déjà à jour, donc le graphe est inchangé.
+    if changes:
+        return succeeded(f"Fetched from {label} — {changes}")
+
+    # Aucune ref touchée : le dépôt est déjà à jour, le graphe est inchangé.
     return succeeded(f"{label} already up to date", repository_changed=False)

@@ -334,3 +334,123 @@ def test_watcher_is_suspended_during_an_action(window, monkeypatch):
 
     window._run_action("checkout_branch", window.graph.nodes[0])
     assert seen == [True], "la surveillance doit être suspendue"
+
+
+def test_progress_bar_is_hidden_at_rest(window):
+    # `isHidden()` plutôt que `isVisible()` : ce dernier vaut False tant
+    # que la fenêtre parente n'est pas affichée, ce qui n'arrive jamais
+    # en test offscreen.
+    assert window.progress.isHidden() is True
+
+
+def test_fetch_shows_the_progress_bar(window, monkeypatch):
+    """Sans indicateur, rien ne montre que le fetch tourne."""
+    from tortoisepy.core import operations
+    from tortoisepy.core.results import succeeded
+
+    monkeypatch.setattr(
+        operations, "fetch_remote",
+        lambda repo, on_progress=None: succeeded("fini", repository_changed=False),
+    )
+
+    window._start_fetch()
+    assert window.progress.isHidden() is False
+    assert window._task is not None
+    window._task.wait(5000)
+
+
+def test_fetch_hides_the_bar_when_done(window, qtbot, monkeypatch):
+    from tortoisepy.core import operations
+    from tortoisepy.core.results import succeeded
+
+    monkeypatch.setattr(
+        operations, "fetch_remote",
+        lambda repo, on_progress=None: succeeded("fini", repository_changed=False),
+    )
+
+    window._start_fetch()
+    qtbot.waitUntil(lambda: not window._task.is_running(), timeout=5000)
+    qtbot.wait(100)
+    assert window.progress.isHidden() is True
+
+
+def test_fetch_reports_what_arrived(window, qtbot, monkeypatch):
+    """La barre d'état nomme les refs, pas seulement « terminé »."""
+    from tortoisepy.core import operations
+    from tortoisepy.core.results import succeeded
+
+    monkeypatch.setattr(
+        operations, "fetch_remote",
+        lambda repo, on_progress=None: succeeded(
+            "Fetched from origin — new: origin/feature, v2.0",
+            repository_changed=False,
+        ),
+    )
+
+    window._start_fetch()
+    qtbot.waitUntil(lambda: not window._task.is_running(), timeout=5000)
+    qtbot.wait(100)
+    assert "origin/feature" in window.statusBar().currentMessage()
+
+
+def test_second_fetch_is_refused_while_one_runs(window, monkeypatch):
+    """Deux fetchs simultanés se marcheraient dessus."""
+    import time
+    from tortoisepy.core import operations
+    from tortoisepy.core.results import succeeded
+
+    def slow(repo, on_progress=None):
+        time.sleep(0.3)
+        return succeeded("fini", repository_changed=False)
+
+    monkeypatch.setattr(operations, "fetch_remote", slow)
+
+    window._start_fetch()
+    first = window._task
+    window._start_fetch()
+    assert window._task is first, "aucun second fil ne doit démarrer"
+    first.wait(5000)
+
+
+def test_watcher_restarts_after_a_fetch(window, qtbot, monkeypatch):
+    """§7.9 : la surveillance reprend une fois le fetch terminé."""
+    from tortoisepy.core import operations
+    from tortoisepy.core.results import succeeded
+
+    monkeypatch.setattr(
+        operations, "fetch_remote",
+        lambda repo, on_progress=None: succeeded("fini", repository_changed=False),
+    )
+
+    window._start_fetch()
+    qtbot.waitUntil(lambda: not window._task.is_running(), timeout=5000)
+    qtbot.wait(100)
+    assert window.watcher.is_watching() is True
+
+
+def test_fetch_summary_survives_the_refresh(window, qtbot, monkeypatch):
+    """Le résumé doit rester affiché APRÈS la reconstruction du graphe.
+
+    `refresh()` appelle `_update_status()`, qui écrit « Sur <branche> ».
+    Afficher le résumé avant le rafraîchissement le faisait disparaître
+    sans qu'il soit lu — d'autant plus sur un gros dépôt, où la
+    reconstruction prend plusieurs secondes.
+    """
+    from tortoisepy.core import operations
+    from tortoisepy.core.results import succeeded
+
+    monkeypatch.setattr(
+        operations, "fetch_remote",
+        lambda repo, on_progress=None: succeeded(
+            "Fetched from origin — new: origin/feature, v2.0",
+            repository_changed=True,
+        ),
+    )
+
+    window._start_fetch()
+    qtbot.waitUntil(lambda: not window._task.is_running(), timeout=10000)
+    qtbot.wait(100)
+
+    message = window.statusBar().currentMessage()
+    assert "origin/feature" in message
+    assert "v2.0" in message

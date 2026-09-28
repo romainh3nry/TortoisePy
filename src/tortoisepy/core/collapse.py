@@ -115,9 +115,11 @@ def drop_all_junctions(graph: DisplayGraph) -> DisplayGraph:
     # le graphe en morceaux, ce qui est précisément le défaut que §4.2
     # décrit. Vérifié : sans cette réserve, `master` et `feature` se
     # retrouvaient sans aucune arête entre eux.
-    removable = {
-        oid for oid in candidates if not _is_sole_connector(oid, graph)
-    }
+    # Calculé UNE fois : la version précédente reconstruisait le graphe de
+    # voisinage pour chaque jonction candidate — quadratique, 20 s sur un
+    # dépôt de 8 000 nœuds.
+    articulations = _articulation_points(graph)
+    removable = candidates - articulations
     if not removable:
         return graph
 
@@ -167,32 +169,69 @@ def drop_all_junctions(graph: DisplayGraph) -> DisplayGraph:
     return DisplayGraph(nodes=nodes, edges=tuple(edges))
 
 
-def _is_sole_connector(oid: Oid, graph: DisplayGraph) -> bool:
-    """La jonction est-elle l'unique lien entre ses descendants ?
+def _articulation_points(graph: DisplayGraph) -> set[Oid]:
+    """Nœuds dont le retrait couperait le graphe en plusieurs morceaux.
 
-    C'est le cas d'un merge-base : deux branches divergentes n'ont aucun
-    autre chemin entre elles. Le retirer les séparerait (§4.2).
+    Un merge-base entre deux branches divergentes en est un : sans lui,
+    elles n'ont plus aucun lien — le défaut que §4.2 décrit.
+
+    Algorithme de Hopcroft-Tarjan, en un seul parcours en profondeur. Le
+    parcours est itératif : un historique profond ferait déborder la pile
+    d'appels Python en récursif.
     """
-    descendants = [e.descendant for e in graph.edges if e.ancestor == oid]
-    if len(descendants) < 2:
-        return False
-
-    # Existe-t-il un autre chemin entre deux de ces descendants, sans
-    # passer par cette jonction ?
-    neighbours: dict[Oid, set[Oid]] = defaultdict(set)
+    neighbours: dict[Oid, list[Oid]] = defaultdict(list)
     for edge in graph.edges:
-        if oid in (edge.ancestor, edge.descendant):
+        neighbours[edge.ancestor].append(edge.descendant)
+        neighbours[edge.descendant].append(edge.ancestor)
+
+    discovery: dict[Oid, int] = {}
+    low: dict[Oid, int] = {}
+    parent: dict[Oid, Oid | None] = {}
+    articulations: set[Oid] = set()
+    counter = 0
+
+    for start in sorted(node.oid for node in graph.nodes):
+        if start in discovery:
             continue
-        neighbours[edge.ancestor].add(edge.descendant)
-        neighbours[edge.descendant].add(edge.ancestor)
 
-    reachable = {descendants[0]}
-    stack = [descendants[0]]
-    while stack:
-        current = stack.pop()
-        for neighbour in neighbours[current]:
-            if neighbour not in reachable:
-                reachable.add(neighbour)
-                stack.append(neighbour)
+        parent[start] = None
+        root_children = 0
+        stack: list[tuple[Oid, int]] = [(start, 0)]
 
-    return any(d not in reachable for d in descendants[1:])
+        while stack:
+            current, index = stack[-1]
+
+            if index == 0:
+                discovery[current] = low[current] = counter
+                counter += 1
+
+            if index < len(neighbours[current]):
+                stack[-1] = (current, index + 1)
+                neighbour = neighbours[current][index]
+
+                if neighbour not in discovery:
+                    parent[neighbour] = current
+                    if current == start:
+                        root_children += 1
+                    stack.append((neighbour, 0))
+                elif neighbour != parent[current]:
+                    low[current] = min(low[current], discovery[neighbour])
+                continue
+
+            stack.pop()
+            if not stack:
+                continue
+
+            above = stack[-1][0]
+            low[above] = min(low[above], low[current])
+
+            # Un nœud non racine est une articulation si l'un de ses
+            # descendants ne peut remonter plus haut que lui.
+            if above != start and low[current] >= discovery[above]:
+                articulations.add(above)
+
+        # La racine du parcours l'est si elle a plus d'un sous-arbre.
+        if root_children > 1:
+            articulations.add(start)
+
+    return articulations
