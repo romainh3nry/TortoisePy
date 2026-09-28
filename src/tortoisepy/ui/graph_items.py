@@ -31,6 +31,18 @@ TANGENT_SAMPLE = 0.06
 Trop petite, l'échantillon devient sensible aux arrondis ; trop grande,
 il lisse la courbure réelle de l'arrivée."""
 
+LABEL_POSITION = 0.5
+"""Position de l'étiquette le long de la courbe, en fraction."""
+
+LABEL_STEP = 9.0
+"""Pas de décalage vertical quand deux étiquettes se recouvrent."""
+
+LABEL_MAX_SHIFT = 54.0
+"""Décalage maximal : au-delà, l'étiquette s'éloigne trop de son arête."""
+
+LABEL_OFFSET = 14.0
+"""Décalage perpendiculaire, pour que l'étiquette ne soit pas sur le trait."""
+
 STRAIGHT_THRESHOLD = 12.0
 """En dessous de ce décalage horizontal, la liaison est droite.
 
@@ -101,12 +113,62 @@ class EdgeItem(QGraphicsPathItem):
         self.setZValue(-1.0)  # sous les nœuds
         self._build(start, end)
 
+        self._label_item: QGraphicsRectItem | None = None
         if label is not None:
-            text = QGraphicsSimpleTextItem(label, self)
-            text.setFont(theme.node_font())
-            text.setBrush(QBrush(theme.PALETTE.edge))
-            middle = (start + end) / 2.0
-            text.setPos(middle.x() + 4.0, middle.y() - 16.0)
+            self._place_label(label)
+
+    def label_rect(self) -> QRectF | None:
+        """Emprise de l'étiquette en coordonnées de scène, si elle existe."""
+        if self._label_item is None:
+            return None
+        return self._label_item.sceneBoundingRect()
+
+    def shift_label(self, dy: float) -> None:
+        """Décale l'étiquette verticalement, pour éviter une voisine."""
+        if self._label_item is not None:
+            self._label_item.moveBy(0.0, dy)
+
+    def _place_label(self, label: str) -> None:
+        """Pose l'étiquette SUR la courbe, décalée perpendiculairement.
+
+        La placer au milieu du segment start→end alignait les étiquettes de
+        toutes les arêtes partant d'un même nœud : elles se chevauchaient
+        et les courbes leur passaient au travers.
+
+        Ancrée sur la courbe et poussée du côté extérieur, chaque étiquette
+        suit son arête. Un fond opaque la détache des traits qui passent
+        derrière.
+        """
+        path = self.path()
+        anchor = path.pointAtPercent(LABEL_POSITION)
+        before = path.pointAtPercent(max(0.0, LABEL_POSITION - 0.08))
+
+        text = QGraphicsSimpleTextItem(label, self)
+        text.setFont(theme.node_font())
+        text.setBrush(QBrush(theme.PALETTE.edge))
+
+        # Normale à la courbe, orientée vers l'extérieur du virage.
+        dx = anchor.x() - before.x()
+        dy = anchor.y() - before.y()
+        length = math.hypot(dx, dy) or 1.0
+        normal_x = -dy / length
+        normal_y = dx / length
+
+        bounds = text.boundingRect()
+        offset_x = normal_x * LABEL_OFFSET - bounds.width() / 2.0
+        offset_y = normal_y * LABEL_OFFSET - bounds.height() / 2.0
+
+        # Un fond opaque sous le texte : sans lui, les arêtes voisines le
+        # traversent et le rendent illisible.
+        backdrop = QGraphicsRectItem(bounds.adjusted(-3.0, -1.0, 3.0, 1.0), self)
+        backdrop.setBrush(QBrush(theme.PALETTE.background))
+        backdrop.setPen(QPen(Qt.PenStyle.NoPen))
+        backdrop.setPos(anchor.x() + offset_x, anchor.y() + offset_y)
+        backdrop.setZValue(-0.5)
+
+        text.setParentItem(backdrop)
+        text.setPos(0.0, 0.0)
+        self._label_item = backdrop
 
     def _build(self, start: QPointF, end: QPointF) -> None:
         """Trace la liaison, puis la flèche comme élément SÉPARÉ.
@@ -192,11 +254,18 @@ def build_scene(graph: DisplayGraph, layout: LayoutResult) -> QGraphicsScene:
             continue
 
         label = (
-            _skipped_label(edge.skipped_count) if edge.skipped_count else None
+            # +1 : `skipped` compte les commits ENTRE les deux nœuds, sans
+            # celui que porte le nœud d'arrivée. Or il fait bien partie de
+            # l'apport de la branche — c'est ce que montre le panneau au
+            # clic. Sans ce +1, l'étiquette annonçait systématiquement un
+            # commit de moins que la réalité.
+            _skipped_label(edge.skipped_count + 1)
         )
         scene.addItem(
             EdgeItem(edge, _top_center(ancestor), _bottom_center(descendant), label)
         )
+
+    _spread_labels(scene)
 
     rect = scene.itemsBoundingRect()
     scene.setSceneRect(rect.adjusted(-SCENE_MARGIN, -SCENE_MARGIN,
@@ -204,8 +273,52 @@ def build_scene(graph: DisplayGraph, layout: LayoutResult) -> QGraphicsScene:
     return scene
 
 
+def _spread_labels(scene: QGraphicsScene) -> None:
+    """Écarte les étiquettes qui se recouvrent.
+
+    Ancrer chaque étiquette sur sa courbe ne suffit pas là où beaucoup
+    d'arêtes se croisent : mesuré sur un dépôt réel, une dizaine se
+    superposaient encore, devenant illisibles.
+
+    Chaque étiquette est décalée vers le haut jusqu'à ne plus toucher une
+    voisine. Le décalage est borné : au-delà, l'étiquette s'éloignerait
+    trop de son arête pour qu'on sache à laquelle elle appartient.
+    """
+    edges = [i for i in scene.items() if isinstance(i, EdgeItem)]
+    placed: list[QRectF] = []
+
+    # Du haut vers le bas : l'ordre rend le résultat stable d'une
+    # construction à l'autre (§10.4).
+    for item in sorted(
+        edges,
+        key=lambda e: (
+            (e.label_rect().top(), e.label_rect().left())
+            if e.label_rect() is not None
+            else (0.0, 0.0)
+        ),
+    ):
+        rect = item.label_rect()
+        if rect is None:
+            continue
+
+        shift = 0.0
+        while shift < LABEL_MAX_SHIFT:
+            moved = rect.translated(0.0, -shift)
+            if not any(moved.intersects(other) for other in placed):
+                break
+            shift += LABEL_STEP
+
+        item.shift_label(-shift)
+        placed.append(rect.translated(0.0, -shift))
+
+
 def _skipped_label(count: int) -> str:
-    """Étiquette d'une arête compressée, accordée en nombre."""
+    """Étiquette d'une arête, accordée en nombre.
+
+    `count` inclut le commit du nœud d'arrivée : c'est le nombre de commits
+    que la branche a ajoutés depuis le nœud précédent, celui-là même que
+    le panneau latéral encadre au clic.
+    """
     return f"{count} commit" if count == 1 else f"{count} commits"
 
 
