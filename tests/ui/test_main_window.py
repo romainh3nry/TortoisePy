@@ -428,6 +428,57 @@ def test_watcher_restarts_after_a_fetch(window, qtbot, monkeypatch):
     assert window.watcher.is_watching() is True
 
 
+def test_commit_window_opens(window):
+    window.open_commit_window()
+    assert window.commit_window is not None
+    window.commit_window.close()
+
+
+def test_commit_window_is_reused(window):
+    """Deux fenêtres de commit sur le même dépôt se contrediraient."""
+    window.open_commit_window()
+    first = window.commit_window
+    window.open_commit_window()
+    assert window.commit_window is first
+    first.close()
+
+
+def test_graph_refreshes_after_a_commit(window, monkeypatch):
+    from tortoisepy.core.results import succeeded
+
+    window.open_commit_window()
+    before = window.view.scene()
+    window.commit_window.committed.emit(succeeded("fait"))
+    assert window.view.scene() is not before
+    window.commit_window.close()
+
+
+def test_commit_action_is_in_the_menu():
+    """L'entrée doit exister, sinon la fonction est inatteignable."""
+    from tortoisepy.core.model import DisplayNode, NodeKind, Ref, RefType
+    from tortoisepy.core.state import RepositoryState
+    from tortoisepy.ui.context_menu import build_menu_model
+
+    node = DisplayNode(
+        oid="a" * 40,
+        kind=NodeKind.REF,
+        refs=(Ref("feature", RefType.LOCAL_BRANCH, "a" * 40),),
+    )
+    state = RepositoryState(
+        head_oid="b" * 40, head_branch="master", detached=False,
+        has_unstaged_changes=True, has_staged_changes=False,
+        has_conflicts=False, operation_in_progress=None, conflicted_paths=(),
+    )
+
+    def actions(entries):
+        for entry in entries:
+            if entry.action:
+                yield entry.action
+            yield from actions(entry.children)
+
+    assert "open_commit" in set(actions(build_menu_model((node,), state)))
+
+
 def test_fetch_summary_survives_the_refresh(window, qtbot, monkeypatch):
     """Le résumé doit rester affiché APRÈS la reconstruction du graphe.
 
@@ -454,3 +505,43 @@ def test_fetch_summary_survives_the_refresh(window, qtbot, monkeypatch):
     message = window.statusBar().currentMessage()
     assert "origin/feature" in message
     assert "v2.0" in message
+
+
+def test_closed_detail_windows_are_released(window, qtbot):
+    """`_detail_windows` ne doit garder que les fenêtres encore ouvertes.
+
+    Inspecter des commits est l'usage prévu de cette fenêtre : sans retrait
+    au fil de l'eau, la liste grossirait sans fin pendant une session, en
+    retenant à chaque fois un `Repository`, un arbre de fichiers et un
+    `DiffView` déjà fermés à l'écran.
+    """
+    oid = str(window.repository.head.target)
+
+    for _ in range(10):
+        window.open_commit_detail(oid)
+
+    assert len(window._detail_windows) == 10
+
+    for detail in list(window._detail_windows):
+        detail.close()
+
+    # `WA_DeleteOnClose` planifie la destruction via `deleteLater()` : elle
+    # n'a lieu qu'au prochain passage de la boucle d'événements, pas dans
+    # `close()` lui-même. `waitUntil` laisse Qt la traiter.
+    qtbot.waitUntil(lambda: window._detail_windows == [], timeout=1000)
+
+
+def test_open_detail_windows_stay_referenced(window):
+    """À l'inverse : une fenêtre encore ouverte ne doit pas disparaître.
+
+    C'est le piège inverse, déjà rencontré dans ce projet avec
+    `BackgroundTask` : sans référence retenue, le ramasse-miettes Python
+    fermerait la fenêtre aussitôt créée.
+    """
+    oid = str(window.repository.head.target)
+
+    window.open_commit_detail(oid)
+
+    assert len(window._detail_windows) == 1
+    assert not window._detail_windows[0].isHidden()
+    window._detail_windows[0].close()

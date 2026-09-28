@@ -123,6 +123,9 @@ class CommitPanel(QWidget):
 
     commit_selected = Signal(str)
 
+    commit_activated = Signal(str)
+    """Double-clic sur un commit — la fenêtre principale ouvre son détail."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
@@ -144,6 +147,7 @@ class CommitPanel(QWidget):
         )
         self._tree.setFont(QFont(theme.NODE_FONT_FAMILY, 11))
         self._tree.itemSelectionChanged.connect(self._on_selection)
+        self._tree.itemDoubleClicked.connect(self._on_double_click)
         self._tree.setItemDelegate(OwnCommitDelegate(self._tree))
 
         header = self._tree.header()
@@ -225,3 +229,8 @@ class CommitPanel(QWidget):
         oid = self.selected_oid()
         if oid is not None:
             self.commit_selected.emit(oid)
+
+    def _on_double_click(self, item, column) -> None:
+        oid = item.data(0, Qt.ItemDataRole.UserRole)
+        if oid is not None:
+            self.commit_activated.emit(oid)

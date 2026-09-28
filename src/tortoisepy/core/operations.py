@@ -10,7 +10,11 @@ viennent en tâche 4.
 
 from __future__ import annotations
 
+import os
+import stat
+
 import pygit2
+from pygit2.enums import FileMode
 
 from tortoisepy.core.model import Oid
 from tortoisepy.core.results import OperationResult, failed, guarded, succeeded
@@ -394,3 +398,191 @@ def fetch_remote(
 
     # Aucune ref touchée : le dépôt est déjà à jour, le graphe est inchangé.
     return succeeded(f"{label} already up to date", repository_changed=False)
+
+
+# --- Commit d'une sélection (§5, §6.1) ----------------------------------
+
+
+@guarded("Commit")
+def commit_selection(
+    repo: pygit2.Repository, paths: tuple[str, ...], message: str
+) -> OperationResult:
+    """Commite les fichiers indiqués, sans toucher à l'index de l'utilisateur.
+
+    Le commit est bâti sur un index **temporaire en mémoire** : décocher un
+    fichier l'exclut du commit, mais ce que l'utilisateur a préparé au
+    terminal reste intact (§5).
+    """
+    text = message.strip()
+    if not text:
+        return failed("Commit", "empty commit message")
+
+    selected = tuple(p for p in paths if p)
+    if not selected:
+        return failed("Commit", "nothing selected")
+
+    unborn = repo.head_is_unborn
+    index = pygit2.Index()
+
+    if not unborn:
+        # Partir du dernier commit : tout ce qui n'est pas coché reste tel
+        # quel, au lieu de disparaître du nouvel arbre.
+        index.read_tree(repo.revparse_single("HEAD").tree)
+
+    workdir = repo.workdir or ""
+    for path in selected:
+        full = os.path.join(workdir, path)
+        # lexists (pas exists) : un symlink cassé doit rester committable
+        # comme symlink, pas être pris pour un fichier supprimé.
+        if os.path.lexists(full):
+            # Un index détaché ne lit pas le disque : le blob doit être
+            # créé explicitement (vérifié).
+            blob = repo.create_blob_fromworkdir(path)
+            # lstat (pas stat) : ne pas suivre le lien, sinon un symlink
+            # serait vu comme sa cible et perdrait son mode LINK.
+            info = os.lstat(full)
+            if stat.S_ISLNK(info.st_mode):
+                mode = FileMode.LINK
+            elif info.st_mode & stat.S_IXUSR:
+                mode = FileMode.BLOB_EXECUTABLE
+            else:
+                mode = FileMode.BLOB
+            index.add(pygit2.IndexEntry(path, blob, mode))
+        elif not unborn and path in [e.path for e in index]:
+            index.remove(path)  # fichier supprimé
+        else:
+            return failed("Commit", f"file not found: {path}")
+
+    tree = index.write_tree(repo)
+    signature = _signature(repo)
+    parents = [] if unborn else [repo.head.target]
+
+    oid = repo.create_commit(
+        "HEAD", signature, signature, text, tree, parents
+    )
+
+    count = len(selected)
+    plural = "" if count == 1 else "s"
+    return succeeded(f"Committed {count} file{plural} — {str(oid)[:8]}")
+
+
+# --- Push (§7.7, classe « simples ») -------------------------------------
+
+
+class PushCallbacks(pygit2.RemoteCallbacks):
+    """Suit un push : progression de l'envoi et refus du serveur.
+
+    Distincte de `FetchCallbacks` pour deux raisons vérifiées sur
+    pygit2 1.20 :
+
+    - la progression du push passe par `push_transfer_progress`, avec un
+      argument de plus que `transfer_progress` (celle du fetch) ;
+    - le refus du serveur passe par `push_update_reference` et **ne lève
+      pas**. Sans le lire, un push refusé serait annoncé comme réussi.
+    """
+
+    def __init__(self, url: str, on_progress=None):
+        super().__init__(credentials=_credentials(url))
+        self._on_progress = on_progress
+        self.rejections: list[tuple[str, str]] = []
+
+    def push_transfer_progress(
+        self, objects_pushed: int, total_objects: int, bytes_pushed: int
+    ) -> None:
+        if self._on_progress is not None:
+            self._on_progress(objects_pushed, total_objects)
+
+    def push_update_reference(self, refname: str, message: str | None) -> None:
+        # `message is None` vaut acceptation — vérifié sur un push réussi.
+        if message is not None:
+            self.rejections.append((refname, message))
+
+
+def _default_remote(repo: pygit2.Repository, branch: str) -> str | None:
+    """Remote vers lequel pousser cette branche.
+
+    L'ordre compte : `repo.remotes.names()` est alphabétique, donc prendre
+    le premier pousserait vers `aaa-upstream` plutôt que vers `origin`
+    (vérifié) — un danger réel sur le schéma classique du fork, où
+    `origin` est le dépôt de l'utilisateur et un autre remote celui
+    d'autrui. On suit d'abord le suivi configuré de la branche, qui est
+    l'intention explicite de l'utilisateur ; `origin` par convention
+    ensuite ; l'ordre alphabétique seulement en dernier recours.
+    """
+    try:
+        upstream = repo.branches[branch].upstream
+        if upstream is not None and upstream.remote_name:
+            return upstream.remote_name
+    except (KeyError, pygit2.GitError):
+        pass
+
+    names = list(repo.remotes.names())
+    if "origin" in names:
+        return "origin"
+    return names[0] if names else None
+
+
+@guarded("Push")
+def push_branch(
+    repo: pygit2.Repository,
+    remote_name: str | None = None,
+    on_progress=None,
+) -> OperationResult:
+    """Pousse la branche courante vers son remote.
+
+    Jamais de push forcé : `--force` réécrit l'historique d'autrui et
+    aucune interface de tortoisePy ne l'expose (§6.2). Un push rejeté se
+    résout en récupérant d'abord les changements distants.
+    """
+    if repo.head_is_unborn or repo.head_is_detached:
+        return failed("Push", "no branch to push (detached or unborn HEAD)")
+
+    branch = repo.head.shorthand
+
+    if remote_name:
+        name = remote_name
+    else:
+        name = _default_remote(repo, branch)
+    if name is None:
+        return failed("Push", "no remote configured")
+
+    remote = repo.remotes[name]
+
+    # `push_url` prime sur `url` pour l'identifiant passé à `PushCallbacks`
+    # (donc à `_credentials`) : un remote push-only laisse `url` à `None`.
+    push_url = remote.push_url or remote.url
+    if push_url is None:
+        return failed("Push", f"remote '{remote.name}' has no push URL")
+
+    # Vérifié sur pygit2 1.20 : quand `remote.url` est `None` (remote
+    # configuré avec seulement `pushurl`), `git_remote_push` plante par un
+    # segfault côté libgit2 — un `NoneType`/`GitError` ne suffirait pas à
+    # s'en protéger, un `try/except` Python ne rattrape pas un segfault.
+    # Le `git` en ligne de commande gère ce cas sans problème ; c'est une
+    # limite de pygit2/libgit2, pas de tortoisePy. On refuse donc avant
+    # d'appeler `remote.push()`, plutôt que de risquer de faire planter
+    # tout le processus (et l'interface graphique avec).
+    if remote.url is None:
+        return failed(
+            "Push",
+            f"remote '{remote.name}' has no fetch URL (pushurl-only "
+            "remotes are not supported: pygit2/libgit2 1.20 crashes on "
+            "push in this configuration)",
+        )
+
+    callbacks = PushCallbacks(push_url, on_progress)
+
+    # Construit depuis la branche courante : coder « master » en dur
+    # échouerait sur un dépôt cloné récemment, qui est sur « main ».
+    remote.push([f"refs/heads/{branch}:refs/heads/{branch}"], callbacks=callbacks)
+
+    # `remote.push()` n'a pas levé, mais le serveur a pu refuser la ref :
+    # annoncer un succès ici serait un mensonge.
+    if callbacks.rejections:
+        detail = "; ".join(
+            f"{_short_ref(ref)}: {message}"
+            for ref, message in callbacks.rejections
+        )
+        return failed("Push", detail)
+
+    return succeeded(f"Pushed {branch} to {remote.name}")

@@ -153,6 +153,11 @@ def _show_log(ctx: ActionContext) -> OperationResult | None:
     return succeeded("Show log", repository_changed=False)
 
 
+def _open_commit(ctx: ActionContext) -> OperationResult | None:
+    """Ouvre la fenêtre de commit. La fenêtre principale s'en charge."""
+    return None
+
+
 def _not_available(ctx: ActionContext) -> OperationResult | None:
     """Actions prévues par le menu mais hors périmètre v1 (§11)."""
     return None
@@ -172,6 +177,7 @@ ACTION_HANDLERS: dict[str, Callable[[ActionContext], OperationResult | None]] = 
     "abort_operation": _abort_operation,
     "copy_hash": _copy_hash,
     "show_log": _show_log,
+    "open_commit": _open_commit,
     # Hors périmètre v1 : le diff visuel est délégué (§7.4, §11).
     "compare_revisions": _not_available,
     "show_log_of_differences": _not_available,

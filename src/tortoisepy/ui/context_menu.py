@@ -162,6 +162,16 @@ def _single_node_menu(
         )
 
     entries.append(SEPARATOR)
+    entries.append(
+        MenuEntry(
+            "Commit…",
+            "open_commit",
+            # Toujours actif : c'est une fenêtre de consultation, même
+            # sans modification en cours.
+            enabled=True,
+        )
+    )
+    entries.append(SEPARATOR)
     entries.append(MenuEntry("Show log", "show_log"))
     entries.append(MenuEntry("Copy SHA-1 to clipboard", "copy_hash"))
 

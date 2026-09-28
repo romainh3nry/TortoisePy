@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from PySide6.QtGui import QColor, QFont, QFontMetricsF
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPalette
+from PySide6.QtWidgets import QApplication
 
 from tortoisepy.core.model import DisplayNode, NodeKind, RefType
 from tortoisepy.layout.metrics import Size
@@ -48,6 +49,85 @@ class Palette:
 
 
 PALETTE = Palette()
+
+
+DIFF_ADDED = QColor(228, 245, 228)
+"""Fond des lignes ajoutées, thème clair — vert pâle, lisible en texte noir."""
+
+DIFF_REMOVED = QColor(250, 228, 228)
+"""Fond des lignes supprimées, thème clair — rouge pâle."""
+
+DIFF_ADDED_TEXT = QColor(22, 101, 52)
+"""Texte des lignes ajoutées, thème clair — vert foncé (6.3:1 sur son fond)."""
+
+DIFF_REMOVED_TEXT = QColor(140, 26, 30)
+"""Texte des lignes supprimées, thème clair — rouge foncé (7.6:1)."""
+
+DIFF_ADDED_DARK = QColor(26, 58, 34)
+"""Fond des lignes ajoutées, thème sombre.
+
+Les fonds pâles du thème clair sont inutilisables ici : mesuré, du texte
+clair (238, 238, 238) sur (228, 245, 228) donne **1.02:1** — la ligne
+ajoutée disparaît sous son propre surlignage. Ce vert sombre remonte à
+10.8:1."""
+
+DIFF_REMOVED_DARK = QColor(70, 28, 32)
+"""Fond des lignes supprimées, thème sombre (12.5:1 en texte clair)."""
+
+DIFF_ADDED_TEXT_DARK = QColor(126, 231, 135)
+"""Texte des lignes ajoutées, thème sombre — vert vif (8.2:1 sur son fond)."""
+
+DIFF_REMOVED_TEXT_DARK = QColor(255, 123, 114)
+"""Texte des lignes supprimées, thème sombre — rouge vif (5.8:1)."""
+
+DIFF_HEADER = QColor(110, 110, 122)
+"""Couleur des en-têtes de hunk (`@@ -14,7 +14,9 @@`).
+
+Écart avec la maquette d'origine (120, 120, 130) : son contraste sur fond
+blanc est de 4.37:1, sous le seuil WCAG AA de 4.5:1 pour du texte normal.
+(110, 110, 122) monte à 5.03:1 tout en restant visuellement gris — un
+choix plus sûr, l'utilisateur ayant déjà rejeté une teinte trop pâle
+ailleurs dans ce projet ("on voit rien")."""
+
+DIFF_HEADER_DARK = QColor(150, 150, 162)
+"""En-têtes de hunk, thème sombre — le gris du thème clair y est trop sombre."""
+
+
+def is_dark_theme() -> bool:
+    """Le système est-il en thème sombre ?
+
+    Lu sur la palette Qt plutôt que codé en dur : macOS bascule le thème
+    sans prévenir l'application, et une couleur pensée pour un fond blanc
+    devient illisible sur fond noir (mesuré : 1.02:1).
+    """
+    app = QApplication.instance()
+    if app is None:
+        return False
+    return app.palette().color(QPalette.ColorRole.Base).lightness() < 128
+
+
+def diff_colors() -> dict[str, QColor | None]:
+    """Couleurs du diff adaptées au thème courant.
+
+    Renvoie, pour chaque origine de ligne (`+`, `-`, contexte), le fond et
+    la couleur du texte. Le contexte n'a pas de fond : le surligner
+    attirerait l'œil sur ce qui n'a pas changé.
+    """
+    if is_dark_theme():
+        return {
+            "added_bg": DIFF_ADDED_DARK,
+            "added_fg": DIFF_ADDED_TEXT_DARK,
+            "removed_bg": DIFF_REMOVED_DARK,
+            "removed_fg": DIFF_REMOVED_TEXT_DARK,
+            "header_fg": DIFF_HEADER_DARK,
+        }
+    return {
+        "added_bg": DIFF_ADDED,
+        "added_fg": DIFF_ADDED_TEXT,
+        "removed_bg": DIFF_REMOVED,
+        "removed_fg": DIFF_REMOVED_TEXT,
+        "header_fg": DIFF_HEADER,
+    }
 
 
 def node_color(node: DisplayNode, selected: bool) -> QColor:

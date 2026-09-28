@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pygit2
+import shiboken6
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
@@ -26,7 +27,9 @@ from tortoisepy.core.state import read_state
 from tortoisepy.layout.engine import layout_graph
 from tortoisepy.ui import actions
 from tortoisepy.ui.actions import ActionContext
+from tortoisepy.ui.commit_detail_window import CommitDetailWindow
 from tortoisepy.ui.commit_panel import CommitPanel
+from tortoisepy.ui.commit_window import CommitWindow
 from tortoisepy.ui.context_menu import MenuEntry, build_menu_model
 from tortoisepy.ui.dialogs import (
     ask_name,
@@ -38,6 +41,16 @@ from tortoisepy.ui.graph_view import GraphView
 from tortoisepy.ui.tasks import BackgroundTask, FetchWorker
 from tortoisepy.ui.theme import QtMeasurer
 from tortoisepy.ui.watcher import RepositoryWatcher
+
+
+def _still_alive(widget) -> bool:
+    """Le widget Qt existe-t-il encore côté C++ ?
+
+    Un wrapper Python peut survivre à l'objet C++ que Qt a détruit
+    (`WA_DeleteOnClose`) : y toucher lève alors un `RuntimeError` de
+    shiboken. `isValid` est le seul test fiable.
+    """
+    return shiboken6.isValid(widget)
 
 
 class MainWindow(QMainWindow):
@@ -65,6 +78,8 @@ class MainWindow(QMainWindow):
         # splitter plutôt qu'une largeur fixe : la place à donner au graphe
         # dépend de la longueur des noms de branches.
         self.commit_panel = CommitPanel(self)
+        self.commit_panel.commit_activated.connect(self.open_commit_detail)
+        self._detail_windows: list[CommitDetailWindow] = []
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.splitter.addWidget(self.view)
         self.splitter.addWidget(self.commit_panel)
@@ -90,6 +105,7 @@ class MainWindow(QMainWindow):
 
         self._task: BackgroundTask | None = None
         self._fetch_summary: str | None = None
+        self.commit_window: CommitWindow | None = None
 
         self.setWindowTitle(self._title())
         self.resize(1400, 850)
@@ -170,6 +186,7 @@ class MainWindow(QMainWindow):
             ("Zoom 100 %", QKeySequence("Ctrl+0"), self.view.reset_zoom),
             ("Ajuster à la fenêtre", QKeySequence("Ctrl+9"), self.view.fit_to_window),
             ("Rafraîchir", QKeySequence.StandardKey.Refresh, self.refresh),
+            ("Commit…", QKeySequence("Ctrl+K"), self.open_commit_window),
         ]
 
         for label, shortcut, slot in specs:
@@ -235,6 +252,66 @@ class MainWindow(QMainWindow):
                     )
                 )
 
+    def open_commit_window(self) -> None:
+        """Ouvre la fenêtre de commit, ou ramène celle déjà ouverte.
+
+        Une seule à la fois : deux fenêtres sur le même dépôt afficheraient
+        des états divergents.
+        """
+        if self.commit_window is not None and self.commit_window.isVisible():
+            self.commit_window.raise_()
+            self.commit_window.activateWindow()
+            return
+
+        self.commit_window = CommitWindow(self.repository, self)
+        self.commit_window.committed.connect(self._on_committed)
+        self.commit_window.show()
+
+    def _on_committed(self, result) -> None:
+        """Un commit change l'historique : le graphe doit le refléter."""
+        if result.repository_changed:
+            self.refresh()
+
+    def open_commit_detail(self, oid: str) -> None:
+        """Ouvre les changements d'un commit.
+
+        Plusieurs fenêtres sont permises — contrairement à la fenêtre de
+        commit : comparer deux commits côte à côte est légitime, et elles
+        sont en lecture seule. La liste garde une référence, sans quoi le
+        ramasse-miettes fermerait la fenêtre aussitôt (piège vérifié dans ce
+        projet, cf. `BackgroundTask`).
+
+        Mais la même liste ne doit garder QUE les fenêtres encore ouvertes :
+        sans retrait, elle grossirait sans fin au fil d'une session où
+        inspecter des commits est justement l'usage prévu — chaque fenêtre
+        fermée resterait vivante en mémoire, avec son `Repository`, son
+        arbre de fichiers et son `DiffView`. `WA_DeleteOnClose` fait que
+        `close()` détruit réellement le widget Qt ; `destroyed` prévient
+        alors pour qu'on l'enlève de la liste.
+        """
+        window = CommitDetailWindow(self.repository, oid, self)
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        # `destroyed` porte l'objet détruit : le prendre en argument plutôt
+        # que de capturer `window` dans la fermeture évite de garder une
+        # référence forte sur ce qu'on veut justement laisser mourir.
+        window.destroyed.connect(self._forget_detail_window)
+        self._detail_windows.append(window)
+        window.show()
+
+    def _forget_detail_window(self, window=None) -> None:
+        """Retire de la liste les fenêtres de détail déjà détruites.
+
+        Ne pas viser `window` directement : son wrapper Python peut survivre
+        à l'objet C++, et le toucher lèverait alors un `RuntimeError` de
+        shiboken. On filtre donc sur la validité, ce qui reste correct même
+        si le signal arrive deux fois.
+        """
+        self._detail_windows = [
+            candidate
+            for candidate in self._detail_windows
+            if candidate is not window and _still_alive(candidate)
+        ]
+
     def _selected_node(self):
         """Le nœud sélectionné, ou None s'il n'y en a pas exactement un."""
         if self.graph is None:
@@ -270,6 +347,10 @@ class MainWindow(QMainWindow):
             # Le fetch part dans un fil séparé : mesuré, il gelait
             # l'interface 1,6 s même sans rien ramener.
             self._start_fetch()
+            return
+
+        if action == "open_commit":
+            self.open_commit_window()
             return
 
         with self.watcher.suspended():

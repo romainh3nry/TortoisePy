@@ -203,3 +203,26 @@ def test_rows_outside_the_model_are_not_own(panel):
 
     assert _is_own(model, -1, root) is False
     assert _is_own(model, 99, root) is False
+
+
+def test_double_click_emits_commit_activated(qtbot, panel):
+    """Le panneau signale l'activation ; la fenêtre principale décide."""
+    from tortoisepy.core.commits import CommitInfo
+    from datetime import datetime
+
+    # `short_oid` et `is_merge` sont des propriétés calculées, pas des
+    # champs : `author_email` et `parent_count` sont requis (vérifié).
+    panel.show_commits(
+        "main",
+        (
+            CommitInfo(
+                oid="a" * 40, summary="sujet", message="sujet",
+                author_name="Alice", author_email="alice@example.com",
+                when=datetime(2026, 9, 28), parent_count=1, own=True,
+            ),
+        ),
+    )
+
+    with qtbot.waitSignal(panel.commit_activated, timeout=1000) as blocker:
+        panel._tree.itemDoubleClicked.emit(panel._tree.topLevelItem(0), 0)
+    assert blocker.args == ["a" * 40]
