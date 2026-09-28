@@ -37,6 +37,10 @@ def repo(tmp_path):
 def window(qtbot, repo):
     w = CommitWindow(repo)
     qtbot.addWidget(w)
+    # `isHidden()` d'une fenêtre jamais affichée vaut déjà `True` — sans ce
+    # `show()`, les tests de fermeture/maintien de la fenêtre (plus bas)
+    # seraient vrais par accident, avant même d'exécuter la logique testée.
+    w.show()
     return w
 
 
@@ -242,3 +246,84 @@ def test_empty_repository_opens_without_crashing(qtbot, tmp_path):
     w = CommitWindow(pygit2.Repository(str(path)))
     qtbot.addWidget(w)
     assert w.file_count() == 0
+
+
+def test_window_closes_after_a_successful_commit(window, repo):
+    window.set_message("un message")
+    window.commit()
+    assert window.isHidden() is True
+
+
+def test_window_stays_open_after_a_failed_commit(window, repo, monkeypatch):
+    """Review Focus 4 : fermer ferait perdre la rédaction."""
+    from tortoisepy.core.results import failed
+    from tortoisepy.ui import commit_window as module
+
+    monkeypatch.setattr(module, "show_error", lambda *a, **k: None)
+    monkeypatch.setattr(
+        module.operations,
+        "commit_selection",
+        lambda *a, **k: failed("Commit", "refus simulé"),
+    )
+
+    window.set_message("un message que je ne veux pas perdre")
+    window.commit()
+
+    assert window.isHidden() is False
+    assert window.message() == "un message que je ne veux pas perdre"
+
+
+def test_window_closes_when_commit_succeeds_but_push_fails(
+    window, repo, monkeypatch
+):
+    """Review Focus 3 : le commit est acquis, donc on rend la main."""
+    from tortoisepy.core.results import failed
+    from tortoisepy.ui import commit_window as module
+
+    monkeypatch.setattr(module, "confirm", lambda *a, **k: True)
+    monkeypatch.setattr(module, "show_error", lambda *a, **k: None)
+    monkeypatch.setattr(
+        module.operations,
+        "push_branch",
+        lambda *a, **k: failed("Push", "rejeté par le serveur"),
+    )
+
+    window.set_message("un message")
+    window.commit_and_push()
+
+    assert window.isHidden() is True
+
+
+def test_committed_signal_carries_the_push_result(window, repo, monkeypatch):
+    """La fenêtre principale doit pouvoir dire « poussé » ou « non poussé »."""
+    from tortoisepy.core.results import succeeded
+    from tortoisepy.ui import commit_window as module
+
+    monkeypatch.setattr(module, "confirm", lambda *a, **k: True)
+    monkeypatch.setattr(
+        module.operations,
+        "push_branch",
+        lambda *a, **k: succeeded("Pushed main to origin"),
+    )
+
+    recus = []
+    window.committed.connect(lambda *args: recus.append(args))
+    window.set_message("un message")
+    window.commit_and_push()
+
+    assert recus, "le signal doit être émis"
+    commit_result, push_result = recus[0]
+    assert commit_result.success is True
+    assert push_result is not None and push_result.success is True
+
+
+def test_committed_signal_has_no_push_result_for_a_plain_commit(window, repo):
+    recus = []
+    window.committed.connect(lambda *args: recus.append(args))
+    window.set_message("un message")
+    window.commit()
+
+    assert recus
+    commit_result, push_result = recus[0]
+    assert commit_result.success is True
+    assert push_result is None

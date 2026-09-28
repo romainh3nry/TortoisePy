@@ -51,6 +51,16 @@ class Palette:
 PALETTE = Palette()
 
 
+UNPUSHED_MARKER = QColor(230, 140, 30)
+"""Pastille des branches ayant des commits non poussés.
+
+Orange : ni le vert de HEAD, ni le jaune des branches locales, ni le rouge
+de la sélection — la marque doit se lire comme une information nouvelle,
+pas comme un changement d'état du nœud."""
+
+UNPUSHED_MARKER_RADIUS = 4.0
+
+
 DIFF_ADDED = QColor(228, 245, 228)
 """Fond des lignes ajoutées, thème clair — vert pâle, lisible en texte noir."""
 

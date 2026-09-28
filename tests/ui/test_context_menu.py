@@ -149,3 +149,28 @@ def test_every_entry_has_a_label():
         assert entry.label
         for child in entry.children:
             assert child.label
+
+
+def test_push_is_in_the_menu():
+    from tortoisepy.core.model import DisplayNode, NodeKind, Ref, RefType
+    from tortoisepy.core.state import RepositoryState
+    from tortoisepy.ui.context_menu import build_menu_model
+
+    node = DisplayNode(
+        oid="a" * 40,
+        kind=NodeKind.REF,
+        refs=(Ref("main", RefType.LOCAL_BRANCH, "a" * 40),),
+    )
+    state = RepositoryState(
+        head_oid="a" * 40, head_branch="main", detached=False,
+        has_unstaged_changes=False, has_staged_changes=False,
+        has_conflicts=False, operation_in_progress=None, conflicted_paths=(),
+    )
+
+    def actions(entries):
+        for entry in entries:
+            if entry.action:
+                yield entry.action
+            yield from actions(entry.children)
+
+    assert "push_branch" in set(actions(build_menu_model((node,), state)))

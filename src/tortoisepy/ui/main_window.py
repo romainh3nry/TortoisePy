@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from tortoisepy.core.commits import commits_for_node
 from tortoisepy.core.graph import build_graph
+from tortoisepy.core.push_state import push_state, unpushed_oids
 from tortoisepy.core.state import read_state
 from tortoisepy.layout.engine import layout_graph
 from tortoisepy.ui import actions
@@ -32,6 +33,7 @@ from tortoisepy.ui.commit_panel import CommitPanel
 from tortoisepy.ui.commit_window import CommitWindow
 from tortoisepy.ui.context_menu import MenuEntry, build_menu_model
 from tortoisepy.ui.dialogs import (
+    ConfirmationRequest,
     ask_name,
     ask_reset_mode,
     confirm,
@@ -115,10 +117,14 @@ class MainWindow(QMainWindow):
         """Reconstruit le graphe et relit l'état (§7.6, §7.9)."""
         self.graph = build_graph(self.repository)
         self.state = read_state(self.repository)
-        self.view.show_graph(self.graph, layout_graph(self.graph, self.measurer))
+        unpushed = unpushed_oids(self.repository)
+        self.view.show_graph(
+            self.graph, layout_graph(self.graph, self.measurer), unpushed
+        )
         self.commit_panel.clear()
         self._center_on_head()
         self._update_status()
+        self._update_push_action()
 
     def closeEvent(self, event) -> None:
         self.watcher.stop()
@@ -159,7 +165,9 @@ class MainWindow(QMainWindow):
 
         label = " | ".join(r.name for r in node.refs) or f"[{oid[:8]}]"
         self.commit_panel.show_commits(
-            label, commits_for_node(self.repository, self.graph, oid)
+            label,
+            commits_for_node(self.repository, self.graph, oid),
+            unpushed=unpushed_oids(self.repository),
         )
 
     def _refresh_state_only(self) -> None:
@@ -187,6 +195,7 @@ class MainWindow(QMainWindow):
             ("Ajuster à la fenêtre", QKeySequence("Ctrl+9"), self.view.fit_to_window),
             ("Rafraîchir", QKeySequence.StandardKey.Refresh, self.refresh),
             ("Commit…", QKeySequence("Ctrl+K"), self.open_commit_window),
+            ("Push", QKeySequence("Ctrl+P"), self._start_push),
         ]
 
         for label, shortcut, slot in specs:
@@ -195,6 +204,8 @@ class MainWindow(QMainWindow):
             action.triggered.connect(slot)
             self.addAction(action)
             self.toolbar.addAction(action)
+            if label == "Push":
+                self.push_action = action
 
     def _update_status(self) -> None:
         if self.state is None:
@@ -267,10 +278,27 @@ class MainWindow(QMainWindow):
         self.commit_window.committed.connect(self._on_committed)
         self.commit_window.show()
 
-    def _on_committed(self, result) -> None:
-        """Un commit change l'historique : le graphe doit le refléter."""
+    def _on_committed(self, result, pushed=None) -> None:
+        """Un commit change l'historique : le graphe doit le refléter.
+
+        Le résultat va dans la barre d'état, là où le fetch annonce déjà les
+        siens : c'est le même genre d'information, au même endroit (§4).
+        """
         if result.repository_changed:
             self.refresh()
+
+        if not result.success:
+            return  # la fenêtre de commit a déjà ouvert son dialogue
+
+        message = result.summary
+        if pushed is not None:
+            message += (
+                f", {pushed.summary.lower()}"
+                if pushed.success
+                else " (push failed)"
+            )
+
+        self.statusBar().showMessage(message, 15000)
 
     def open_commit_detail(self, oid: str) -> None:
         """Ouvre les changements d'un commit.
@@ -353,6 +381,10 @@ class MainWindow(QMainWindow):
             self.open_commit_window()
             return
 
+        if action == "push_branch":
+            self._start_push()
+            return
+
         with self.watcher.suspended():
             result = actions.execute_action(action, context)
 
@@ -423,6 +455,65 @@ class MainWindow(QMainWindow):
         # Le résumé nomme les refs arrivées : « new: origin/feature, v2.0 ».
         self.statusBar().showMessage(result.summary, 15000)
         self._fetch_summary = None
+
+    def _update_push_action(self) -> None:
+        """Grise le bouton quand il n'y a rien à pousser.
+
+        Un bouton actif qui ne fait rien apprend à ignorer l'interface ;
+        l'infobulle dit pourquoi il est grisé (§6.2).
+        """
+        state = push_state(self.repository)
+        self.push_action.setEnabled(state.can_push)
+        if state.can_push:
+            self.push_action.setToolTip(
+                f"Push {state.unpushed_count} commit(s) to {state.remote_name}"
+            )
+        else:
+            self.push_action.setToolTip(state.reason or "nothing to push")
+
+    def _start_push(self) -> None:
+        """Pousse en arrière-plan, comme le fetch (§6.3)."""
+        if self._task is not None and self._task.is_running():
+            self.statusBar().showMessage("A background task is running", 3000)
+            return
+
+        state = push_state(self.repository)
+        request = ConfirmationRequest(
+            title="Push",
+            message=(
+                f"git push {state.remote_name} {state.branch}\n\n"
+                f"{state.unpushed_count} commit(s) will be sent to the shared "
+                "server. This cannot be undone on your own."
+            ),
+            destructive=False,
+        )
+        if not confirm(self, request):
+            return
+
+        from tortoisepy.core import operations
+
+        self.progress.setRange(0, 0)
+        self.progress.setFormat("Pushing…")
+        self.progress.show()
+        self.statusBar().showMessage("Pushing…")
+
+        worker = FetchWorker(
+            lambda on_progress: operations.push_branch(
+                self.repository, on_progress=on_progress
+            )
+        )
+        self._task = BackgroundTask(worker, self)
+        self._task.progress.connect(self._on_fetch_progress)
+        self._task.finished.connect(self._on_push_finished)
+        self._task.start()
+
+    def _on_push_finished(self, result) -> None:
+        """Le graphe change : la branche de suivi a avancé."""
+        self.progress.hide()
+        self.refresh()          # d'abord : `refresh` réécrit la barre d'état
+        self.statusBar().showMessage(result.summary, 15000)
+        if not result.success:
+            show_error(self, result)
 
     def _copy_to_clipboard(self, text: str) -> None:
         clipboard = QGuiApplication.clipboard()

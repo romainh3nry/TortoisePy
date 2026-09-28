@@ -34,9 +34,14 @@ class GraphView(QGraphicsView):
         )
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
 
-    def show_graph(self, graph: DisplayGraph, layout: LayoutResult) -> None:
+    def show_graph(
+        self,
+        graph: DisplayGraph,
+        layout: LayoutResult,
+        unpushed: frozenset[str] = frozenset(),
+    ) -> None:
         """Remplace le contenu par un nouveau graphe."""
-        scene = build_scene(graph, layout)
+        scene = build_scene(graph, layout, unpushed)
         scene.selectionChanged.connect(self.selection_changed.emit)
 
         previous = self.scene()

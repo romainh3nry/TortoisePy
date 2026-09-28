@@ -132,6 +132,13 @@ def _single_node_menu(
                     # merge en cours, et sur un nœud tag ou stash.
                     enabled=True,
                 ),
+                MenuEntry(
+                    "Push",
+                    "push_branch",
+                    # Grisé hors de la branche courante : pousser une autre
+                    # branche demanderait un checkout, qui existe déjà (§9).
+                    enabled=is_current,
+                ),
             ),
         ),
         MenuEntry(

@@ -226,3 +226,64 @@ def test_double_click_emits_commit_activated(qtbot, panel):
     with qtbot.waitSignal(panel.commit_activated, timeout=1000) as blocker:
         panel._tree.itemDoubleClicked.emit(panel._tree.topLevelItem(0), 0)
     assert blocker.args == ["a" * 40]
+
+
+def test_unpushed_commits_are_marked(qtbot, panel):
+    from datetime import datetime
+
+    from tortoisepy.core.commits import CommitInfo
+
+    commits = (
+        CommitInfo(
+            oid="a" * 40, summary="pas encore poussé", message="m",
+            author_name="A", author_email="a@a",
+            when=datetime(2026, 9, 28), parent_count=1,
+        ),
+        CommitInfo(
+            oid="b" * 40, summary="déjà poussé", message="m",
+            author_name="A", author_email="a@a",
+            when=datetime(2026, 9, 28), parent_count=1,
+        ),
+    )
+    panel.show_commits("main", commits, unpushed=frozenset({"a" * 40}))
+
+    assert panel.is_unpushed("a" * 40) is True
+    assert panel.is_unpushed("b" * 40) is False
+
+
+def test_title_counts_unpushed_commits(qtbot, panel):
+    from datetime import datetime
+
+    from tortoisepy.core.commits import CommitInfo
+
+    commits = tuple(
+        CommitInfo(
+            oid=chr(97 + i) * 40, summary=f"c{i}", message="m",
+            author_name="A", author_email="a@a",
+            when=datetime(2026, 9, 28), parent_count=1,
+        )
+        for i in range(3)
+    )
+    panel.show_commits(
+        "main", commits, unpushed=frozenset({"a" * 40, "b" * 40})
+    )
+    assert "2" in panel.title()
+
+
+def test_show_commits_without_unpushed_still_works(qtbot, panel):
+    """Compatibilité : l'argument est optionnel."""
+    from datetime import datetime
+
+    from tortoisepy.core.commits import CommitInfo
+
+    panel.show_commits(
+        "main",
+        (
+            CommitInfo(
+                oid="a" * 40, summary="c", message="m",
+                author_name="A", author_email="a@a",
+                when=datetime(2026, 9, 28), parent_count=1,
+            ),
+        ),
+    )
+    assert panel.count() == 1

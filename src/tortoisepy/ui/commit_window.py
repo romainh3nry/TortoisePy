@@ -47,8 +47,13 @@ leur côté : double garde, comme demandé en revue.
 class CommitWindow(QMainWindow):
     """Voir, stager, commiter, pousser."""
 
-    committed = Signal(object)
-    """`OperationResult` — la fenêtre principale s'en sert pour rafraîchir."""
+    committed = Signal(object, object)
+    """(`OperationResult` du commit, `OperationResult` du push ou `None`).
+
+    Deux arguments plutôt qu'un : la fenêtre principale doit distinguer
+    « commité » de « commité et poussé », et annoncer un push échoué sans
+    laisser croire que le commit l'a été aussi (§4 de la spec).
+    """
 
     def __init__(self, repository: pygit2.Repository, parent=None):
         super().__init__(parent)
@@ -199,7 +204,7 @@ class CommitWindow(QMainWindow):
         )
         if result.success:
             self._try_sync_index_after_commit(paths)
-        self._after_commit(result)
+        self._after_commit(result, None)
 
     def commit_and_push(self) -> None:
         """§6.2 : pousser sort de la machine, donc on confirme."""
@@ -225,17 +230,17 @@ class CommitWindow(QMainWindow):
             self.repository, paths, self.message()
         )
         if not result.success:
-            self._after_commit(result)
+            self._after_commit(result, None)
             return
         self._try_sync_index_after_commit(paths)
 
         pushed = operations.push_branch(self.repository)
         if not pushed.success:
             # Le commit est fait : le dire explicitement, sinon on croit
-            # avoir tout perdu (§8).
+            # avoir tout perdu (§8 phase 6).
             show_error(self, pushed)
 
-        self._after_commit(result)
+        self._after_commit(result, pushed)
 
     # --- interne -------------------------------------------------------
 
@@ -293,15 +298,24 @@ class CommitWindow(QMainWindow):
             index.add(pygit2.IndexEntry(path, entry.id, entry.filemode))
         index.write()
 
-    def _after_commit(self, result) -> None:
-        self.committed.emit(result)
+    def _after_commit(self, result, pushed) -> None:
+        """Annonce le résultat, puis rend la main au graphe si c'est fait.
+
+        Sur un échec de commit la fenêtre reste ouverte **avec son message**
+        : le refermer ferait perdre la rédaction alors qu'il y a justement
+        une correction à faire (§3 de la spec).
+        """
+        self.committed.emit(result, pushed)
 
         if not result.success:
             show_error(self, result)
             return
 
+        # Le commit est acquis — même si le push a échoué, il n'y a plus
+        # rien à faire dans cette fenêtre.
         self.set_message("")
         self.refresh()
+        self.close()
 
     def _on_file_selected(self) -> None:
         item = self._files.currentItem()

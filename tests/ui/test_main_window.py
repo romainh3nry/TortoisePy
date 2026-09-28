@@ -448,7 +448,7 @@ def test_graph_refreshes_after_a_commit(window, monkeypatch):
 
     window.open_commit_window()
     before = window.view.scene()
-    window.commit_window.committed.emit(succeeded("fait"))
+    window.commit_window.committed.emit(succeeded("fait"), None)
     assert window.view.scene() is not before
     window.commit_window.close()
 
@@ -507,6 +507,47 @@ def test_fetch_summary_survives_the_refresh(window, qtbot, monkeypatch):
     assert "v2.0" in message
 
 
+def test_status_bar_reports_a_commit(window):
+    from tortoisepy.core.results import succeeded
+
+    window._on_committed(succeeded("Committed 2 files — a1b2c3d4"), None)
+    assert "Committed 2 files" in window.statusBar().currentMessage()
+
+
+def test_status_bar_reports_a_commit_and_push(window):
+    from tortoisepy.core.results import succeeded
+
+    window._on_committed(
+        succeeded("Committed 2 files — a1b2c3d4"),
+        succeeded("Pushed main to origin"),
+    )
+    message = window.statusBar().currentMessage()
+    assert "Committed 2 files" in message
+    assert "push" in message.lower()
+
+
+def test_status_bar_says_when_the_push_failed(window):
+    """Review Focus 3 : le commit est fait, l'utilisateur doit le savoir."""
+    from tortoisepy.core.results import failed, succeeded
+
+    window._on_committed(
+        succeeded("Committed 2 files — a1b2c3d4"),
+        failed("Push", "rejeté par le serveur"),
+    )
+    message = window.statusBar().currentMessage()
+    assert "Committed 2 files" in message
+    assert "fail" in message.lower() or "échou" in message.lower()
+
+
+def test_a_failed_commit_does_not_claim_success(window, monkeypatch):
+    from tortoisepy.core.results import failed
+    from tortoisepy.ui import main_window as module
+
+    monkeypatch.setattr(module, "show_error", lambda *a, **k: None)
+    window._on_committed(failed("Commit", "rien de coché"), None)
+    assert "Committed" not in window.statusBar().currentMessage()
+
+
 def test_closed_detail_windows_are_released(window, qtbot):
     """`_detail_windows` ne doit garder que les fenêtres encore ouvertes.
 
@@ -529,6 +570,64 @@ def test_closed_detail_windows_are_released(window, qtbot):
     # n'a lieu qu'au prochain passage de la boucle d'événements, pas dans
     # `close()` lui-même. `waitUntil` laisse Qt la traiter.
     qtbot.waitUntil(lambda: window._detail_windows == [], timeout=1000)
+
+
+def test_push_action_exists(window):
+    assert window.push_action is not None
+    assert window.push_action.text() == "Push"
+
+
+def test_push_is_disabled_without_a_remote(window):
+    """Le dépôt de test n'a pas de remote."""
+    window._update_push_action()
+    assert window.push_action.isEnabled() is False
+
+
+def test_disabled_push_explains_why(window):
+    window._update_push_action()
+    assert window.push_action.toolTip()
+
+
+def test_push_is_enabled_when_there_is_something_to_push(window, monkeypatch):
+    from tortoisepy.core.push_state import PushState
+    from tortoisepy.ui import main_window as module
+
+    monkeypatch.setattr(
+        module,
+        "push_state",
+        lambda repo: PushState(
+            branch="main", remote_name="origin", unpushed_count=2, can_push=True
+        ),
+    )
+    window._update_push_action()
+    assert window.push_action.isEnabled() is True
+
+
+def test_push_refuses_when_already_running(window, monkeypatch):
+    from tortoisepy.ui import main_window as module
+
+    monkeypatch.setattr(module, "confirm", lambda *a, **k: True)
+
+    class Busy:
+        def is_running(self):
+            return True
+
+    window._task = Busy()
+    window._start_push()
+    assert "running" in window.statusBar().currentMessage().lower()
+
+
+def test_push_asks_for_confirmation(window, monkeypatch):
+    """§6.3 : pousser sort de la machine, donc on confirme."""
+    from tortoisepy.ui import main_window as module
+
+    demandes = []
+    monkeypatch.setattr(
+        module, "confirm", lambda *a, **k: demandes.append(a) or False
+    )
+    window._task = None
+    window._start_push()
+    assert demandes, "aucune confirmation demandée"
 
 
 def test_open_detail_windows_stay_referenced(window):

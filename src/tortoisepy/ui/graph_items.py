@@ -53,14 +53,24 @@ défaut était visible à l'œil sur un vrai dépôt."""
 class NodeItem(QGraphicsRectItem):
     """Un nœud : rectangle arrondi, une ligne par ref (§4.4)."""
 
-    def __init__(self, node: DisplayNode, placement: Placement, scene_y: float):
+    def __init__(
+        self,
+        node: DisplayNode,
+        placement: Placement,
+        scene_y: float,
+        unpushed: bool = False,
+    ):
         super().__init__(0.0, 0.0, placement.size.width, placement.size.height)
         self.node = node
+        self.unpushed = unpushed
         self.setPos(placement.x, scene_y)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
         self._paint_labels()
         self.refresh_colors()
+
+    def has_unpushed_marker(self) -> bool:
+        return self.unpushed
 
     def _paint_labels(self) -> None:
         font = theme.node_font()
@@ -94,6 +104,16 @@ class NodeItem(QGraphicsRectItem):
         painter.setBrush(self.brush())
         painter.setPen(self.pen())
         painter.drawRoundedRect(self.rect(), theme.NODE_RADIUS, theme.NODE_RADIUS)
+
+        if self.unpushed:
+            # Dessinée par-dessus, après coup : le rectangle, sa couleur et
+            # ses étiquettes restent exactement ce qu'ils étaient (règle
+            # utilisateur : ne pas dégrader le rendu validé).
+            radius = theme.UNPUSHED_MARKER_RADIUS
+            centre = self.rect().topRight() + QPointF(-radius - 2.0, radius + 2.0)
+            painter.setBrush(QBrush(theme.UNPUSHED_MARKER))
+            painter.setPen(QPen(theme.PALETTE.border, 1.0))
+            painter.drawEllipse(centre, radius, radius)
 
 
 class EdgeItem(QGraphicsPathItem):
@@ -229,7 +249,11 @@ def _arrow_head(start: QPointF, end: QPointF) -> QPolygonF:
     return QPolygonF([end, left, right, end])
 
 
-def build_scene(graph: DisplayGraph, layout: LayoutResult) -> QGraphicsScene:
+def build_scene(
+    graph: DisplayGraph,
+    layout: LayoutResult,
+    unpushed: frozenset[str] = frozenset(),
+) -> QGraphicsScene:
     """Construit la scène complète à partir du graphe et de son placement."""
     scene = QGraphicsScene()
     scene.setBackgroundBrush(QBrush(theme.PALETTE.background))
@@ -243,7 +267,17 @@ def build_scene(graph: DisplayGraph, layout: LayoutResult) -> QGraphicsScene:
         node = graph.node(placement.oid)
         if node is None:
             continue
-        item = NodeItem(node, placement, _to_scene_y(placement, layout.height))
+        item = NodeItem(
+            node,
+            placement,
+            _to_scene_y(placement, layout.height),
+            unpushed=_node_has_unpushed(node, unpushed),
+        )
+        # Qt ne garde pas la scène en vie via ses enfants ; côté Python,
+        # rien ne référence plus la scène une fois `build_scene` retourné
+        # si l'appelant ne conserve que les items (cas des tests). Sans ce
+        # renvoi, le ramasse-miettes détruit la scène — et donc l'item C++
+        # — dès la fin de l'expression qui a appelé `build_scene`.
         scene.addItem(item)
         items[placement.oid] = item
 
@@ -271,6 +305,18 @@ def build_scene(graph: DisplayGraph, layout: LayoutResult) -> QGraphicsScene:
     scene.setSceneRect(rect.adjusted(-SCENE_MARGIN, -SCENE_MARGIN,
                                      SCENE_MARGIN, SCENE_MARGIN))
     return scene
+
+
+def _node_has_unpushed(node: DisplayNode, unpushed: frozenset[str]) -> bool:
+    """Le nœud porte-t-il un commit non poussé ?
+
+    Un nœud représente une ref, pas un commit isolé : la pastille dit
+    « cette branche a des choses à pousser ». Le détail par commit est dans
+    le panneau latéral.
+    """
+    if not unpushed:
+        return False
+    return node.oid in unpushed
 
 
 def _spread_labels(scene: QGraphicsScene) -> None:

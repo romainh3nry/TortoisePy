@@ -60,6 +60,12 @@ OWN_BORDER_WIDTH = 2.0
 OWN_ROLE = Qt.ItemDataRole.UserRole + 1
 """Rôle portant « ce commit vient-il de la branche cliquée ? »."""
 
+UNPUSHED_ROLE = Qt.ItemDataRole.UserRole + 2
+"""Rôle portant « ce commit est-il encore absent du serveur ? ».
+
+Même patron que `OWN_ROLE` : une marque dit d'où vient le commit, l'autre
+où il en est côté remote — les deux coexistent sans se gêner."""
+
 
 class OwnCommitDelegate(QStyledItemDelegate):
     """Encadre les commits ajoutés par la branche cliquée.
@@ -163,7 +169,12 @@ class CommitPanel(QWidget):
         layout.addWidget(self._title)
         layout.addWidget(self._tree)
 
-    def show_commits(self, label: str, commits: tuple[CommitInfo, ...]) -> None:
+    def show_commits(
+        self,
+        label: str,
+        commits: tuple[CommitInfo, ...],
+        unpushed: frozenset[str] = frozenset(),
+    ) -> None:
         """Remplit le panneau pour un nœud donné."""
         self._tree.clear()
 
@@ -179,17 +190,29 @@ class CommitPanel(QWidget):
         if own and own < count:
             # Dire les deux nombres : « 4 sur 26 » se comprend mieux que
             # « 26 commits » quand seuls 4 viennent de cette branche.
-            self._title.setText(
+            titre = (
                 f"{label} — {own} commit{'' if own == 1 else 's'} "
                 f"sur {total}"
             )
         else:
-            self._title.setText(f"{label} — {total} commit{plural}")
+            titre = f"{label} — {total} commit{plural}"
+
+        # Compte séparé du « own » : un commit peut être hérité ET non
+        # poussé (branche qui n'a jamais publié son historique).
+        non_pousses = sum(1 for c in commits if c.oid in unpushed)
+        if non_pousses:
+            titre += f" — {non_pousses} non poussé{'s' if non_pousses > 1 else ''}"
+
+        self._title.setText(titre)
 
         for commit in commits:
+            is_unpushed = commit.oid in unpushed
+            oid_text = (
+                f"↑ {commit.short_oid}" if is_unpushed else commit.short_oid
+            )
             item = QTreeWidgetItem(
                 [
-                    commit.short_oid,
+                    oid_text,
                     commit.summary,
                     commit.author_name,
                     f"{commit.when:%d/%m/%y}",
@@ -202,6 +225,7 @@ class CommitPanel(QWidget):
             # drapeau. Passer par les données plutôt que par un style de
             # cellule garde le rendu indépendant de l'état de sélection.
             item.setData(0, OWN_ROLE, commit.own)
+            item.setData(0, UNPUSHED_ROLE, is_unpushed)
 
             if commit.is_merge:
                 for column in range(len(COLUMNS)):
@@ -218,6 +242,17 @@ class CommitPanel(QWidget):
 
     def count(self) -> int:
         return self._tree.topLevelItemCount()
+
+    def title(self) -> str:
+        return self._title.text()
+
+    def is_unpushed(self, oid: str) -> bool:
+        """Le commit affiché sous cet oid porte-t-il la marque « non poussé » ?"""
+        for index in range(self._tree.topLevelItemCount()):
+            item = self._tree.topLevelItem(index)
+            if item.data(0, Qt.ItemDataRole.UserRole) == oid:
+                return bool(item.data(0, UNPUSHED_ROLE))
+        return False
 
     def selected_oid(self) -> str | None:
         item = self._tree.currentItem()

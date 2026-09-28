@@ -245,3 +245,124 @@ def test_label_placement_is_deterministic():
     assert positions(build_scene(graph, layout)) == positions(
         build_scene(graph, layout)
     )
+
+
+def _node_items(scene):
+    """Les `NodeItem` d'une scène, par OID.
+
+    L'appelant doit garder une référence sur la scène : sans elle, Python
+    la ramasse et shiboken détruit l'objet C++ **et ses items**, ce qui fait
+    lever `RuntimeError: Internal C++ object already deleted` au premier
+    accès suivant. Les tests plus anciens de ce fichier lient déjà la scène
+    à une variable locale pour cette raison.
+    """
+    from tortoisepy.ui.graph_items import NodeItem
+
+    return {
+        item.node.oid: item
+        for item in scene.items()
+        if isinstance(item, NodeItem)
+    }
+
+
+def test_node_without_unpushed_commits_is_unchanged(qtbot):
+    """Review Focus 5 : le rendu validé ne doit pas bouger d'un pixel."""
+    from tortoisepy.layout.engine import layout_graph
+    from tortoisepy.ui.graph_items import build_scene
+
+    graph = simple_graph()
+    layout = layout_graph(graph, QtMeasurer())
+
+    scene_avant = build_scene(graph, layout)
+    scene_apres = build_scene(graph, layout, unpushed=frozenset())
+    avant = _node_items(scene_avant)
+    apres = _node_items(scene_apres)
+
+    for oid, item in apres.items():
+        assert item.brush().color() == avant[oid].brush().color()
+        assert item.pen().color() == avant[oid].pen().color()
+        assert item.rect() == avant[oid].rect()
+        assert item.has_unpushed_marker() is False
+
+
+def test_node_with_unpushed_commits_gets_a_marker(qtbot):
+    from tortoisepy.layout.engine import layout_graph
+    from tortoisepy.ui.graph_items import build_scene
+
+    graph = simple_graph()
+    layout = layout_graph(graph, QtMeasurer())
+    cible = layout.placements[0].oid
+
+    scene_avec = build_scene(graph, layout, unpushed=frozenset({cible}))
+    items = _node_items(scene_avec)
+    assert items[cible].has_unpushed_marker() is True
+
+    # La pastille ne déplace ni n'agrandit le nœud.
+    scene_sans = build_scene(graph, layout)
+    sans = _node_items(scene_sans)
+    assert items[cible].rect() == sans[cible].rect()
+    # …ni ne change sa couleur : le remplissage dit le type de ref.
+    assert items[cible].brush().color() == sans[cible].brush().color()
+
+
+def test_build_scene_stays_compatible_without_the_argument(qtbot):
+    """Les appels existants, sans le paramètre, doivent continuer à marcher."""
+    from tortoisepy.layout.engine import layout_graph
+    from tortoisepy.ui.graph_items import build_scene
+
+    graph = simple_graph()
+    layout = layout_graph(graph, QtMeasurer())
+    assert build_scene(graph, layout) is not None
+
+
+def _render(scene):
+    """Rend une scène hors écran, pour comparer des pixels.
+
+    Comparer `brush`/`pen`/`rect` ne suffit pas : une pastille dessinée à
+    tort quand `unpushed=False` ne changerait aucune de ces propriétés et
+    passerait inaperçue. Seul le rendu le prouve.
+    """
+    from PySide6.QtGui import QImage, QPainter
+
+    image = QImage(
+        int(scene.width()) + 20,
+        int(scene.height()) + 20,
+        QImage.Format.Format_ARGB32,
+    )
+    image.fill(0xFFFFFFFF)
+    painter = QPainter(image)
+    scene.render(painter)
+    painter.end()
+    return image
+
+
+def test_rendering_is_pixel_identical_without_the_marker(qtbot):
+    """Règle utilisateur : « il ne faut pas dégrader le rendu actuel ».
+
+    L'appel d'origine, sans le paramètre, et le nouvel appel avec un
+    ensemble vide doivent produire exactement la même image — pas seulement
+    les mêmes propriétés d'objets.
+    """
+    from tortoisepy.ui.graph_items import build_scene
+
+    graph = simple_graph()
+    layout = layout_graph(graph, QtMeasurer())
+
+    ancien = build_scene(graph, layout)
+    nouveau = build_scene(graph, layout, unpushed=frozenset())
+
+    assert _render(ancien) == _render(nouveau)
+
+
+def test_marker_is_actually_painted(qtbot):
+    """La pastille doit se voir — et seulement quand elle doit."""
+    from tortoisepy.ui.graph_items import build_scene
+
+    graph = simple_graph()
+    layout = layout_graph(graph, QtMeasurer())
+    cible = layout.placements[0].oid
+
+    sans = build_scene(graph, layout)
+    avec = build_scene(graph, layout, unpushed=frozenset({cible}))
+
+    assert _render(sans) != _render(avec)
