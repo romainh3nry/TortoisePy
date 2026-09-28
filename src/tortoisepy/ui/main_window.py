@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from tortoisepy.core.commits import commits_for_node
 from tortoisepy.core.graph import build_graph
+from tortoisepy.core.credentials import is_https, remember
 from tortoisepy.core.push_state import push_state, unpushed_oids
 from tortoisepy.core.state import read_state
 from tortoisepy.layout.engine import layout_graph
@@ -34,6 +35,7 @@ from tortoisepy.ui.commit_window import CommitWindow
 from tortoisepy.ui.context_menu import MenuEntry, build_menu_model
 from tortoisepy.ui.dialogs import (
     ConfirmationRequest,
+    ask_credentials,
     ask_name,
     ask_reset_mode,
     confirm,
@@ -43,6 +45,21 @@ from tortoisepy.ui.graph_view import GraphView
 from tortoisepy.ui.tasks import BackgroundTask, FetchWorker
 from tortoisepy.ui.theme import QtMeasurer
 from tortoisepy.ui.watcher import RepositoryWatcher
+
+
+_AUTH_MARKERS = ("authentication", "credential", "401", "403")
+
+
+def _needs_authentication(result) -> bool:
+    """L'échec vient-il d'un défaut d'authentification ?
+
+    Vérifié : sans rappel, libgit2 lève `AuthError` avec le message
+    « remote authentication required but no callback set ». On teste des
+    marqueurs plutôt que la chaîne exacte, qui dépend de la version de
+    libgit2 et du serveur.
+    """
+    message = (result.git_error or "").lower()
+    return any(marker in message for marker in _AUTH_MARKERS)
 
 
 def _still_alive(widget) -> bool:
@@ -471,24 +488,30 @@ class MainWindow(QMainWindow):
         else:
             self.push_action.setToolTip(state.reason or "nothing to push")
 
-    def _start_push(self) -> None:
-        """Pousse en arrière-plan, comme le fetch (§6.3)."""
+    def _start_push(self, confirmed: bool = False) -> None:
+        """Pousse en arrière-plan, comme le fetch (§6.3).
+
+        `confirmed` sert au second essai après saisie des identifiants :
+        l'utilisateur vient de confirmer puis de s'authentifier, lui
+        redemander deux fois de suite serait pénible.
+        """
         if self._task is not None and self._task.is_running():
             self.statusBar().showMessage("A background task is running", 3000)
             return
 
         state = push_state(self.repository)
-        request = ConfirmationRequest(
-            title="Push",
-            message=(
-                f"git push {state.remote_name} {state.branch}\n\n"
-                f"{state.unpushed_count} commit(s) will be sent to the shared "
-                "server. This cannot be undone on your own."
-            ),
-            destructive=False,
-        )
-        if not confirm(self, request):
-            return
+        if not confirmed:
+            request = ConfirmationRequest(
+                title="Push",
+                message=(
+                    f"git push {state.remote_name} {state.branch}\n\n"
+                    f"{state.unpushed_count} commit(s) will be sent to the "
+                    "shared server. This cannot be undone on your own."
+                ),
+                destructive=False,
+            )
+            if not confirm(self, request):
+                return
 
         from tortoisepy.core import operations
 
@@ -512,8 +535,49 @@ class MainWindow(QMainWindow):
         self.progress.hide()
         self.refresh()          # d'abord : `refresh` réécrit la barre d'état
         self.statusBar().showMessage(result.summary, 15000)
-        if not result.success:
-            show_error(self, result)
+
+        if result.success:
+            return
+
+        if _needs_authentication(result) and self._ask_and_store_credentials():
+            # Git connaît désormais les identifiants : le rappel les
+            # retrouvera tout seul au prochain essai.
+            self._start_push(confirmed=True)
+            return
+
+        show_error(self, result)
+
+    def _ask_and_store_credentials(self) -> bool:
+        """Demande les identifiants et les confie à Git. Vrai si fournis.
+
+        Uniquement en dernier recours : `git credential` est interrogé
+        d'abord, donc le cas courant n'affiche aucune fenêtre.
+        """
+        remote = self._push_remote()
+        if remote is None or not is_https(remote.url or ""):
+            return False
+
+        found, remember_it = ask_credentials(self, remote.url)
+        if found is None:
+            return False
+
+        if remember_it and not remember(remote.url, found):
+            # Échec du stockage : on le dit, mais on laisse l'essai suivant
+            # se faire — la session en cours peut très bien aboutir.
+            self.statusBar().showMessage(
+                "Credentials could not be saved by Git", 8000
+            )
+        return True
+
+    def _push_remote(self):
+        """Le remote vers lequel le push partirait, ou `None`."""
+        state = push_state(self.repository)
+        if state.remote_name is None:
+            return None
+        try:
+            return self.repository.remotes[state.remote_name]
+        except (KeyError, pygit2.GitError):
+            return None
 
     def _copy_to_clipboard(self, text: str) -> None:
         clipboard = QGuiApplication.clipboard()

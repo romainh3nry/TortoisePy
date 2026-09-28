@@ -16,6 +16,7 @@ import stat
 import pygit2
 from pygit2.enums import FileMode
 
+from tortoisepy.core.credentials import credentials_for, is_https
 from tortoisepy.core.model import Oid
 from tortoisepy.core.results import OperationResult, failed, guarded, succeeded
 
@@ -290,9 +291,20 @@ def _credentials(url: str):
 
     SSH passe par l'agent : c'est ce qui permet de ne jamais manipuler de
     clé ni de mot de passe. Vérifié sur un dépôt GitLab d'entreprise.
-    HTTPS repose sur le gestionnaire d'identifiants de Git, que libgit2
-    consulte seul.
+
+    HTTPS demande à Git ses propres identifiants. Contrairement à ce que
+    supposait la version précédente, **libgit2 ne consulte pas** le
+    gestionnaire d'identifiants : un push HTTPS échouait sur « remote
+    authentication required but no callback set » (signalé sur le dépôt
+    `portfolio`). Passer par `git credential` règle le cas sur toutes les
+    plateformes, puisque c'est Git qui choisit son backend.
     """
+    if is_https(url):
+        found = credentials_for(url)
+        if found is not None:
+            return pygit2.UserPass(found.username, found.password)
+        return None
+
     if url.startswith(("git@", "ssh://")):
         return pygit2.KeypairFromAgent("git")
     return None

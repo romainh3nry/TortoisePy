@@ -9,8 +9,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtWidgets import QInputDialog, QMessageBox
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+)
 
+from tortoisepy.core.credentials import Credentials
 from tortoisepy.core.results import OperationResult
 from tortoisepy.core.state import RepositoryState
 
@@ -126,6 +136,50 @@ def ask_reset_mode(parent) -> str | None:
     if not accepted:
         return None
     return choice.split(" — ", 1)[0]
+
+
+def ask_credentials(parent, url: str) -> tuple[Credentials | None, bool]:
+    """Demande identifiant et mot de passe. `(None, False)` si annulé.
+
+    Le second élément dit si l'utilisateur veut les mémoriser — c'est Git
+    qui les rangera (trousseau macOS, Credential Manager Windows…),
+    jamais tortoisePy : aucun secret n'est écrit par cette application.
+
+    Appelé seulement quand `git credential` ne connaît rien pour cette
+    URL ; le cas courant ne montre aucune fenêtre.
+    """
+    dialog = QDialog(parent)
+    dialog.setWindowTitle("Authentication required")
+
+    user = QLineEdit()
+    password = QLineEdit()
+    # `Password` masque la saisie ; sans cela le mot de passe s'afficherait
+    # en clair à l'écran.
+    password.setEchoMode(QLineEdit.EchoMode.Password)
+    remember = QCheckBox("Remember (stored by Git, not by tortoisePy)")
+    remember.setChecked(True)
+
+    layout = QFormLayout(dialog)
+    layout.addRow(QLabel(f"Sign in to {url}"))
+    layout.addRow("Username:", user)
+    layout.addRow("Password / token:", password)
+    layout.addRow(remember)
+
+    buttons = QDialogButtonBox(
+        QDialogButtonBox.StandardButton.Ok
+        | QDialogButtonBox.StandardButton.Cancel
+    )
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    layout.addRow(buttons)
+
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return None, False
+
+    name, secret = user.text().strip(), password.text()
+    if not name or not secret:
+        return None, False
+    return Credentials(username=name, password=secret), remember.isChecked()
 
 
 def confirm(parent, request: ConfirmationRequest) -> bool:
