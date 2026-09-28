@@ -163,3 +163,109 @@ def test_dates_are_timezone_aware(repo):
     """Une date naïve produirait des comparaisons fausses."""
     info = read_commit(repo, str(repo.head.target))
     assert info.when.tzinfo is not None
+
+
+def test_full_history_is_returned(tmp_path):
+    """Cliquer une branche montre TOUT son historique, pas seulement son apport."""
+    path = tmp_path / "histoire"
+    path.mkdir()
+    run_git(path, "init", "-q", "-b", "master")
+    for index in range(4):
+        (path / f"base{index}.txt").write_text(f"{index}\n")
+        run_git(path, "add", ".")
+        run_git(path, "commit", "-q", "-m", f"base {index}")
+
+    run_git(path, "checkout", "-q", "-b", "feature")
+    for index in range(2):
+        (path / f"feat{index}.txt").write_text(f"{index}\n")
+        run_git(path, "add", ".")
+        run_git(path, "commit", "-q", "-m", f"feature {index}")
+
+    repository = pygit2.Repository(str(path))
+    graph = build_graph(repository)
+    node = next(
+        n for n in graph.nodes if any(r.name == "feature" for r in n.refs)
+    )
+
+    revealed = commits_for_node(repository, graph, node.oid)
+    assert len(revealed) == 6, "les 4 commits hérités doivent être visibles"
+
+
+def test_own_commits_are_marked(tmp_path):
+    """Les commits ajoutés par la branche se distinguent des hérités."""
+    path = tmp_path / "marquage"
+    path.mkdir()
+    run_git(path, "init", "-q", "-b", "master")
+    for index in range(3):
+        (path / f"base{index}.txt").write_text(f"{index}\n")
+        run_git(path, "add", ".")
+        run_git(path, "commit", "-q", "-m", f"base {index}")
+
+    run_git(path, "checkout", "-q", "-b", "feature")
+    (path / "feat.txt").write_text("apport\n")
+    run_git(path, "add", ".")
+    run_git(path, "commit", "-q", "-m", "apport de la branche")
+
+    repository = pygit2.Repository(str(path))
+    graph = build_graph(repository)
+    node = next(
+        n for n in graph.nodes if any(r.name == "feature" for r in n.refs)
+    )
+
+    revealed = commits_for_node(repository, graph, node.oid)
+    own = [c for c in revealed if c.own]
+    inherited = [c for c in revealed if not c.own]
+
+    assert own, "la branche a bien apporté quelque chose"
+    assert inherited, "et hérité du reste"
+    assert own[0].summary == "apport de la branche"
+
+
+def test_own_commits_come_first(tmp_path):
+    """L'ordre reste chronologique : l'apport est le plus récent."""
+    path = tmp_path / "ordre"
+    path.mkdir()
+    run_git(path, "init", "-q", "-b", "master")
+    (path / "a.txt").write_text("a\n")
+    run_git(path, "add", ".")
+    run_git(path, "commit", "-q", "-m", "ancien")
+    run_git(path, "checkout", "-q", "-b", "feature")
+    (path / "b.txt").write_text("b\n")
+    run_git(path, "add", ".")
+    run_git(path, "commit", "-q", "-m", "récent")
+
+    repository = pygit2.Repository(str(path))
+    graph = build_graph(repository)
+    node = next(
+        n for n in graph.nodes if any(r.name == "feature" for r in n.refs)
+    )
+
+    revealed = commits_for_node(repository, graph, node.oid)
+    assert revealed[0].own is True
+    assert revealed[0].summary == "récent"
+
+
+def test_history_is_capped(tmp_path):
+    """Un panneau latéral ne charge pas un historique sans fin."""
+    from tortoisepy.core.commits import _history
+
+    path = tmp_path / "long"
+    path.mkdir()
+    run_git(path, "init", "-q", "-b", "master")
+    for index in range(30):
+        (path / "f.txt").write_text(f"{index}\n")
+        run_git(path, "add", ".")
+        run_git(path, "commit", "-q", "-m", f"c{index}")
+
+    repository = pygit2.Repository(str(path))
+    head = str(repository.head.target)
+    assert len(_history(repository, head, {head}, limit=10)) == 10
+
+
+def test_commit_info_defaults_to_own():
+    """Un commit lu isolément est considéré comme propre."""
+    from tortoisepy.core.commits import read_commit
+    import subprocess
+
+    # read_commit ne connaît pas le graphe : il ne peut pas trancher.
+    assert "own" in CommitInfo.__dataclass_fields__

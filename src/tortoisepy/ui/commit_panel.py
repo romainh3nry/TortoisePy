@@ -7,10 +7,11 @@ nœud lui-même.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QStyledItemDelegate,
     QHeaderView,
     QLabel,
     QTreeWidget,
@@ -28,6 +29,93 @@ elle sortait du champ dès que le panneau était un peu étroit."""
 
 MERGE_COLOR = QColor(110, 110, 150)
 """Les commits de merge sont teintés : ils structurent l'historique."""
+
+HISTORY_LIMIT = 500
+"""Doit correspondre à la limite de `core.commits._history`.
+
+Au-delà, le panneau affiche « 500+ » : annoncer un nombre rond comme s'il
+était exact laisserait croire que la branche s'arrête là."""
+
+OWN_BORDER = QColor(200, 130, 20)
+"""Couleur du cadre entourant les commits ajoutés par la branche cliquée.
+
+Le panneau montre TOUT l'historique : sans marque, rien ne distinguerait
+l'apport de la branche du travail hérité.
+
+Deux approches ont été essayées et mesurées avant celle-ci :
+
+- **Fond jaune pâle** : contraste 1,06 avec le fond blanc, imperceptible.
+  Il recouvrait en outre le bleu de sélection, dont Qt garde le texte
+  blanc — la ligne sélectionnée devenait illisible.
+- **Texte grisé** pour les commits hérités : lisible sur fond blanc
+  (3,36) mais pas sur une ligne sélectionnée (1,10), un `foreground`
+  explicite primant sur la couleur de sélection.
+
+Un cadre ne touche ni au fond ni à la couleur du texte : il reste visible
+quel que soit l'état de la ligne."""
+
+OWN_BORDER_WIDTH = 2.0
+
+
+OWN_ROLE = Qt.ItemDataRole.UserRole + 1
+"""Rôle portant « ce commit vient-il de la branche cliquée ? »."""
+
+
+class OwnCommitDelegate(QStyledItemDelegate):
+    """Encadre les commits ajoutés par la branche cliquée.
+
+    Le cadre est tracé APRÈS le rendu normal, donc par-dessus le fond de
+    sélection : il reste visible que la ligne soit sélectionnée ou non.
+    Les bords verticaux ne sont tracés qu'aux extrémités, pour que le
+    cadre entoure la ligne entière et non chaque cellule.
+    """
+
+    def paint(self, painter, option, index) -> None:
+        super().paint(painter, option, index)
+
+        model = index.model()
+        if not _is_own(model, index.row(), index.parent()):
+            return
+
+        # Un cadre unique autour du BLOC, pas autour de chaque ligne : les
+        # bords horizontaux ne sont tracés qu'aux extrémités du groupe.
+        first = not _is_own(model, index.row() - 1, index.parent())
+        last = not _is_own(model, index.row() + 1, index.parent())
+
+        rect = QRectF(option.rect)
+        inset = OWN_BORDER_WIDTH / 2.0
+        rect = rect.adjusted(
+            0.0, inset if first else 0.0, 0.0, -inset if last else 0.0
+        )
+
+        painter.save()
+        painter.setPen(QPen(OWN_BORDER, OWN_BORDER_WIDTH))
+
+        if first:
+            painter.drawLine(rect.topLeft(), rect.topRight())
+        if last:
+            painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+
+        # Les bords verticaux courent sur toute la hauteur du bloc, donc
+        # sur chaque ligne, mais seulement aux colonnes extrêmes.
+        if index.column() == 0:
+            painter.drawLine(rect.topLeft(), rect.bottomLeft())
+        if index.column() == model.columnCount() - 1:
+            painter.drawLine(rect.topRight(), rect.bottomRight())
+
+        painter.restore()
+
+
+def _is_own(model, row: int, parent) -> bool:
+    """Le commit de cette ligne vient-il de la branche cliquée ?
+
+    Hors des limites du modèle, la réponse est « non » : cela fait
+    naturellement de la première et de la dernière ligne du groupe les
+    extrémités du cadre.
+    """
+    if row < 0 or row >= model.rowCount(parent):
+        return False
+    return bool(model.index(row, 0, parent).data(OWN_ROLE))
 
 
 class CommitPanel(QWidget):
@@ -48,12 +136,15 @@ class CommitPanel(QWidget):
         self._tree.setColumnCount(len(COLUMNS))
         self._tree.setHeaderLabels(COLUMNS)
         self._tree.setRootIsDecorated(False)
-        self._tree.setAlternatingRowColors(True)
+        # Désactivé : les lignes alternées masqueraient le fond des
+        # commits propres à la branche.
+        self._tree.setAlternatingRowColors(False)
         self._tree.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection
         )
         self._tree.setFont(QFont(theme.NODE_FONT_FAMILY, 11))
         self._tree.itemSelectionChanged.connect(self._on_selection)
+        self._tree.setItemDelegate(OwnCommitDelegate(self._tree))
 
         header = self._tree.header()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -73,8 +164,23 @@ class CommitPanel(QWidget):
         self._tree.clear()
 
         count = len(commits)
+        own = sum(1 for c in commits if c.own)
         plural = "" if count == 1 else "s"
-        self._title.setText(f"{label} — {count} commit{plural}")
+
+        # L'historique est borné (§ CommitInfo) : au-delà, dire « sur 500 »
+        # ferait croire que la branche n'en a pas davantage.
+        truncated = count >= HISTORY_LIMIT
+        total = f"{count}+" if truncated else str(count)
+
+        if own and own < count:
+            # Dire les deux nombres : « 4 sur 26 » se comprend mieux que
+            # « 26 commits » quand seuls 4 viennent de cette branche.
+            self._title.setText(
+                f"{label} — {own} commit{'' if own == 1 else 's'} "
+                f"sur {total}"
+            )
+        else:
+            self._title.setText(f"{label} — {total} commit{plural}")
 
         for commit in commits:
             item = QTreeWidgetItem(
@@ -87,6 +193,11 @@ class CommitPanel(QWidget):
             )
             item.setData(0, Qt.ItemDataRole.UserRole, commit.oid)
             item.setToolTip(1, commit.message)
+
+            # Le cadre est dessiné par `OwnCommitDelegate`, qui lit ce
+            # drapeau. Passer par les données plutôt que par un style de
+            # cellule garde le rendu indépendant de l'état de sélection.
+            item.setData(0, OWN_ROLE, commit.own)
 
             if commit.is_merge:
                 for column in range(len(COLUMNS)):

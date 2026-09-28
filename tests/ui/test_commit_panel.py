@@ -3,12 +3,18 @@
 from datetime import datetime, timezone
 
 import pytest
+from PySide6.QtCore import Qt
 
 from tortoisepy.core.commits import CommitInfo
 from tortoisepy.ui.commit_panel import COLUMNS, CommitPanel
 
 
-def commit(oid: str, summary: str = "un message", merge: bool = False) -> CommitInfo:
+def commit(
+    oid: str,
+    summary: str = "un message",
+    merge: bool = False,
+    own: bool = True,
+) -> CommitInfo:
     return CommitInfo(
         oid=oid,
         summary=summary,
@@ -17,6 +23,7 @@ def commit(oid: str, summary: str = "un message", merge: bool = False) -> Commit
         author_email="alice@example.com",
         when=datetime(2026, 9, 25, 14, 30, tzinfo=timezone.utc),
         parent_count=2 if merge else 1,
+        own=own,
     )
 
 
@@ -106,3 +113,93 @@ def test_empty_list_is_accepted(panel):
     panel.show_commits("vide", ())
     assert panel.count() == 0
     assert "0 commits" in panel._title.text()
+
+
+def test_own_commits_are_flagged_for_the_delegate(panel):
+    """L'apport de la branche est marqué dans les données, pas par un style.
+
+    Un fond ou une couleur de texte serait recouvert — ou masquerait — le
+    bleu de sélection de Qt. Le cadre est dessiné par `OwnCommitDelegate`,
+    qui lit ce drapeau.
+    """
+    from tortoisepy.ui.commit_panel import OWN_ROLE
+
+    panel.show_commits(
+        "feature",
+        (commit("a" * 40, own=True), commit("b" * 40, own=False)),
+    )
+    assert panel._tree.topLevelItem(0).data(0, OWN_ROLE) is True
+    assert panel._tree.topLevelItem(1).data(0, OWN_ROLE) is False
+
+
+def test_own_commits_keep_the_default_background(panel):
+    """Le marquage ne doit pas toucher au fond : la sélection doit rester
+    lisible."""
+    panel.show_commits("feature", (commit("a" * 40, own=True),))
+    item = panel._tree.topLevelItem(0)
+    # Un fond explicite rendrait le texte blanc de sélection illisible.
+    assert item.background(0).style() == Qt.BrushStyle.NoBrush
+
+
+def test_the_delegate_is_installed(panel):
+    from tortoisepy.ui.commit_panel import OwnCommitDelegate
+
+    assert isinstance(panel._tree.itemDelegate(), OwnCommitDelegate)
+
+
+def test_title_reports_both_counts(panel):
+    """« 2 commits sur 5 » se comprend mieux que « 5 commits »."""
+    commits = tuple(
+        commit(f"{i}" * 40, own=(i < 2)) for i in range(5)
+    )
+    panel.show_commits("feature", commits)
+    assert "2" in panel._title.text()
+    assert "5" in panel._title.text()
+
+
+def test_title_stays_simple_when_all_commits_are_own(panel):
+    panel.show_commits(
+        "feature", (commit("a" * 40, own=True), commit("b" * 40, own=True))
+    )
+    assert "sur" not in panel._title.text()
+
+
+def test_alternating_rows_are_off(panel):
+    """Elles masqueraient le fond des commits propres à la branche."""
+    assert panel._tree.alternatingRowColors() is False
+
+
+def test_border_spans_the_whole_block(panel):
+    """Un seul cadre autour du groupe, pas un par ligne.
+
+    Les bords horizontaux ne sont tracés qu'aux extrémités : sans cela,
+    chaque commit se retrouvait dans sa propre boîte.
+    """
+    from tortoisepy.ui.commit_panel import _is_own
+
+    panel.show_commits(
+        "feature",
+        (
+            commit("a" * 40, own=True),
+            commit("b" * 40, own=True),
+            commit("c" * 40, own=False),
+        ),
+    )
+    model = panel._tree.model()
+    root = panel._tree.rootIndex()
+
+    assert _is_own(model, 0, root) is True
+    assert _is_own(model, 1, root) is True
+    assert _is_own(model, 2, root) is False
+
+
+def test_rows_outside_the_model_are_not_own(panel):
+    """Hors limites, la réponse est « non » — ce qui ferme le cadre."""
+    from tortoisepy.ui.commit_panel import _is_own
+
+    panel.show_commits("feature", (commit("a" * 40, own=True),))
+    model = panel._tree.model()
+    root = panel._tree.rootIndex()
+
+    assert _is_own(model, -1, root) is False
+    assert _is_own(model, 99, root) is False

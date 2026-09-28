@@ -9,7 +9,7 @@ directement.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 import pygit2
@@ -30,6 +30,13 @@ class CommitInfo:
     author_email: str
     when: datetime
     parent_count: int
+
+    own: bool = True
+    """Ce commit a-t-il été ajouté par la branche cliquée ?
+
+    Vrai pour les commits situés entre ce nœud et le précédent du graphe —
+    exactement ce que l'étiquette de l'arête annonce. Faux pour
+    l'historique plus ancien, hérité des branches en dessous."""
 
     @property
     def short_oid(self) -> str:
@@ -78,25 +85,18 @@ def commits_for_node(
 ) -> tuple[CommitInfo, ...]:
     """Commits à afficher au double-clic sur un nœud.
 
-    Ce sont ceux que l'arête entrante masque : exactement ce qu'annonce son
-    étiquette (« 40 commits »), plus le commit du nœud lui-même.
+    **Tout** l'historique de la branche est retourné, du plus récent au
+    plus ancien — pas seulement ce que la branche a ajouté. Les commits
+    qui lui sont propres portent `own=True` : ce sont ceux que l'arête
+    entrante masque, exactement ce qu'annonce son étiquette. Les plus
+    anciens, hérités des branches en dessous, portent `own=False`.
 
-    Un nœud sans arête entrante — une racine, ou un nœud dont la jonction
-    amont est masquée — fait remonter son historique réel.
+    Voir un commit ancien sans pouvoir le distinguer serait trompeur ; ne
+    pas le voir du tout obligerait à cliquer chaque nœud pour reconstituer
+    l'historique.
     """
-    incoming = [e for e in graph.edges if e.descendant == oid]
-
-    if not incoming:
-        # Aucune arête entrante : soit c'est une racine, soit les jonctions
-        # qui portaient les commits sautés ont été retirées de l'affichage.
-        # Dans les deux cas on remonte l'historique réel, sinon les commits
-        # deviendraient inatteignables — ce que §4.2.1 interdit.
-        return _walk_back(repo, oid, graph)
-
-    # Plusieurs arêtes entrantes (un merge) : on prend la plus chargée,
-    # celle qui masque le plus de travail.
-    edge = max(incoming, key=lambda e: e.skipped_count)
-    return commits_on_edge(repo, edge)
+    own = _own_oids(graph, oid)
+    return _history(repo, oid, own)
 
 
 def _first_line(message: str) -> str:
@@ -142,6 +142,52 @@ def _walk_back(
         info = read_commit(repo, current)
         if info is not None:
             collected.append(info)
+        if len(collected) >= limit:
+            break
+
+    return tuple(collected)
+
+
+def _own_oids(graph: DisplayGraph, oid: Oid) -> set[Oid]:
+    """OID des commits propres à ce nœud : lui-même et ses `skipped`.
+
+    Sur un merge, l'arête la plus chargée est retenue — celle qui masque
+    le plus de travail.
+    """
+    own = {oid}
+
+    incoming = [e for e in graph.edges if e.descendant == oid]
+    if incoming:
+        edge = max(incoming, key=lambda e: e.skipped_count)
+        own.update(edge.skipped)
+
+    return own
+
+
+def _history(
+    repo: pygit2.Repository,
+    oid: Oid,
+    own: set[Oid],
+    limit: int = 500,
+) -> tuple[CommitInfo, ...]:
+    """Historique complet depuis un commit, chaque entrée marquée.
+
+    `limit` borne le parcours : un panneau latéral n'a pas à charger
+    plusieurs milliers de commits, et personne ne les lira.
+    """
+    try:
+        walker = repo.walk(pygit2.Oid(hex=oid), pygit2.GIT_SORT_TOPOLOGICAL)
+    except (pygit2.GitError, ValueError, KeyError):
+        info = read_commit(repo, oid)
+        return (info,) if info is not None else ()
+
+    collected: list[CommitInfo] = []
+    for commit in walker:
+        current = str(commit.id)
+        info = read_commit(repo, current)
+        if info is None:
+            continue
+        collected.append(replace(info, own=current in own))
         if len(collected) >= limit:
             break
 
