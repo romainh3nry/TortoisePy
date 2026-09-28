@@ -27,8 +27,11 @@ PySide6 dans cette phase.
   (§4.2). `from` est en outre un mot-clé Python.
 - **Parents de commits : toujours itérés, jamais indexés en dur.** Les merges
   octopus ont plus de deux parents (vérifié : quatre).
-- **Merge-bases : toujours la forme « all ».** Deux branches peuvent en avoir
-  plusieurs (vérifié : deux sur un dépôt à merges croisés).
+- **Merge-bases : jamais les API pygit2.** Vérifié sur pygit2 1.20.0 :
+  `merge_base`, `merge_base_many` et `merge_base_octopus` retournent toutes un
+  **seul** OID, alors qu'un dépôt à merges croisés en a deux. Les jonctions se
+  détectent par **parcours du DAG avec marquage par pointe**, puis sélection des
+  ancêtres communs maximaux (§6.1 de la spec).
 - **Stashes : premier parent seulement.** Les parents 2 et 3 sont artificiels.
 - **Tags annotés : toujours déréférencés** (`peel`) avant regroupement.
 - **Tous les dataclasses du modèle sont `frozen=True`.**
@@ -115,8 +118,13 @@ def test_pygit2_importable():
     assert pygit2.LIBGIT2_VERSION
 
 
-def test_repository_has_required_methods():
-    """Les méthodes dont dépendent les tâches 4 à 8."""
+def test_repository_has_required_methods(tmp_path):
+    """Les méthodes dont dépendent les tâches 4 à 9.
+
+    Testées sur une INSTANCE : `references` est une propriété, absente de la
+    classe. La tester sur `pygit2.Repository` donnerait un faux négatif.
+    """
+    repo = pygit2.init_repository(str(tmp_path / "probe"))
     required = [
         "descendant_of",
         "walk",
@@ -124,30 +132,39 @@ def test_repository_has_required_methods():
         "revparse_single",
         "listall_stashes",
     ]
-    missing = [n for n in required if not hasattr(pygit2.Repository, n)]
+    missing = [n for n in required if not hasattr(repo, n)]
     assert not missing, f"API pygit2 manquante : {missing}"
 
 
-def test_merge_base_all_is_available():
-    """La spec impose la forme « all » : plusieurs merge-bases sont possibles.
+def test_no_pygit2_api_enumerates_all_merge_bases():
+    """Vérifie la limite qui impose le parcours du DAG en tâche 6.
 
-    pygit2 expose soit merge_base_many (retourne un seul OID pour N commits),
-    soit merge_bases / merge_bases_many (retournent une liste). Seules les
-    formes retournant une LISTE conviennent. Ce test identifie laquelle existe.
+    Aucune API pygit2 ne retourne TOUS les merge-bases : merge_base,
+    merge_base_many et merge_base_octopus retournent un OID unique.
+    Si une version future expose une forme « all », ce test échoue — et
+    c'est le signal pour reconsidérer l'algorithme de la tâche 6.
     """
-    candidates = ["merge_bases", "merge_bases_many", "merge_base_many"]
-    available = [n for n in candidates if hasattr(pygit2.Repository, n)]
-    assert available, f"Aucune API merge-base parmi {candidates}"
-    print(f"\nAPI merge-base disponibles : {available}")
+    list_apis = [n for n in ("merge_bases", "merge_bases_many")
+                 if hasattr(pygit2.Repository, n)]
+    assert not list_apis, (
+        f"pygit2 expose maintenant {list_apis} : réexaminer le parcours "
+        "du DAG de la tâche 6, qui n'est peut-être plus nécessaire"
+    )
+    single = [n for n in ("merge_base", "merge_base_many", "merge_base_octopus")
+              if hasattr(pygit2.Repository, n)]
+    print(f"\nAPI merge-base (OID unique) : {single}")
 
 
-def test_discover_repository_raises_when_absent(tmp_path):
-    """La spec §8 affirme que discover_repository lève au lieu de retourner None."""
-    import pytest
-    with pytest.raises(Exception) as exc:
-        pygit2.discover_repository(str(tmp_path))
-    assert exc.type.__name__ in ("GitError", "KeyError"), (
-        f"Type d'exception inattendu : {exc.type.__name__}"
+def test_discover_repository_returns_none_when_absent(tmp_path):
+    """Vérifié sur pygit2 1.20.0 : retourne None, ne lève pas.
+
+    Une version antérieure de la spec §8 affirmait l'inverse. Le code
+    testera `is None`, avec un try/except en ceinture et bretelles.
+    """
+    result = pygit2.discover_repository(str(tmp_path))
+    assert result is None, (
+        f"discover_repository retourne {result!r} au lieu de None — "
+        "réexaminer la gestion d'erreur de la CLI"
     )
 ```
 
@@ -407,32 +424,70 @@ class RepoBuilder:
         self._counter = 0
 
     def commit(self, message: str, parents: list[str] | None = None) -> str:
-        """Crée un commit avec un contenu de fichier unique. Retourne son OID."""
+        """Crée un commit avec un contenu de fichier unique. Retourne son OID.
+
+        Les commits sont créés **détachés** (`ref=None`), puis la branche
+        courante est déplacée explicitement. C'est nécessaire pour les
+        racines multiples : écrire un commit sans parent sur une branche
+        qui en a déjà une fait échouer libgit2 avec « current tip is not
+        the first parent » (vérifié).
+
+        `parents=None` enchaîne sur HEAD ; `parents=[]` crée une racine.
+        """
         self._counter += 1
         blob = self.repo.create_blob(f"content {self._counter}\n".encode())
         builder = self.repo.TreeBuilder()
         builder.insert(f"file{self._counter}.txt", blob, pygit2.GIT_FILEMODE_BLOB)
         tree = builder.write()
 
-        if parents is None:
+        chain_from_head = parents is None
+        if chain_from_head:
             try:
                 parents = [str(self.repo.head.target)]
-            except pygit2.GitError:
+            except (pygit2.GitError, KeyError):
                 parents = []
 
         oid = self.repo.create_commit(
-            "HEAD" if parents else "refs/heads/master",
+            None,  # commit détaché : la ref est posée ensuite
             self.signature,
             self.signature,
             message,
             tree,
             [pygit2.Oid(hex=p) if isinstance(p, str) else p for p in parents],
         )
+
+        if chain_from_head:
+            self._advance_head(oid)
+
         return str(oid)
 
+    def _advance_head(self, oid) -> None:
+        """Fait pointer la branche courante sur `oid`, en la créant au besoin."""
+        try:
+            name = self.repo.head.name  # ex. "refs/heads/master"
+            self.repo.references[name].set_target(oid)
+        except (pygit2.GitError, KeyError):
+            # Premier commit : la branche n'existe pas encore.
+            self.repo.create_reference("refs/heads/master", oid)
+
     def branch(self, name: str, oid: str | None = None) -> RepoBuilder:
+        """Crée la branche, ou la déplace si elle existe déjà.
+
+        `master` existe dès le premier `commit()` sans parents explicites :
+        sans ce `force`, toute fixture qui repositionne `master` échoue avec
+        `AlreadyExistsError` (vérifié).
+        """
         target = oid or str(self.repo.head.target)
-        self.repo.create_branch(name, self.repo.get(target))
+        target_oid = pygit2.Oid(hex=target) if isinstance(target, str) else target
+        ref_name = f"refs/heads/{name}"
+
+        if ref_name in self.repo.references:
+            # set_target fonctionne même sur la branche courante, là où
+            # create_branch(force=True) refuse : « cannot force update
+            # branch as it is the current HEAD » (vérifié).
+            self.repo.references[ref_name].set_target(target_oid)
+        else:
+            self.repo.create_branch(name, self.repo.get(target_oid))
         return self
 
     def checkout(self, name: str) -> RepoBuilder:
@@ -506,14 +561,22 @@ def repo_diverged(tmp_path):
 
 @pytest.fixture
 def repo_merge(tmp_path):
-    """3. Un merge simple."""
+    """3. Un merge simple.
+
+    Les branches sont repositionnées explicitement : `commit(parents=[...])`
+    n'avance aucune ref, donc sans ces appels le commit de merge n'aurait
+    aucune ref et resterait invisible du graphe (vérifié).
+    """
     b = RepoBuilder(tmp_path / "merge")
     a = b.commit("A")
-    b.branch("side", a)
     left = b.commit("left", parents=[a])
     right = b.commit("right", parents=[a])
     merge = b.commit("merge", parents=[left, right])
+    b.branch("side", right)
+    b.branch("master", merge)
     b.merge_oid = merge
+    b.left_oid = left
+    b.right_oid = right
     return b
 
 
@@ -847,26 +910,50 @@ def repo_octopus(tmp_path):
 import pygit2
 
 
+def _git_merge_base_all(repo_path: str, a: str, b: str) -> set[str]:
+    """Vérité terrain : `git merge-base -a`, qui énumère TOUTES les bases."""
+    import subprocess
+    out = subprocess.run(
+        ["git", "merge-base", "-a", a, b],
+        cwd=repo_path, capture_output=True, text=True, check=True,
+    ).stdout.split()
+    return set(out)
+
+
 def test_two_merge_bases_really_exist(repo_two_merge_bases):
     """Si ce test échoue, la fixture ne reproduit pas le cas visé."""
+    bases = _git_merge_base_all(
+        repo_two_merge_bases.repo.workdir,
+        repo_two_merge_bases.tip_a,
+        repo_two_merge_bases.tip_b,
+    )
+    assert len(bases) == repo_two_merge_bases.expected_base_count
+
+
+def test_pygit2_apis_cannot_enumerate_all_bases(repo_two_merge_bases):
+    """Documente la limite qui impose le parcours du DAG en tâche 6.
+
+    Vérifié sur pygit2 1.20.0 : les trois API retournent un OID unique là
+    où le dépôt a deux merge-bases.
+    """
     repo = repo_two_merge_bases.repo
     a = pygit2.Oid(hex=repo_two_merge_bases.tip_a)
     b = pygit2.Oid(hex=repo_two_merge_bases.tip_b)
 
-    api = getattr(repo, "merge_bases", None) or getattr(repo, "merge_bases_many", None)
-    assert api is not None, "Aucune API merge-bases retournant une liste"
-    bases = list(api([a, b]) if "many" in api.__name__ else api(a, b))
-    assert len(bases) == repo_two_merge_bases.expected_base_count
-
-
-def test_single_merge_base_api_returns_fewer(repo_two_merge_bases):
-    """Documente pourquoi la forme singulière est interdite."""
-    repo = repo_two_merge_bases.repo
-    single = repo.merge_base(
-        pygit2.Oid(hex=repo_two_merge_bases.tip_a),
-        pygit2.Oid(hex=repo_two_merge_bases.tip_b),
+    truth = _git_merge_base_all(
+        repo.workdir, repo_two_merge_bases.tip_a, repo_two_merge_bases.tip_b
     )
-    assert single is not None  # elle en retourne un seul, pas les deux
+    assert len(truth) == 2
+
+    for name in ("merge_base", "merge_base_many", "merge_base_octopus"):
+        api = getattr(repo, name, None)
+        if api is None:
+            continue
+        result = api(a, b) if name == "merge_base" else api([a, b])
+        assert isinstance(result, pygit2.Oid), (
+            f"{name} retourne maintenant autre chose qu'un OID unique : "
+            "réexaminer si le parcours du DAG reste nécessaire"
+        )
 
 
 def test_octopus_has_four_parents(repo_octopus):
@@ -903,6 +990,15 @@ git commit -m "test: add fixtures for multiple merge-bases and octopus merge"
 **C'est l'étape la plus risquée du projet** (§6.1 étape 2). Elle décide quels
 commits deviennent visibles ; une erreur ici produit un graphe faux que rien
 en aval ne rattrapera.
+
+> **⚠ Tâche terminée — le code ci-dessous est dépassé.** L'implémentation a
+> depuis été optimisée : les fonctions `_reachability` et `_merges_and_roots`
+> décrites plus bas lançaient un parcours du DAG **par pointe de ref**, soit
+> 44 s de construction sur 200 branches (redondance de facteur 101). Elles sont
+> remplacées par `_walk_once` et `_analyse`, qui font **un seul** parcours
+> alimenté par `walker.push()` : 0,66 s, pour un résultat identique.
+>
+> Référence : `src/tortoisepy/core/significance.py` et §12.1 de la spec.
 
 - [ ] **Step 1: Écrire les tests**
 
@@ -942,17 +1038,28 @@ def test_root_is_significant(repo_linear):
 
 
 def test_both_merge_bases_are_significant(repo_two_merge_bases):
-    """Fixture 11 : une implémentation au singulier échoue ici."""
-    refs = collect_refs(repo_two_merge_bases.repo)
-    result = significant_commits(repo_two_merge_bases.repo, refs)
-    import pygit2
+    """Le test décisif de cette tâche.
+
+    Toute implémentation reposant sur une API merge-base de pygit2 échoue
+    ici : elles retournent un seul OID là où le dépôt en a deux. Seul le
+    parcours du DAG avec marquage par pointe les trouve tous.
+
+    La vérité terrain vient de `git merge-base -a`, pas de pygit2.
+    """
+    import subprocess
+
     repo = repo_two_merge_bases.repo
-    api = getattr(repo, "merge_bases", None) or getattr(repo, "merge_bases_many", None)
-    a = pygit2.Oid(hex=repo_two_merge_bases.tip_a)
-    b = pygit2.Oid(hex=repo_two_merge_bases.tip_b)
-    bases = [str(o) for o in (api([a, b]) if "many" in api.__name__ else api(a, b))]
-    assert len(bases) == 2
-    for base in bases:
+    truth = set(
+        subprocess.run(
+            ["git", "merge-base", "-a",
+             repo_two_merge_bases.tip_a, repo_two_merge_bases.tip_b],
+            cwd=repo.workdir, capture_output=True, text=True, check=True,
+        ).stdout.split()
+    )
+    assert len(truth) == 2, "la fixture ne produit pas deux merge-bases"
+
+    result = significant_commits(repo, collect_refs(repo))
+    for base in truth:
         assert base in result, f"merge-base {base[:7]} manquant"
 
 
@@ -992,32 +1099,64 @@ Intention (le contrat, indépendant de l'algorithme) :
 
 from __future__ import annotations
 
-from itertools import combinations
+from collections import defaultdict
 
 import pygit2
 
 from tortoisepy.core.model import Oid, Ref
 
 
-def _all_merge_bases(repo: pygit2.Repository, a: pygit2.Oid, b: pygit2.Oid) -> list[Oid]:
-    """Tous les merge-bases entre deux commits.
+def _reachability(
+    repo: pygit2.Repository, tips: set[Oid]
+) -> dict[Oid, frozenset[Oid]]:
+    """Pour chaque commit, l'ensemble des pointes qui l'atteignent.
 
-    Deux branches peuvent en avoir plusieurs (vérifié : deux sur un dépôt à
-    merges croisés). `merge_base` au singulier n'en retourne qu'un et
-    raterait des jonctions — voir §6.1.
+    Un parcours par pointe, linéaire en nombre de commits. Remplace les API
+    merge-base de pygit2 : aucune ne sait énumérer TOUS les merge-bases
+    (vérifié sur 1.20.0 — elles en retournent un seul là où un dépôt à
+    merges croisés en a deux).
     """
-    for name in ("merge_bases", "merge_bases_many"):
-        api = getattr(repo, name, None)
-        if api is None:
-            continue
-        try:
-            result = api([a, b]) if "many" in name else api(a, b)
-            return [str(o) for o in result]
-        except (TypeError, pygit2.GitError):
-            continue
+    marks: dict[Oid, set[Oid]] = defaultdict(set)
 
-    base = repo.merge_base(a, b)
-    return [str(base)] if base is not None else []
+    for tip in sorted(tips):
+        try:
+            walker = repo.walk(pygit2.Oid(hex=tip), pygit2.GIT_SORT_TOPOLOGICAL)
+        except (pygit2.GitError, ValueError):
+            continue
+        for commit in walker:
+            marks[str(commit.id)].add(tip)
+
+    return {oid: frozenset(labels) for oid, labels in marks.items()}
+
+
+def _merge_bases(
+    repo: pygit2.Repository, reach: dict[Oid, frozenset[Oid]]
+) -> set[Oid]:
+    """Ancêtres communs maximaux : les merge-bases.
+
+    Un commun est maximal si aucun de ses enfants n'est commun aux mêmes
+    pointes — sinon l'enfant est une base plus proche, et lui seul compte.
+    """
+    common = {oid for oid, labels in reach.items() if len(labels) >= 2}
+    if not common:
+        return set()
+
+    children: dict[Oid, set[Oid]] = defaultdict(set)
+    for oid in common:
+        try:
+            commit = repo.get(pygit2.Oid(hex=oid))
+        except (pygit2.GitError, ValueError):
+            continue
+        if commit is None:
+            continue
+        for parent in commit.parents:
+            children[str(parent.id)].add(oid)
+
+    return {
+        oid
+        for oid in common
+        if not any(reach[child] >= reach[oid] for child in children[oid] if child in reach)
+    }
 
 
 def significant_commits(
@@ -1027,7 +1166,7 @@ def significant_commits(
 
     Un commit est significatif s'il :
       - porte une ref ;
-      - appartient aux merge-bases entre deux pointes de refs ;
+      - est un merge-base (ancêtre commun maximal) ;
       - est un merge dont au moins deux parents mènent à des refs distinctes ;
       - est une racine.
     """
@@ -1037,28 +1176,28 @@ def significant_commits(
     tips = {ref.target for ref in refs}
     significant: set[Oid] = set(tips)
 
-    for a, b in combinations(sorted(tips), 2):
-        try:
-            significant.update(
-                _all_merge_bases(repo, pygit2.Oid(hex=a), pygit2.Oid(hex=b))
-            )
-        except (pygit2.GitError, ValueError):
-            continue  # historiques sans ancêtre commun
-
+    reach = _reachability(repo, tips)
+    significant.update(_merge_bases(repo, reach))
     significant.update(_merges_and_roots(repo, tips))
+
     return significant
 
 
 def _merges_and_roots(repo: pygit2.Repository, tips: set[Oid]) -> set[Oid]:
-    """Merges et racines atteignables depuis les pointes.
+    """Merges, PARENTS de merges, et racines atteignables depuis les pointes.
 
-    Les parents sont itérés, jamais indexés : un merge octopus en a plus de
-    deux (vérifié : quatre).
+    Les parents d'un merge sont significatifs même sans ref. Sans eux, les
+    chemins parallèles d'un merge remontent tous jusqu'au même ancêtre et la
+    déduplication par couple (ancêtre, descendant) n'en garde qu'un seul :
+    vérifié sur un octopus à quatre parents, une arête produite au lieu de
+    quatre, trois branches perdues.
+
+    Les parents sont itérés, jamais indexés : un octopus en a plus de deux.
     """
     found: set[Oid] = set()
     visited: set[Oid] = set()
 
-    for tip in tips:
+    for tip in sorted(tips):
         try:
             walker = repo.walk(pygit2.Oid(hex=tip), pygit2.GIT_SORT_TOPOLOGICAL)
         except (pygit2.GitError, ValueError):
@@ -1068,9 +1207,13 @@ def _merges_and_roots(repo: pygit2.Repository, tips: set[Oid]) -> set[Oid]:
             if oid in visited:
                 continue
             visited.add(oid)
-            parent_count = len(commit.parents)
-            if parent_count == 0 or parent_count >= 2:
-                found.add(oid)
+
+            parents = commit.parents  # itérés, jamais indexés
+            if not parents:
+                found.add(oid)  # racine
+            elif len(parents) >= 2:
+                found.add(oid)  # merge
+                found.update(str(p.id) for p in parents)  # et ses parents
 
     return found
 ```
@@ -1941,6 +2084,29 @@ def test_detached_head_shares_node_with_tag(repo_detached_head):
     types = {r.type for r in node.refs}
     assert RefType.HEAD in types
     assert RefType.TAG in types
+
+
+def test_stash_invariant_on_a_repository_that_has_stashes(repo_stashes):
+    """§10.3 : « un stash n'a qu'une arête entrante ».
+
+    `repo_stashes` est absente d'ALL_REPOS (elle expose un objet différent
+    de RepoBuilder), donc l'invariant paramétré ne s'exécuterait sur AUCUN
+    dépôt contenant un stash — il passerait à vide. Ce test le vérifie là
+    où il a du sens.
+    """
+    from tortoisepy.core.model import NodeKind
+
+    graph = build_graph(repo_stashes.repo)
+    stash_nodes = [n for n in graph.nodes if n.kind is NodeKind.STASH]
+    assert stash_nodes, "la fixture doit contenir au moins un stash"
+
+    for node in stash_nodes:
+        incoming = [e for e in graph.edges if e.descendant == node.oid]
+        assert len(incoming) == 1, (
+            f"{node.refs[0].name} a {len(incoming)} arêtes entrantes au lieu d'une"
+        )
+        outgoing = [e for e in graph.edges if e.ancestor == node.oid]
+        assert not outgoing, "un stash ne doit rien avoir en aval"
 ```
 
 - [ ] **Step 3: Exécuter**

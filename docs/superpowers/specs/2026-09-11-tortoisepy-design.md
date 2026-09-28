@@ -280,15 +280,45 @@ sont collectés à part (voir étape 5).
 
 - il porte une ref ;
 - il appartient à l'ensemble des merge-bases entre deux pointes de refs ;
-- c'est un commit de merge dont au moins deux parents mènent à des refs
-  distinctes ;
+- **c'est un commit de merge** (deux parents ou plus), sans condition sur ses
+  parents ;
+- **c'est un parent direct d'un commit de merge** ;
 - c'est une racine (aucun parent).
 
-**Deux branches peuvent avoir plusieurs merge-bases.** Vérifié sur un dépôt à
-merges croisés : `git merge-base -a` en retourne deux là où `git merge-base`
-n'en retourne qu'un. L'implémentation doit donc utiliser l'équivalent de
-`merge-base --all` et traiter **tous** les résultats. Utiliser la forme
-singulière raterait des jonctions et reproduirait le défaut que §4.2 décrit.
+**Pourquoi les parents de merge comptent.** Une version antérieure exigeait
+« un merge dont au moins deux parents mènent à des refs distinctes ». Vérifié à
+l'exécution : sur un octopus `base → {p1,p2,p3,p4} → octopus` dont seul
+`octopus` porte une ref, cette règle ne marquait aucun parent. La compression
+remontait alors les quatre chemins jusqu'à `base`, et la déduplication par
+couple (ancêtre, descendant) n'en gardait **qu'une seule arête sur quatre** :
+le graphe perdait trois branches silencieusement.
+
+Marquer les parents directs d'un merge garantit qu'un point de divergence reste
+un nœud, donc qu'un chemin parallèle reste une arête distincte.
+
+**Deux branches peuvent avoir plusieurs merge-bases, et pygit2 ne sait pas les
+énumérer.** Vérifié le 2026-09-11 sur pygit2 1.20.0, dépôt à merges croisés :
+`git merge-base -a` retourne **deux** bases ; `merge_base`, `merge_base_many` et
+`merge_base_octopus` retournent toutes **une seule** — la même. Aucune API
+pygit2 n'expose l'équivalent de `--all`.
+
+**L'implémentation n'utilise donc aucune API merge-base.** Les jonctions sont
+détectées par **parcours du DAG avec marquage par pointe** :
+
+1. Pour chaque pointe de ref, parcourir ses ancêtres et marquer chaque commit
+   atteint du nom de cette pointe.
+2. Les commits marqués par au moins deux pointes sont les **ancêtres communs**.
+3. Parmi eux, retenir les **maximaux** : ceux dont aucun enfant n'est lui-même
+   un ancêtre commun des mêmes pointes. Ce sont les merge-bases.
+
+Prototype validé : sur le dépôt à merges croisés, cette méthode retrouve
+exactement les deux bases que `git merge-base -a` rapporte, sans faux positif ni
+omission.
+
+Cette approche était présentée plus bas comme une optimisation à envisager pour
+les gros dépôts. La contrainte d'API en fait la voie principale — avec
+l'avantage d'être linéaire en nombre de commits au lieu de quadratique en
+nombre de refs.
 
 **Les merges octopus existent.** Vérifié : `git merge b1 b2 b3` produit un commit
 à **quatre parents**. La règle ci-dessus est formulée en « au moins deux
@@ -325,16 +355,15 @@ Les confondre produirait un code où corriger l'une casse l'autre.
 par une seule arête à son **premier parent**, en ignorant ses deuxième et
 troisième parents. Les stashes ne participent ni à l'étape 2 ni à l'étape 4.
 
-**Complexité.** L'étape 2 est le point sensible : calculer les merge-bases pour
-toutes les paires de refs est quadratique en nombre de refs. `pygit2` expose
-`merge_base_many()`, qui permet de traiter plusieurs pointes en un appel. Pour
-un dépôt à 50 refs, l'approche par paires reste acceptable (~1 225 appels). Un
-dépôt à plusieurs centaines de refs demandera un parcours unique avec marquage
-de couleur par ref atteinte.
+**Complexité.** Le parcours avec marquage est linéaire en nombre de commits
+atteignables, et coûte un parcours par pointe de ref. Il remplace l'approche
+par paires d'appels merge-base, quadratique en nombre de refs, que la contrainte
+d'API rendait de toute façon impossible.
 
-**La v1 implémente la version par paires. L'optimisation attend une mesure
-démontrant qu'elle est nécessaire** — mais le découpage en étapes ci-dessus
-permet de remplacer l'étape 2 sans toucher au reste.
+Le point sensible devient la mémoire : le marquage associe à chaque commit
+l'ensemble des pointes qui l'atteignent. Sur un dépôt à 100 000 commits et
+200 refs, c'est acceptable mais mesurable — d'où la tâche de mesure prévue en
+§12.1.
 
 ### 6.2 Disposition
 
@@ -361,6 +390,38 @@ stable** : deux ouvertures successives sur un dépôt inchangé doivent produire
 même image.
 
 ## 7. Interactions
+
+### 7.0 Lecture seule par défaut — exigence absolue
+
+**Ouvrir, afficher, naviguer, zoomer, sélectionner, rafraîchir : rien de tout
+cela n'écrit dans le dépôt.** Aucune écriture dans `.git`, y compris l'index,
+le reflog, les refs ou la configuration.
+
+La **seule** écriture autorisée est celle qu'un utilisateur déclenche
+explicitement par une commande du menu contextuel (§7.3), après la
+confirmation prévue en §7.5 le cas échéant.
+
+Un outil de visualisation qui altère silencieusement un dépôt de travail est
+inacceptable : l'utilisateur doit pouvoir l'ouvrir sur un dépôt professionnel
+sans y réfléchir.
+
+**Vérifié, pas supposé.** `tests/test_read_only.py` prend une empreinte de tout
+le contenu de `.git` — chemins, tailles, dates de modification à la
+nanoseconde — avant et après chaque opération de lecture, y compris l'ouverture
+complète de la fenêtre avec sa surveillance active. Toute écriture la fait
+changer ; la garde elle-même a été validée en injectant une écriture
+volontaire.
+
+Mesuré le 2026-09-25 sur pygit2 1.20 : `repo.status()`, `read_state()`,
+`build_graph()`, `commits_for_node()` et la lecture des références n'écrivent
+rien. Ce point méritait vérification — selon les versions de libgit2,
+`status()` peut rafraîchir le cache de l'index sur disque.
+
+**Écritures implicites à surveiller** lors des évolutions : `repo.index.write()`,
+`repo.checkout()`, `repo.set_head()`, `repo.state_cleanup()`, `repo.reset()`,
+`repo.stash()`, et toute écriture de configuration. Une garde
+d'architecture (`test_ui_never_calls_pygit2_directly_for_operations`) fait
+échouer la suite si une opération d'écriture apparaît dans `ui/`.
 
 ### 7.1 Navigation
 
@@ -563,10 +624,14 @@ Découverte du dépôt via `pygit2.discover_repository()`, qui remonte
 l'arborescence comme le fait Git — la commande fonctionne donc depuis n'importe
 quel sous-dossier.
 
-**Attention :** `discover_repository()` lève une exception lorsqu'aucun dépôt
-n'est trouvé (`KeyError` sur les versions anciennes de pygit2, `GitError` sur les
-récentes). Elle ne retourne pas `None`. La gestion d'erreur doit donc passer par
-`try/except` sur ces deux types, et non par un test de nullité.
+**Attention** (vérifié sur pygit2 1.20.0 / libgit2 1.9.6, 2026-09-11) :
+`discover_repository()` **retourne `None`** lorsqu'aucun dépôt n'est trouvé.
+Elle ne lève pas.
+
+Une version antérieure de cette spec affirmait le contraire. C'était faux, et
+non vérifié. Le code teste donc `is None`, tout en conservant un `try/except`
+sur `GitError` et `KeyError` en ceinture et bretelles — d'anciennes versions de
+pygit2 ont pu lever, et le coût de la double protection est nul.
 
 En l'absence de dépôt, la commande affiche un message sur stderr et sort avec le
 code 1, sans ouvrir de fenêtre.
@@ -742,7 +807,7 @@ v1, à mesurer sur les fixtures :
 | Commits dans le DAG chargé | 100 000 |
 | `DisplayNode` après compression | 500 |
 | Arêtes après réduction | 1 000 |
-| Construction du graphe (dépôt à 200 refs) | < 2 s |
+| Construction du graphe (dépôt à 200 refs, 2 000 commits) | **0,66 s mesurés** (2026-09-25, pygit2 1.20.0, Python 3.13), cible < 2 s — tenue |
 | Reconstruction après opération | < 500 ms |
 | Rendu, zoom, panoramique | fluide, sans seuil chiffré |
 
@@ -750,6 +815,30 @@ La compression est précisément ce qui rend ces chiffres tenables : un dépôt 
 100 000 commits et 200 refs produit quelques centaines de `DisplayNode`, pas
 100 000. Si un dépôt réel dépasse 500 nœuds affichés, c'est la stratégie de
 compression qu'il faudra revoir, pas le moteur de rendu.
+
+**Ce que la première mesure a révélé.** La version initiale lançait un parcours
+du DAG **par pointe de ref**. Sur 200 branches d'une chaîne de 2 000 commits,
+cela produisait 201 200 visites pour 2 001 commits uniques — une redondance de
+facteur 101, et 44 s de construction, vingt-deux fois la cible.
+
+La correction tient en une ligne d'API : `walker.push()` alimente **un seul**
+parcours avec toutes les pointes. Un unique parcours coûte 0,24 s. Le marquage
+par pointe et le repérage des merges, parents de merges et racines se font
+désormais dans cette même passe, au lieu de deux séries de parcours séparées.
+
+Résultat : 0,66 s au lieu de 44 s, à ensemble de commits significatifs
+rigoureusement identique (vérifié par comparaison des deux implémentations).
+C'est l'intérêt d'avoir mesuré plutôt que supposé : la spec affirmait que
+l'approche était « acceptable » sans aucun chiffre.
+
+**Sur la mesure elle-même.** Le premier appel paie le remplissage du cache
+d'objets Git, les suivants non : `0,72 / 0,28 / 0,28 s` sur trois exécutions
+consécutives. Sous charge, une mesure unique est montée jusqu'à 2,93 s sans que
+le code change.
+
+Le test retient donc le **meilleur** de trois exécutions : le minimum mesure le
+code, la moyenne mesurerait surtout le bruit de la machine et le cache froid.
+Un seuil absolu sur une mesure unique produisait des échecs aléatoires.
 
 ### 12.2 Risque connu : empaquetage
 
