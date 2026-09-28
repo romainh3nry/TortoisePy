@@ -473,6 +473,20 @@ def commit_selection(
         "HEAD", signature, signature, text, tree, parents
     )
 
+    # Un `git commit` termine l'opération en cours : il efface
+    # `REVERT_HEAD`, `MERGE_MSG` et consorts. Sans ce nettoyage, git
+    # croirait le revert toujours en cours après son propre commit, et
+    # l'interface continuerait de griser checkout et merge.
+    # Signalé sur le dépôt `portfolio` : le revert était commité ET poussé,
+    # mais `REVERT_HEAD` traînait encore.
+    if repo.state() != pygit2.enums.RepositoryState.NONE:
+        try:
+            repo.state_cleanup()
+        except pygit2.GitError:
+            # Le commit est acquis : ne pas le transformer en échec pour
+            # un nettoyage de métadonnées raté.
+            pass
+
     count = len(selected)
     plural = "" if count == 1 else "s"
     return succeeded(f"Committed {count} file{plural} — {str(oid)[:8]}")

@@ -1,5 +1,6 @@
 import os
 import subprocess
+from pathlib import Path
 
 import pygit2
 import pytest
@@ -197,3 +198,48 @@ def test_broken_symlink_is_committed_not_treated_as_deletion(repo):
 
     tree = repo.get(repo.head.target).tree
     assert tree["lien-casse"].filemode == 0o120000
+
+
+def test_commit_ends_an_in_progress_revert(repo):
+    """Régression signalée sur le dépôt `portfolio` le 2026-09-28.
+
+    Un `git commit` termine l'opération en cours : il efface `REVERT_HEAD`
+    et `MERGE_MSG`. `commit_selection` ne le faisait pas, donc après avoir
+    commité — et même poussé — son revert, l'utilisateur voyait encore
+    « Switch / Checkout » grisé et un « Abort revert » dans le menu.
+    """
+    # Un dépôt propre : `git revert` refuse de s'exécuter si l'arbre de
+    # travail est sale, ce qui est le cas de la fixture partagée.
+    path = Path(repo.workdir).parent / "revert"
+    path.mkdir()
+    run_git(path, "init", "-q", "-b", "main")
+    (path / "f.txt").write_text("ligne 1\n")
+    run_git(path, "add", ".")
+    run_git(path, "commit", "-q", "-m", "base")
+    (path / "f.txt").write_text("ligne 1\nligne 2\n")
+    run_git(path, "add", ".")
+    run_git(path, "commit", "-q", "-m", "à annuler")
+
+    run_git(path, "revert", "--no-commit", "HEAD")
+    assert (path / ".git" / "REVERT_HEAD").exists(), (
+        "la fixture doit vraiment mettre un revert en cours"
+    )
+
+    repository = pygit2.Repository(str(path))
+    assert repository.state() != pygit2.enums.RepositoryState.NONE
+
+    result = commit_selection(repository, ("f.txt",), "revert terminé")
+    assert result.success is True, result.git_error
+
+    fresh = pygit2.Repository(str(path))
+    assert fresh.state() == pygit2.enums.RepositoryState.NONE
+    assert not (path / ".git" / "REVERT_HEAD").exists()
+
+
+def test_commit_without_an_operation_is_unaffected(repo):
+    """Le nettoyage ne doit rien casser dans le cas courant."""
+    result = commit_selection(repo, ("a.txt",), "commit ordinaire")
+    assert result.success is True
+    assert pygit2.Repository(repo.path).state() == (
+        pygit2.enums.RepositoryState.NONE
+    )
