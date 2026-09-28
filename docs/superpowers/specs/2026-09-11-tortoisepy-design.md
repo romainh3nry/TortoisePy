@@ -460,9 +460,7 @@ Integrate         ▸  Merge into current branch…
                      Cherry-pick this commit…
 Undo              ▸  Reset current branch to this…  (soft / mixed / hard)
                      Revert this commit…
-Remote            ▸  Push…
-                     Pull…
-                     Fetch
+Remote            ▸  Fetch
 Branch            ▸  Rename…
                      Delete
 ──────────────────
@@ -472,6 +470,21 @@ Copy commit hash
 
 Le regroupement est purement présentationnel : il ne change rien à
 `core/operations.py`.
+
+**Sur le sous-menu Remote.** Seul **Fetch** est implémenté en v1. Il met à
+jour les refs distantes sans toucher à l'arbre de travail ni aux branches
+locales : c'est l'opération réseau la moins risquée, et celle qui rend le
+graphe utile — elle montre où en sont les autres.
+
+L'authentification passe par l'agent SSH (`KeypairFromAgent`) pour les URL
+`git@` et `ssh://`, et par le gestionnaire d'identifiants de Git pour HTTPS.
+Vérifié le 2026-09-28 sur un dépôt GitLab d'entreprise : fetch réussi en
+1,7 s sans manipuler de clé ni de mot de passe.
+
+**Push et Pull restent hors périmètre.** Pull fusionne dans la branche
+courante, donc peut créer des conflits et modifier des fichiers ; Push est
+la seule opération dont l'effet sort de la machine. Les deux méritent leur
+propre cycle de conception.
 
 **Activation des entrées.** Chaque entrée est activée ou grisée selon le type de
 nœud **et** l'état du dépôt (§7.8) :

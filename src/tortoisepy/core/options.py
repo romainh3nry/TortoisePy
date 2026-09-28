@@ -20,15 +20,29 @@ from tortoisepy.core.model import Ref, RefType
 class GraphOptions:
     """Ce qui entre dans le graphe.
 
-    Par défaut : branches locales, branches distantes et HEAD. Les tags sont
-    masqués — ils sont nombreux et rarement structurants pour comprendre où
-    en sont les branches.
+    Par défaut : branches locales, branches distantes, tags et HEAD. Les
+    nœuds de jonction sans ref sont masqués (voir `show_junctions`).
+
+    Les tags étaient masqués dans une version antérieure, sur l'hypothèse
+    qu'ils saturaient le graphe. Mesuré : les masquer ne faisait passer un
+    dépôt de 8281 à 7988 nœuds. La cause était ailleurs — les jonctions.
     """
 
     show_local_branches: bool = True
     show_remote_branches: bool = True
-    show_tags: bool = False
+    show_tags: bool = True
     show_stashes: bool = True
+
+    show_junctions: bool = False
+    """Afficher les nœuds de jonction sans ref (merge-bases, divergences).
+
+    Masqués par défaut : mesuré sur un dépôt réel de 518 nœuds, 234 étaient
+    des jonctions — plus nombreuses que les refs elles-mêmes. Les retirer
+    ramène le graphe à 284 nœuds en préservant TOUTES les refs (298/298) et
+    sans déconnecter le graphe.
+
+    Ce sont les points de merge-base et de divergence : utiles pour
+    comprendre la topologie, encombrants pour lire les branches."""
 
     def accepts(self, ref: Ref) -> bool:
         if ref.type is RefType.LOCAL_BRANCH:

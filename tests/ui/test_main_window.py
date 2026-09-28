@@ -255,3 +255,82 @@ def test_empty_repository_centres_without_crashing(qtbot, tmp_path):
     w = MainWindow(pygit2.Repository(str(path)))
     qtbot.addWidget(w)
     assert w.state.head_oid is None
+
+
+def test_menu_action_runs_the_operation(window, monkeypatch):
+    """Le menu n'affiche plus « pas encore câblé »."""
+    from tortoisepy.ui import actions
+
+    called = []
+    monkeypatch.setattr(
+        actions, "execute_action",
+        lambda action, ctx: called.append(action) or None,
+    )
+
+    node = next(
+        n for n in window.graph.nodes
+        if any(r.name == "feature" for r in n.refs)
+    )
+    window._run_action("checkout_branch", node)
+    assert called == ["checkout_branch"]
+
+
+def test_successful_action_refreshes_the_graph(window, monkeypatch):
+    from tortoisepy.core.results import succeeded
+    from tortoisepy.ui import actions
+
+    monkeypatch.setattr(
+        actions, "execute_action", lambda action, ctx: succeeded("fait")
+    )
+    before = window.view.scene()
+
+    node = window.graph.nodes[0]
+    window._run_action("checkout_branch", node)
+
+    assert window.view.scene() is not before
+
+
+def test_failed_action_still_refreshes_when_the_repo_changed(
+    window, monkeypatch
+):
+    """§7.6 : un merge en conflit échoue mais a modifié le dépôt."""
+    from tortoisepy.core.results import failed
+    from tortoisepy.ui import actions
+
+    monkeypatch.setattr(
+        actions, "execute_action",
+        lambda action, ctx: failed("Fusion", "conflits", repository_changed=True),
+    )
+    monkeypatch.setattr(
+        "tortoisepy.ui.main_window.show_error", lambda parent, result: None
+    )
+    before = window.view.scene()
+
+    window._run_action("merge_branch", window.graph.nodes[0])
+    assert window.view.scene() is not before
+
+
+def test_cancelled_action_does_not_refresh(window, monkeypatch):
+    from tortoisepy.ui import actions
+
+    monkeypatch.setattr(actions, "execute_action", lambda action, ctx: None)
+    before = window.view.scene()
+
+    window._run_action("create_branch", window.graph.nodes[0])
+    assert window.view.scene() is before
+
+
+def test_watcher_is_suspended_during_an_action(window, monkeypatch):
+    """§7.9 : l'application ne doit pas se notifier elle-même."""
+    from tortoisepy.core.results import succeeded
+    from tortoisepy.ui import actions
+
+    seen = []
+    monkeypatch.setattr(
+        actions, "execute_action",
+        lambda action, ctx: seen.append(window.watcher._suspended)
+        or succeeded("fait"),
+    )
+
+    window._run_action("checkout_branch", window.graph.nodes[0])
+    assert seen == [True], "la surveillance doit être suspendue"

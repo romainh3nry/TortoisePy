@@ -277,3 +277,51 @@ OPERATION_CLASSES: dict[str, tuple[str, ...]] = {
 }
 """Classement de §7.7. L'UI s'en sert pour décider du traitement : exécution
 directe, détection d'état intermédiaire, ou confirmation préalable (§7.5)."""
+
+
+# --- Opérations réseau (§7.7, classe « simples ») -----------------------
+
+def _credentials(url: str):
+    """Identifiants pour une URL distante, ou `None` si inutile.
+
+    SSH passe par l'agent : c'est ce qui permet de ne jamais manipuler de
+    clé ni de mot de passe. Vérifié sur un dépôt GitLab d'entreprise.
+    HTTPS repose sur le gestionnaire d'identifiants de Git, que libgit2
+    consulte seul.
+    """
+    if url.startswith(("git@", "ssh://")):
+        return pygit2.KeypairFromAgent("git")
+    return None
+
+
+@guarded("Fetch")
+def fetch_remote(
+    repo: pygit2.Repository, remote_name: str | None = None
+) -> OperationResult:
+    """Met à jour les refs distantes.
+
+    Ne touche ni à l'arbre de travail, ni aux branches locales : c'est
+    l'opération réseau la moins risquée. `remote_name` à `None` traite
+    tous les remotes configurés.
+    """
+    names = (
+        [remote_name] if remote_name else list(repo.remotes.names())
+    )
+    if not names:
+        return failed("Fetch", "no remote configured")
+
+    received = 0
+    for name in names:
+        remote = repo.remotes[name]
+        callbacks = pygit2.RemoteCallbacks(
+            credentials=_credentials(remote.url)
+        )
+        stats = remote.fetch(callbacks=callbacks)
+        received += getattr(stats, "received_objects", 0)
+
+    label = names[0] if len(names) == 1 else f"{len(names)} remotes"
+    if received:
+        return succeeded(f"Fetched {received} objects from {label}")
+
+    # Rien reçu : le dépôt est déjà à jour, donc le graphe est inchangé.
+    return succeeded(f"{label} already up to date", repository_changed=False)

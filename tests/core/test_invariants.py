@@ -87,10 +87,40 @@ def test_multi_ref_commit_groups_all_refs(repo_multi_ref_commit):
 
 
 def test_multiple_roots_produce_two_components(repo_multiple_roots):
-    """§10.4 : deux historiques indépendants restent séparés."""
+    """§10.4 : deux historiques indépendants restent séparés.
+
+    Les racines anonymes sont des jonctions, masquées par défaut (§6.1) :
+    on vérifie donc que les deux HISTORIQUES sont visibles — par leurs
+    refs — et qu'aucune arête ne les relie, plutôt que la présence d'un
+    commit racine sans nom.
+    """
     graph = build_graph(repo_multiple_roots.repo)
-    assert graph.node(repo_multiple_roots.root_a) is not None
-    assert graph.node(repo_multiple_roots.root_b) is not None
+
+    names = {r.name for n in graph.nodes for r in n.refs}
+    assert {"first", "second"} <= names
+
+    from collections import defaultdict
+
+    neighbours = defaultdict(set)
+    for edge in graph.edges:
+        neighbours[edge.ancestor].add(edge.descendant)
+        neighbours[edge.descendant].add(edge.ancestor)
+
+    start = next(
+        n.oid for n in graph.nodes if any(r.name == "first" for r in n.refs)
+    )
+    reachable = {start}
+    stack = [start]
+    while stack:
+        for neighbour in neighbours[stack.pop()]:
+            if neighbour not in reachable:
+                reachable.add(neighbour)
+                stack.append(neighbour)
+
+    second = next(
+        n.oid for n in graph.nodes if any(r.name == "second" for r in n.refs)
+    )
+    assert second not in reachable, "les historiques doivent rester séparés"
 
 
 def test_detached_head_shares_node_with_tag(repo_detached_head):

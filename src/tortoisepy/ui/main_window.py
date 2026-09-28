@@ -11,11 +11,10 @@ from pathlib import Path
 
 import pygit2
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
-    QMessageBox,
     QSplitter,
     QToolBar,
 )
@@ -24,8 +23,16 @@ from tortoisepy.core.commits import commits_for_node
 from tortoisepy.core.graph import build_graph
 from tortoisepy.core.state import read_state
 from tortoisepy.layout.engine import layout_graph
+from tortoisepy.ui import actions
+from tortoisepy.ui.actions import ActionContext
 from tortoisepy.ui.commit_panel import CommitPanel
 from tortoisepy.ui.context_menu import MenuEntry, build_menu_model
+from tortoisepy.ui.dialogs import (
+    ask_name,
+    ask_reset_mode,
+    confirm,
+    show_error,
+)
 from tortoisepy.ui.graph_view import GraphView
 from tortoisepy.ui.theme import QtMeasurer
 from tortoisepy.ui.watcher import RepositoryWatcher
@@ -209,15 +216,56 @@ class MainWindow(QMainWindow):
             else:
                 action = menu.addAction(entry.label)
                 action.setEnabled(entry.enabled)
-                action.setData(entry.action)
                 action.triggered.connect(
-                    lambda checked=False, e=entry: self._not_implemented(e)
+                    lambda checked=False, name=entry.action: self._run_action(
+                        name, self._selected_node()
+                    )
                 )
 
-    def _not_implemented(self, entry: MenuEntry) -> None:
-        """Les actions sont câblées en phase 5 ; ici, un message honnête."""
-        QMessageBox.information(
-            self,
-            entry.label,
-            f"L'action « {entry.label} » n'est pas encore câblée.",
+    def _selected_node(self):
+        """Le nœud sélectionné, ou None s'il n'y en a pas exactement un."""
+        if self.graph is None:
+            return None
+        selected = self.view.selected_oids()
+        if len(selected) != 1:
+            return None
+        return self.graph.node(selected[0])
+
+    def _run_action(self, action: str | None, node) -> None:
+        """Exécute une action du menu — le seul endroit qui écrit (§7.0).
+
+        La surveillance est suspendue le temps de l'opération : le
+        rafraîchissement est déjà assuré par `repository_changed`, et
+        laisser le watcher réagir déclencherait une reconstruction de plus
+        (§7.9).
+        """
+        if action is None or node is None or self.state is None:
+            return
+
+        context = ActionContext(
+            repository=self.repository,
+            node=node,
+            state=self.state,
+            parent=self,
+            ask_name=ask_name,
+            ask_mode=ask_reset_mode,
+            confirm=confirm,
+            copy=self._copy_to_clipboard,
         )
+
+        with self.watcher.suspended():
+            result = actions.execute_action(action, context)
+
+        if result is None:
+            return  # annulé par l'utilisateur, ou action sans effet
+
+        if result.repository_changed:
+            self.refresh()
+
+        if not result.success:
+            show_error(self, result)
+
+    def _copy_to_clipboard(self, text: str) -> None:
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(text)

@@ -1,4 +1,7 @@
+from pathlib import Path
+
 from tortoisepy.core.graph import build_graph
+from tortoisepy.core.options import GraphOptions
 from tortoisepy.core.model import NodeKind
 
 
@@ -79,9 +82,40 @@ def test_long_history_compresses_below_ten_nodes(repo_long_linear):
 
 
 def test_octopus_graph_keeps_four_incoming_edges(repo_octopus):
-    graph = build_graph(repo_octopus.repo)
+    """Les quatre branches d'un octopus restent distinctes.
+
+    La fixture ne met une ref que sur le commit de merge : ses parents
+    sont des jonctions, masquées par défaut (§6.1). On demande donc à les
+    voir — c'est la topologie qu'on teste ici, pas le filtrage.
+
+    Sur un octopus réel, dont les branches fusionnées existent encore, les
+    quatre arêtes sont conservées sans cette option (vérifié).
+    """
+    graph = build_graph(repo_octopus.repo, GraphOptions(show_junctions=True))
     incoming = [e for e in graph.edges if e.descendant == repo_octopus.octopus_oid]
     assert len(incoming) == 4
+
+
+def test_octopus_with_named_branches_keeps_its_edges(tmp_path):
+    """Le cas réel : les branches fusionnées portent encore un nom."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from tests.fixtures.builder import RepoBuilder
+
+    b = RepoBuilder(tmp_path / "octopus-nomme")
+    base = b.commit("base")
+    b.branch("main", base)
+    parents = []
+    for index in range(1, 5):
+        oid = b.commit(f"p{index}", parents=[base])
+        b.branch(f"feat{index}", oid)
+        parents.append(oid)
+    octopus = b.commit("octopus", parents=parents)
+    b.branch("main", octopus)
+
+    graph = build_graph(b.repo)
+    incoming = [e for e in graph.edges if e.descendant == octopus]
+    assert len(incoming) == 4, "les quatre branches doivent rester visibles"
 
 
 def test_empty_repository_yields_empty_graph(tmp_path):

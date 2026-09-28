@@ -119,23 +119,39 @@ def test_commits_on_edge_is_newest_first(repo):
 
 
 def test_commits_for_node_reveals_what_the_edge_hides(repo):
-    """Le cœur de §4.2.1 : la compression est visuelle, rien n'est perdu."""
+    """Le cœur de §4.2.1 : la compression est visuelle, rien n'est perdu.
+
+    Sur un dépôt à une seule branche, le graphe n'a qu'un nœud et aucune
+    arête — les jonctions étant masquées (§6.1). Les commits doivent
+    rester atteignables malgré tout : sinon la compression deviendrait
+    sémantique, ce que la spec interdit.
+    """
     graph = build_graph(repo)
     tip = str(repo.head.target)
-    edge = next(e for e in graph.edges if e.descendant == tip)
 
     result = commits_for_node(repo, graph, tip)
-    assert len(result) == edge.skipped_count + 1
+    total = len(list(repo.walk(repo.head.target)))
+    assert len(result) == total, "tous les commits doivent rester accessibles"
 
 
-def test_commits_for_node_on_a_root_returns_one(repo):
+def test_commits_for_node_on_a_node_without_incoming_edge(repo):
+    """Un nœud sans arête entrante remonte son historique réel.
+
+    Auparavant il ne montrait que son propre commit. Depuis que les
+    jonctions sont masquées, ce cas recouvre aussi les nœuds dont la
+    jonction amont a disparu : s'arrêter au premier commit rendrait les
+    autres inatteignables (§4.2.1).
+    """
     graph = build_graph(repo)
-    roots = [
+    orphans = [
         n.oid for n in graph.nodes
         if not any(e.descendant == n.oid for e in graph.edges)
     ]
-    assert roots
-    assert len(commits_for_node(repo, graph, roots[0])) == 1
+    assert orphans
+
+    revealed = commits_for_node(repo, graph, orphans[0])
+    assert len(revealed) >= 1
+    assert revealed[0].oid == orphans[0], "le commit du nœud vient en tête"
 
 
 def test_commits_for_node_on_unknown_oid_is_empty(repo):

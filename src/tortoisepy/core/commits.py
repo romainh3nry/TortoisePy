@@ -81,14 +81,17 @@ def commits_for_node(
     Ce sont ceux que l'arête entrante masque : exactement ce qu'annonce son
     étiquette (« 40 commits »), plus le commit du nœud lui-même.
 
-    Un nœud sans arête entrante — une racine — ne montre que son propre
-    commit.
+    Un nœud sans arête entrante — une racine, ou un nœud dont la jonction
+    amont est masquée — fait remonter son historique réel.
     """
     incoming = [e for e in graph.edges if e.descendant == oid]
 
     if not incoming:
-        info = read_commit(repo, oid)
-        return (info,) if info is not None else ()
+        # Aucune arête entrante : soit c'est une racine, soit les jonctions
+        # qui portaient les commits sautés ont été retirées de l'affichage.
+        # Dans les deux cas on remonte l'historique réel, sinon les commits
+        # deviendraient inatteignables — ce que §4.2.1 interdit.
+        return _walk_back(repo, oid, graph)
 
     # Plusieurs arêtes entrantes (un merge) : on prend la plus chargée,
     # celle qui masque le plus de travail.
@@ -112,3 +115,34 @@ def _when(signature: pygit2.Signature) -> datetime:
         return datetime.fromtimestamp(signature.time, tz)
     except (ValueError, OSError, OverflowError):
         return datetime.fromtimestamp(0, timezone.utc)
+
+
+def _walk_back(
+    repo: pygit2.Repository, oid: Oid, graph: DisplayGraph, limit: int = 200
+) -> tuple[CommitInfo, ...]:
+    """Remonte l'historique depuis un commit, jusqu'au nœud affiché suivant.
+
+    Sert aux nœuds sans arête entrante : une racine, ou un nœud dont la
+    jonction amont a été masquée. `limit` évite de parcourir tout un
+    historique de plusieurs milliers de commits pour un panneau latéral.
+    """
+    others = {node.oid for node in graph.nodes} - {oid}
+    collected: list[CommitInfo] = []
+
+    try:
+        walker = repo.walk(pygit2.Oid(hex=oid), pygit2.GIT_SORT_TOPOLOGICAL)
+    except (pygit2.GitError, ValueError, KeyError):
+        info = read_commit(repo, oid)
+        return (info,) if info is not None else ()
+
+    for commit in walker:
+        current = str(commit.id)
+        if current != oid and current in others:
+            break  # on a rejoint un autre nœud du graphe
+        info = read_commit(repo, current)
+        if info is not None:
+            collected.append(info)
+        if len(collected) >= limit:
+            break
+
+    return tuple(collected)

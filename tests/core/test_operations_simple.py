@@ -154,3 +154,64 @@ def test_every_operation_returns_a_result_never_raises(repo):
     for call in calls:
         result = call()  # ne doit jamais lever
         assert result.success is False
+
+
+def test_fetch_without_remote_fails_cleanly(repo):
+    """Un dépôt sans remote ne doit pas planter."""
+    from tortoisepy.core.operations import fetch_remote
+
+    result = fetch_remote(repo)
+    assert result.success is False
+    assert "remote" in (result.git_error or "").lower()
+    assert result.repository_changed is False
+
+
+def test_fetch_from_a_local_remote(repo, tmp_path):
+    """Fetch depuis un dépôt local : pas de réseau, mais le vrai code.
+
+    Un remote « file:// » emprunte le même chemin que SSH ou HTTPS dans
+    libgit2, sans dépendre d'un serveur joignable.
+    """
+    from tortoisepy.core.operations import fetch_remote
+
+    source = tmp_path / "source"
+    source.mkdir()
+    run_git(source, "init", "-q", "-b", "master")
+    (source / "f.txt").write_text("amont\n")
+    run_git(source, "add", ".")
+    run_git(source, "commit", "-q", "-m", "amont")
+
+    repo.remotes.create("origin", f"file://{source}")
+
+    result = fetch_remote(repo)
+    assert result.success is True, result.git_error
+    assert "refs/remotes/origin/master" in repo.references
+
+
+def test_fetch_twice_reports_no_change(repo, tmp_path):
+    """Le second fetch ne ramène rien : le graphe n'a pas à être reconstruit."""
+    from tortoisepy.core.operations import fetch_remote
+
+    source = tmp_path / "source2"
+    source.mkdir()
+    run_git(source, "init", "-q", "-b", "master")
+    (source / "f.txt").write_text("amont\n")
+    run_git(source, "add", ".")
+    run_git(source, "commit", "-q", "-m", "amont")
+
+    repo.remotes.create("origin", f"file://{source}")
+    fetch_remote(repo)
+
+    second = fetch_remote(repo)
+    assert second.success is True
+    assert second.repository_changed is False
+
+
+def test_fetch_from_an_unreachable_remote_fails_cleanly(repo):
+    """Une URL injoignable ne doit pas laisser remonter d'exception."""
+    from tortoisepy.core.operations import fetch_remote
+
+    repo.remotes.create("origin", "file:///chemin/qui/nexiste/pas")
+    result = fetch_remote(repo)
+    assert result.success is False
+    assert result.git_error

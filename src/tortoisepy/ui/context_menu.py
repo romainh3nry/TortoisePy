@@ -50,10 +50,10 @@ def build_menu_model(
 def _comparison_menu(nodes: tuple[DisplayNode, ...]) -> tuple[MenuEntry, ...]:
     """§7.4 : menu de deux nœuds sélectionnés."""
     return (
-        MenuEntry("Comparer les révisions…", "compare_revisions"),
-        MenuEntry("Journal des différences…", "show_log_of_differences"),
+        MenuEntry("Compare revisions", "compare_revisions"),
+        MenuEntry("Show log of differences", "show_log_of_differences"),
         SEPARATOR,
-        MenuEntry("Copier les hash", "copy_hash"),
+        MenuEntry("Copy SHA-1 to clipboard", "copy_hash"),
     )
 
 
@@ -74,30 +74,30 @@ def _single_node_menu(
 
     entries: list[MenuEntry] = [
         MenuEntry(
-            "Checkout / Basculer",
+            "Switch / Checkout to revision",
             "checkout_branch",
             enabled=can_checkout,
             needs_confirmation=dirty,
         ),
         SEPARATOR,
         MenuEntry(
-            "Créer",
+            "Create",
             children=(
-                MenuEntry("Branche ici…", "create_branch", enabled=actionable),
-                MenuEntry("Tag ici…", "create_tag", enabled=actionable),
+                MenuEntry("Branch from revision…", "create_branch", enabled=actionable),
+                MenuEntry("Tag from revision…", "create_tag", enabled=actionable),
             ),
         ),
         MenuEntry(
-            "Intégrer",
+            "Integrate",
             children=(
                 MenuEntry(
-                    "Fusionner dans la branche courante…",
+                    "Merge…",
                     "merge_branch",
                     enabled=can_merge,
                     needs_confirmation=dirty,
                 ),
                 MenuEntry(
-                    "Cherry-pick ce commit…",
+                    "Cherry Pick this commit…",
                     "cherry_pick",
                     enabled=actionable,
                     needs_confirmation=dirty,
@@ -105,16 +105,16 @@ def _single_node_menu(
             ),
         ),
         MenuEntry(
-            "Annuler",
+            "Undo",
             children=(
                 MenuEntry(
-                    "Réinitialiser la branche courante ici…",
+                    "Reset (current branch) to this…",
                     "reset_to",
                     enabled=actionable,
                     needs_confirmation=True,
                 ),
                 MenuEntry(
-                    "Revert ce commit…",
+                    "Revert change by this commit…",
                     "revert_commit",
                     enabled=actionable,
                     needs_confirmation=True,
@@ -122,13 +122,26 @@ def _single_node_menu(
             ),
         ),
         MenuEntry(
-            "Branche",
+            "Remote",
             children=(
                 MenuEntry(
-                    "Renommer…", "rename_branch", enabled=can_modify_branch
+                    "Fetch",
+                    "fetch_remote",
+                    # Fetch ne touche ni à l'arbre de travail ni aux
+                    # branches locales : il reste actif même pendant un
+                    # merge en cours, et sur un nœud tag ou stash.
+                    enabled=True,
+                ),
+            ),
+        ),
+        MenuEntry(
+            "Branch",
+            children=(
+                MenuEntry(
+                    "Rename branch…", "rename_branch", enabled=can_modify_branch
                 ),
                 MenuEntry(
-                    "Supprimer",
+                    "Delete branch",
                     "delete_branch",
                     enabled=can_modify_branch and not is_current,
                     needs_confirmation=True,
@@ -141,7 +154,7 @@ def _single_node_menu(
         entries.append(SEPARATOR)
         entries.append(
             MenuEntry(
-                f"Abandonner le {state.operation_in_progress}",
+                f"Abort {state.operation_in_progress}",
                 "abort_operation",
                 enabled=True,
                 needs_confirmation=True,
@@ -149,8 +162,8 @@ def _single_node_menu(
         )
 
     entries.append(SEPARATOR)
-    entries.append(MenuEntry("Afficher le journal", "show_log"))
-    entries.append(MenuEntry("Copier le hash", "copy_hash"))
+    entries.append(MenuEntry("Show log", "show_log"))
+    entries.append(MenuEntry("Copy SHA-1 to clipboard", "copy_hash"))
 
     return tuple(entries)
 

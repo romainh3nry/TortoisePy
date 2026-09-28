@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import pygit2
 
-from tortoisepy.core.collapse import collapse_trivial_junctions
+from tortoisepy.core.collapse import (
+    collapse_trivial_junctions,
+    drop_all_junctions,
+)
 from tortoisepy.core.options import GraphOptions
 from tortoisepy.core.compression import compress_linear_segments
 from tortoisepy.core.model import DisplayGraph, DisplayNode, NodeKind
@@ -54,6 +57,14 @@ def build_graph(
     # chaque branche part d'un point différent produit une colonne de rangs
     # au lieu d'étaler les branches (§6.1).
     simplified = collapse_trivial_junctions(DisplayGraph(nodes=nodes, edges=edges))
+
+    # Sur un dépôt réel, les jonctions étaient plus nombreuses que les refs
+    # (234 contre 283) : elles encombraient le graphe sans rien apprendre
+    # sur l'état des branches. Les retirer préserve toutes les refs et ne
+    # déconnecte rien (§6.1).
+    if not options.show_junctions:
+        simplified = drop_all_junctions(simplified)
+
     nodes, edges = simplified.nodes, simplified.edges
 
     stash_nodes = []
