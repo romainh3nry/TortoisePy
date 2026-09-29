@@ -19,8 +19,23 @@ class MenuEntry:
     label: str
     action: str | None = None
     enabled: bool = True
-    needs_confirmation: bool = False
     children: tuple["MenuEntry", ...] = field(default_factory=tuple)
+
+    needs_confirmation: bool = False
+    """Indication documentaire — **elle ne déclenche rien**.
+
+    La vraie porte est `dialogs.confirmation_for`, interrogée par
+    `actions.execute_action` (ou par l'appelant, pour les actions que la
+    fenêtre principale pilote elle-même). Ce champ n'est lu par aucun
+    consommateur.
+
+    Il a coûté cher une fois : « Drop stash » le portait, un test
+    l'affirmait, et pourtant le stash était détruit même quand
+    l'utilisateur refusait — `confirmation_for` n'avait pas de branche
+    `drop_stash` (trouvé en revue finale de la phase 11). **Poser ce
+    drapeau ne protège rien** : il faut ajouter la branche correspondante
+    et la tester au niveau de `execute_action`.
+    """
 
     branch: str | None = None
     """Branche visée, quand le nœud en porte plusieurs.
@@ -103,6 +118,14 @@ def _single_node_menu(
                 MenuEntry("Branch from revision…", "create_branch", enabled=actionable),
                 MenuEntry("Tag from revision…", "create_tag", enabled=actionable),
             ),
+        ),
+        MenuEntry(
+            "Stash changes…",
+            "stash_changes",
+            # Grisé sur un arbre propre : `repo.stash()` lèverait
+            # « nothing to stash » (vérifié), et proposer une action qui
+            # échouera toujours n'apprend rien.
+            enabled=dirty and not busy,
         ),
         MenuEntry(
             "Integrate",
@@ -231,6 +254,20 @@ def _single_node_menu(
                 needs_confirmation=True,
             )
         )
+
+    if node.kind is NodeKind.STASH:
+        entries.append(SEPARATOR)
+        entries.extend((
+            MenuEntry("Apply stash", "apply_stash", enabled=not busy),
+            MenuEntry("Pop stash", "pop_stash", enabled=not busy),
+            MenuEntry(
+                "Drop stash",
+                "drop_stash",
+                enabled=not busy,
+                # Le seul des trois qui détruit du travail sans le rendre.
+                needs_confirmation=True,
+            ),
+        ))
 
     entries.append(SEPARATOR)
     entries.append(

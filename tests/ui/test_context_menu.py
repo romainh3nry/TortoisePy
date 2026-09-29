@@ -378,3 +378,64 @@ def test_force_push_is_greyed_out_elsewhere():
 
     # Le garde-fou qui manquait : « Push » doit se comporter pareil.
     assert _find(entries, "Push").enabled is False
+
+
+def _stash_node():
+    """Un nœud de stash, comme `core/stashes.py` en produit."""
+    oid = "c" * 40
+    return DisplayNode(
+        oid=oid,
+        kind=NodeKind.STASH,
+        refs=(Ref("stash@{0}", RefType.STASH, oid),),
+    )
+
+
+def _dirty_on_main():
+    return RepositoryState(
+        head_oid="a" * 40, head_branch="main", detached=False,
+        has_unstaged_changes=True, has_staged_changes=False,
+        has_conflicts=False, operation_in_progress=None, conflicted_paths=(),
+    )
+
+
+def test_stashing_is_offered_when_the_tree_is_dirty():
+    entries = build_menu_model((_multi_branch_node(),), _dirty_on_main())
+    entree = _find(entries, "Stash changes…")
+    assert entree is not None
+    assert entree.action == "stash_changes"
+    assert entree.enabled is True
+
+
+def test_stashing_is_greyed_out_on_a_clean_tree():
+    """`repo.stash()` lèverait « nothing to stash » (vérifié)."""
+    entries = build_menu_model((_multi_branch_node(),), _on_main())
+    entree = _find(entries, "Stash changes…")
+    assert entree is not None
+    assert entree.enabled is False
+
+
+def test_a_stash_node_offers_apply_pop_and_drop():
+    entries = build_menu_model((_stash_node(),), _on_main())
+    for label, action in (
+        ("Apply stash", "apply_stash"),
+        ("Pop stash", "pop_stash"),
+        ("Drop stash", "drop_stash"),
+    ):
+        entree = _find(entries, label)
+        assert entree is not None, label
+        assert entree.action == action
+        assert entree.enabled is True
+
+
+def test_dropping_a_stash_is_confirmed():
+    """Le seul geste qui détruit du travail sans le rendre."""
+    entries = build_menu_model((_stash_node(),), _on_main())
+    assert _find(entries, "Drop stash").needs_confirmation is True
+    assert _find(entries, "Apply stash").needs_confirmation is False
+
+
+def test_stash_entries_are_absent_from_an_ordinary_node():
+    """Review Focus 5 : elles n'ont de sens que sur un stash."""
+    entries = build_menu_model((_multi_branch_node(),), _on_main())
+    for label in ("Apply stash", "Pop stash", "Drop stash"):
+        assert _find(entries, label) is None, label

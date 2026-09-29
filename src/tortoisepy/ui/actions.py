@@ -14,6 +14,7 @@ from typing import Callable
 import pygit2
 
 from tortoisepy.core import operations
+from tortoisepy.core import stash_ops
 from tortoisepy.core.model import DisplayNode, RefType
 from tortoisepy.core.results import OperationResult, failed, succeeded
 from tortoisepy.core.state import RepositoryState
@@ -218,6 +219,27 @@ def _not_available(ctx: ActionContext) -> OperationResult | None:
     return None
 
 
+def _stash_changes(ctx: ActionContext) -> OperationResult | None:
+    """Demande un message, puis met de côté."""
+    message = ctx.ask_name(ctx.parent, "Stash", "Message (optional):")
+    if message is None:
+        return None
+    return stash_ops.stash_changes(ctx.repository, message)
+
+
+def _apply_stash(ctx: ActionContext) -> OperationResult | None:
+    """Par l'OID du nœud, pas par un index : les index glissent (§3)."""
+    return stash_ops.apply_stash(ctx.repository, ctx.node.oid)
+
+
+def _pop_stash(ctx: ActionContext) -> OperationResult | None:
+    return stash_ops.pop_stash(ctx.repository, ctx.node.oid)
+
+
+def _drop_stash(ctx: ActionContext) -> OperationResult | None:
+    return stash_ops.drop_stash(ctx.repository, ctx.node.oid)
+
+
 ACTION_HANDLERS: dict[str, Callable[[ActionContext], OperationResult | None]] = {
     "checkout_branch": _checkout_branch,
     "create_branch": _create_branch,
@@ -241,4 +263,8 @@ ACTION_HANDLERS: dict[str, Callable[[ActionContext], OperationResult | None]] = 
     # Hors périmètre v1 : le diff visuel est délégué (§7.4, §11).
     "compare_revisions": _not_available,
     "show_log_of_differences": _not_available,
+    "stash_changes": _stash_changes,
+    "apply_stash": _apply_stash,
+    "pop_stash": _pop_stash,
+    "drop_stash": _drop_stash,
 }

@@ -68,6 +68,17 @@ def confirmation_for(
             destructive=True,
         )
 
+    if action == "drop_stash":
+        return ConfirmationRequest(
+            title="Drop stash — destructive",
+            message=(
+                f"git stash drop {target}\n\n"
+                "The stashed changes are deleted without being restored, "
+                "and cannot be recovered."
+            ),
+            destructive=True,
+        )
+
     if action == "delete_branch":
         return ConfirmationRequest(
             title="Delete branch",
