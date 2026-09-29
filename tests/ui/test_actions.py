@@ -350,3 +350,50 @@ def test_applying_and_popping_a_stash_are_not_confirmed(repo, monkeypatch):
             context(repo, node=stash, confirm=lambda p, r: vus.append(r) or True),
         )
         assert not vus, f"{nom} ne doit pas demander de confirmation"
+
+
+def test_deleting_a_remote_branch_is_refused_when_the_user_declines(
+    repo, monkeypatch
+):
+    """Testé au niveau d'`execute_action`, pas sur `needs_confirmation`.
+
+    Ce champ n'est lu par personne : la leçon de la phase 11, où « Drop
+    stash » détruisait le travail malgré un refus parce que le test
+    vérifiait la décoration et non le comportement.
+    """
+    from tortoisepy.ui import actions as module
+
+    appels = []
+    monkeypatch.setattr(
+        module.operations, "delete_remote_branch",
+        lambda repo, name, remote_name=None: appels.append((name, remote_name)) or None,
+    )
+
+    vus = []
+    resultat = module.execute_action(
+        "delete_remote_branch",
+        context(repo, chosen_branch="origin/feature",
+                confirm=lambda parent, req: vus.append(req) or False),
+    )
+
+    assert vus, "aucune confirmation demandée"
+    assert vus[0].destructive is True
+    assert "cannot undo" in vus[0].message
+    assert resultat is None
+    assert not appels, "rien ne doit partir vers le serveur après un refus"
+
+
+def test_deleting_a_remote_branch_proceeds_when_confirmed(repo, monkeypatch):
+    from tortoisepy.ui import actions as module
+
+    appels = []
+    monkeypatch.setattr(
+        module.operations, "delete_remote_branch",
+        lambda repo, name, remote_name=None: appels.append((name, remote_name)) or None,
+    )
+    module.execute_action(
+        "delete_remote_branch",
+        context(repo, chosen_branch="origin/feature",
+                confirm=lambda *a, **k: True),
+    )
+    assert appels == [("feature", "origin")], appels

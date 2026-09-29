@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from tortoisepy.core.operations import PROTECTED_BRANCHES
 from tortoisepy.core.model import DisplayNode, NodeKind, RefType
 from tortoisepy.core.state import RepositoryState
 
@@ -227,6 +228,7 @@ def _single_node_menu(
                     # façon : ne pas la proposer.
                     exclude=state.head_branch,
                 ),
+                _remote_branch_entry(node, enabled=not busy),
             ),
         ),
     ]
@@ -297,6 +299,73 @@ def _local_branches(node: DisplayNode) -> tuple[str, ...]:
     )
 
 
+def _remote_branches(node: DisplayNode) -> tuple[str, ...]:
+    """Branches distantes portées par ce nœud, `remote/branche` en entier.
+
+    **Indépendant des branches locales.** Une première version partait
+    de `_local_branches` et gardait celles ayant une jumelle distante :
+    l'entrée restait alors grisée sur un nœud ne portant que
+    `origin/test-nav`, sans copie locale (signalé par l'utilisateur) —
+    or c'est le cas le plus utile, celui où l'on nettoie une branche du
+    serveur qu'on ne suit pas.
+
+    Le nom complet est conservé : `origin/x` et `upstream/x` sont deux
+    cibles différentes, et l'action doit savoir à quel serveur parler.
+    """
+    return tuple(
+        sorted(
+            r.name
+            for r in node.refs
+            if r.type is RefType.REMOTE_BRANCH
+            and "/" in r.name
+            and not r.name.endswith("/HEAD")
+            # `main`, `master`, `develop` : le cœur les refuse de toute
+            # façon, et proposer une entrée vouée à l'échec n'apprend
+            # rien. Git ne protège que la branche par défaut du serveur.
+            and r.name.split("/", 1)[1] not in PROTECTED_BRANCHES
+        )
+    )
+
+
+def _remote_branch_entry(node: DisplayNode, *, enabled: bool) -> MenuEntry:
+    """« Delete remote branch… », une entrée ou un sous-menu.
+
+    Deux entrées distinctes plutôt qu'une case à cocher : supprimer sur
+    le serveur est le seul des deux gestes qu'on ne peut pas défaire
+    seul. Grisée si le nœud ne porte aucune branche distante — il n'y
+    aurait alors rien à supprimer là-bas.
+    """
+    distantes = _remote_branches(node)
+    label = "Delete remote branch…"
+
+    if len(distantes) <= 1:
+        return MenuEntry(
+            label,
+            "delete_remote_branch",
+            enabled=enabled and bool(distantes),
+            needs_confirmation=True,
+            branch=distantes[0] if distantes else None,
+        )
+
+    # Plusieurs serveurs, ou plusieurs branches : chacune est nommée,
+    # sinon l'action retomberait sur la première et les autres seraient
+    # inatteignables — le défaut déjà corrigé pour les branches locales.
+    return MenuEntry(
+        label,
+        enabled=enabled,
+        children=tuple(
+            MenuEntry(
+                nom,
+                "delete_remote_branch",
+                enabled=enabled,
+                needs_confirmation=True,
+                branch=nom,
+            )
+            for nom in distantes
+        ),
+    )
+
+
 def _branch_entry(
     label: str,
     action: str,
@@ -305,6 +374,7 @@ def _branch_entry(
     enabled: bool,
     needs_confirmation: bool = False,
     exclude: str | None = None,
+    only: set[str] | None = None,
 ) -> MenuEntry:
     """Entrée simple, ou sous-menu quand le nœud porte plusieurs branches.
 
@@ -316,8 +386,15 @@ def _branch_entry(
 
     `exclude` retire la branche courante des propositions : on ne bascule
     pas sur la branche où l'on est déjà.
+
+    `only` restreint les propositions à un sous-ensemble : supprimer une
+    branche distante n'a de sens que pour celles qui existent vraiment
+    sur un serveur, et un sous-menu proposant les autres mènerait à un
+    échec garanti.
     """
     branches = [b for b in _local_branches(node) if b != exclude]
+    if only is not None:
+        branches = [b for b in branches if b in only]
 
     if len(branches) <= 1:
         return MenuEntry(

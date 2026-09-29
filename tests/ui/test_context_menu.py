@@ -439,3 +439,132 @@ def test_stash_entries_are_absent_from_an_ordinary_node():
     entries = build_menu_model((_multi_branch_node(),), _on_main())
     for label in ("Apply stash", "Pop stash", "Drop stash"):
         assert _find(entries, label) is None, label
+
+
+def _node_with_remote(*, distante=True):
+    """Un nœud portant `feature`, avec ou sans sa jumelle distante."""
+    oid = "d" * 40
+    refs = [Ref("feature", RefType.LOCAL_BRANCH, oid)]
+    if distante:
+        refs.append(Ref("origin/feature", RefType.REMOTE_BRANCH, oid))
+    return DisplayNode(oid=oid, kind=NodeKind.REF, refs=tuple(refs))
+
+
+def test_deleting_a_remote_branch_is_offered_when_one_exists():
+    entries = build_menu_model((_node_with_remote(),), _on_main())
+    entree = _find(entries, "Delete remote branch…")
+    assert entree is not None
+    assert entree.action == "delete_remote_branch"
+    assert entree.enabled is True
+    # Le nom complet : `origin/x` et `upstream/x` sont deux cibles.
+    assert entree.branch == "origin/feature"
+
+
+def test_deleting_a_remote_branch_is_greyed_without_one():
+    """Sans ref distante, il n'y a rien à supprimer là-bas."""
+    entries = build_menu_model((_node_with_remote(distante=False),), _on_main())
+    entree = _find(entries, "Delete remote branch…")
+    assert entree is not None
+    assert entree.enabled is False
+
+
+def test_the_two_deletions_stay_separate():
+    """Le choix de l'utilisateur : deux entrées, deux gestes distincts."""
+    entries = build_menu_model((_node_with_remote(),), _on_main())
+    assert _find(entries, "Delete branch") is not None
+    assert _find(entries, "Delete remote branch…") is not None
+
+
+def test_a_remote_branch_without_a_local_one_can_be_deleted():
+    """Signalé par l'utilisateur : l'entrée était grisée.
+
+    Ma première conception partait des branches **locales** et gardait
+    celles ayant une jumelle distante. Sur un nœud ne portant que
+    `origin/test-nav`, sans copie locale, elle ne trouvait rien — or
+    c'est le cas le plus utile : nettoyer une branche du serveur qu'on
+    ne suit pas.
+    """
+    oid = "f" * 40
+    node = DisplayNode(
+        oid=oid,
+        kind=NodeKind.REF,
+        refs=(Ref("origin/test-nav", RefType.REMOTE_BRANCH, oid),),
+    )
+    entries = build_menu_model((node,), _on_main())
+    entree = _find(entries, "Delete remote branch…")
+    assert entree is not None
+    assert entree.enabled is True
+    assert entree.branch == "origin/test-nav"
+
+
+def test_each_remote_gets_its_own_entry():
+    """`origin/x` et `upstream/x` sont deux cibles différentes."""
+    oid = "e" * 40
+    node = DisplayNode(
+        oid=oid,
+        kind=NodeKind.REF,
+        refs=(
+            Ref("x", RefType.LOCAL_BRANCH, oid),
+            Ref("origin/x", RefType.REMOTE_BRANCH, oid),
+            Ref("upstream/x", RefType.REMOTE_BRANCH, oid),
+        ),
+    )
+    entries = build_menu_model((node,), _on_main())
+    entree = _find(entries, "Delete remote branch…")
+    assert entree is not None
+    assert {e.branch for e in entree.children} == {"origin/x", "upstream/x"}
+
+
+def test_the_remote_head_alias_is_not_offered():
+    """`origin/HEAD` est un alias, pas une branche à supprimer."""
+    oid = "e" * 40
+    node = DisplayNode(
+        oid=oid,
+        kind=NodeKind.REF,
+        refs=(
+            Ref("origin/HEAD", RefType.REMOTE_BRANCH, oid),
+            # Pas `origin/main` : elle est protégée, et ce test porte sur
+            # l'alias `HEAD`, pas sur la protection.
+            Ref("origin/feature", RefType.REMOTE_BRANCH, oid),
+        ),
+    )
+    entries = build_menu_model((node,), _on_main())
+    entree = _find(entries, "Delete remote branch…")
+    assert entree.branch == "origin/feature"
+    assert entree.children == ()
+
+
+def test_integration_branches_are_not_offered_for_remote_deletion():
+    """Le cœur les refuse : proposer l'entrée n'apprendrait rien."""
+    oid = "b" * 40
+    node = DisplayNode(
+        oid=oid,
+        kind=NodeKind.REF,
+        refs=(
+            Ref("origin/main", RefType.REMOTE_BRANCH, oid),
+            Ref("origin/develop", RefType.REMOTE_BRANCH, oid),
+            Ref("origin/master", RefType.REMOTE_BRANCH, oid),
+        ),
+    )
+    entries = build_menu_model((node,), _on_main())
+    entree = _find(entries, "Delete remote branch…")
+    assert entree is not None
+    assert entree.enabled is False
+    assert entree.branch is None
+
+
+def test_an_ordinary_branch_beside_a_protected_one_is_still_offered():
+    """La protection ne doit pas emporter les branches voisines."""
+    oid = "b" * 40
+    node = DisplayNode(
+        oid=oid,
+        kind=NodeKind.REF,
+        refs=(
+            Ref("origin/main", RefType.REMOTE_BRANCH, oid),
+            Ref("origin/feature", RefType.REMOTE_BRANCH, oid),
+        ),
+    )
+    entries = build_menu_model((node,), _on_main())
+    entree = _find(entries, "Delete remote branch…")
+    assert entree.enabled is True
+    assert entree.branch == "origin/feature"

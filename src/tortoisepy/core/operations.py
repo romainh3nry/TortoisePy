@@ -604,6 +604,109 @@ def _push_with_lease(
                   repository_changed=False)
 
 
+PROTECTED_BRANCHES = frozenset({"main", "master", "develop"})
+"""Branches d'intégration qu'on ne supprime pas depuis l'application.
+
+Git ne protège que la branche par défaut du serveur (celle où pointe son
+`HEAD`) — **vérifié** : `develop` et `master` ont été supprimées sans la
+moindre résistance sur un dépôt nu dont la branche par défaut était
+`main`. Or perdre la branche d'intégration d'une équipe est le genre
+d'erreur qu'un clic ne devrait jamais pouvoir provoquer.
+
+La suppression reste possible au terminal : c'est un geste assez rare
+pour mériter d'être délibéré.
+"""
+
+
+def _refus_de_suppression(sortie: str) -> str:
+    """Extrait la raison du refus des bavardages de git.
+
+    Un serveur qui refuse répond une douzaine de lignes `remote:` de
+    conseils de configuration (vérifié) : l'essentiel — « deletion of
+    the current branch prohibited » — s'y perd. On garde la ligne de
+    rejet, ou à défaut la première ligne d'erreur.
+    """
+    lignes = [l.strip() for l in sortie.splitlines() if l.strip()]
+    for ligne in lignes:
+        if "[remote rejected]" in ligne or "[rejected]" in ligne:
+            return ligne.lstrip("! ").strip()
+    for ligne in lignes:
+        if ligne.startswith("error:") and "failed to push" not in ligne:
+            return ligne
+    return lignes[0] if lignes else "deletion failed"
+
+
+@guarded("Delete remote branch")
+def delete_remote_branch(
+    repo: pygit2.Repository, name: str, remote_name: str | None = None
+) -> OperationResult:
+    """Supprime la branche **sur le serveur**. La locale n'est pas touchée.
+
+    Délégué au `git` du système, et non à pygit2, parce que libgit2
+    n'applique pas deux garde-fous que git applique — vérifié sur un
+    dépôt nu :
+
+    - son refspec `:refs/heads/main` a **détruit la branche par défaut**
+      du serveur, là où `git push --delete` répond « deletion of the
+      current branch prohibited » et la préserve ;
+    - supprimer une branche absente du serveur réussissait **en
+      silence**, si bien qu'un nom mal tapé passait pour une réussite ;
+      git répond « remote ref does not exist ».
+
+    Réimplémenter ces protections à la main serait fragile, et c'est le
+    serveur qui doit arbitrer la seconde.
+    """
+    if name in PROTECTED_BRANCHES:
+        return failed(
+            "Delete remote branch",
+            f"'{name}' is an integration branch and cannot be deleted "
+            "from tortoisePy; use the terminal if you really mean to",
+            repository_changed=False,
+        )
+
+    remote = remote_name or _default_remote(repo, name)
+    if remote is None:
+        return failed(
+            "Delete remote branch",
+            "no remote configured",
+            repository_changed=False,
+        )
+
+    try:
+        resultat = subprocess.run(
+            ["git", "push", remote, "--delete", name],
+            cwd=repo.workdir or str(repo.path),
+            capture_output=True,
+            text=True,
+            timeout=_PUSH_TIMEOUT,
+            # Même raison que pour le push : sans cela git poserait une
+            # question sur un terminal absent et resterait suspendu.
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except subprocess.TimeoutExpired:
+        return failed(
+            "Delete remote branch",
+            f"deleting '{name}' on '{remote}' timed out after "
+            f"{_PUSH_TIMEOUT}s",
+            repository_changed=True,
+        )
+    except OSError as erreur:
+        return failed(
+            "Delete remote branch",
+            f"cannot run git: {erreur}",
+            repository_changed=False,
+        )
+
+    if resultat.returncode == 0:
+        return succeeded(f"Deleted {remote}/{name}")
+
+    return failed(
+        "Delete remote branch",
+        _refus_de_suppression(resultat.stderr or resultat.stdout or ""),
+        repository_changed=False,
+    )
+
+
 def _default_remote(repo: pygit2.Repository, branch: str) -> str | None:
     """Remote vers lequel pousser cette branche.
 

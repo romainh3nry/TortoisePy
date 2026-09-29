@@ -79,6 +79,23 @@ def confirmation_for(
             destructive=True,
         )
 
+    if action == "delete_remote_branch":
+        return ConfirmationRequest(
+            title="Delete remote branch — destructive",
+            message=(
+                # `target` vaut « origin/feature » : on le sépare pour
+                # afficher la commande réellement exécutée, et non une
+                # forme approchante que l'utilisateur ne retrouverait pas.
+                f"git push {target.split('/', 1)[0]} --delete "
+                f"{target.split('/', 1)[-1]}\n\n"
+                "The branch is removed from the shared server. Others "
+                "will lose it on their next fetch, and you cannot undo "
+                "this on your own. Any local branch of the same name is "
+                "kept."
+            ),
+            destructive=True,
+        )
+
     if action == "delete_branch":
         return ConfirmationRequest(
             title="Delete branch",

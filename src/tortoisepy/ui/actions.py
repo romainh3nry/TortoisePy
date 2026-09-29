@@ -219,6 +219,25 @@ def _not_available(ctx: ActionContext) -> OperationResult | None:
     return None
 
 
+def _delete_remote_branch(ctx: ActionContext) -> OperationResult | None:
+    """Supprime la branche sur le serveur ; la locale reste.
+
+    La confirmation est posée par `execute_action` via
+    `confirmation_for` — c'est la vraie porte, et non
+    `MenuEntry.needs_confirmation`, qui n'est lu par personne.
+    """
+    cible = ctx.branch
+    if cible is None or "/" not in cible:
+        return None
+    # Le menu donne « origin/feature » : le serveur et la branche sont
+    # séparés ici, car `origin/x` et `upstream/x` sont deux cibles
+    # différentes et l'action doit savoir à qui parler.
+    remote, _, branch = cible.partition("/")
+    return operations.delete_remote_branch(
+        ctx.repository, branch, remote_name=remote
+    )
+
+
 def _stash_changes(ctx: ActionContext) -> OperationResult | None:
     """Demande un message, puis met de côté."""
     message = ctx.ask_name(ctx.parent, "Stash", "Message (optional):")
@@ -246,6 +265,7 @@ ACTION_HANDLERS: dict[str, Callable[[ActionContext], OperationResult | None]] = 
     "create_tag": _create_tag,
     "rename_branch": _rename_branch,
     "delete_branch": _delete_branch,
+    "delete_remote_branch": _delete_remote_branch,
     "merge_branch": _merge_branch,
     "rebase_branch": _rebase_branch,
     "open_conflicts": _open_conflicts,

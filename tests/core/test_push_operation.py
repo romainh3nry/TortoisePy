@@ -488,3 +488,157 @@ def test_a_timed_out_forced_push_says_so(tmp_path, monkeypatch):
     assert result.success is False
     assert "timed out" in (result.git_error or "")
     assert result.repository_changed is True
+
+
+def _avec_branche_distante(tmp_path):
+    """Un serveur, un clone, et une branche `feature` poussée."""
+    bare, work = _serveur_et_clone(tmp_path)
+    run_git(work, "checkout", "-q", "-b", "feature")
+    (work / "g.txt").write_text("travail\n")
+    run_git(work, "add", ".")
+    run_git(work, "commit", "-q", "-m", "travail")
+    run_git(work, "push", "-q", "origin", "feature")
+    run_git(work, "checkout", "-q", "main")
+    return bare, work
+
+
+def test_deleting_a_remote_branch_removes_it_from_the_server(tmp_path):
+    from tortoisepy.core.operations import delete_remote_branch
+
+    bare, work = _avec_branche_distante(tmp_path)
+    result = delete_remote_branch(pygit2.Repository(str(work)), "feature")
+    assert result.success is True, result.git_error
+
+    serveur = pygit2.Repository(str(bare))
+    assert "refs/heads/feature" not in list(serveur.references)
+    assert "refs/heads/main" in list(serveur.references)
+
+
+def test_deleting_a_remote_branch_keeps_the_local_one(tmp_path):
+    """Les deux entrées du menu sont distinctes : celle-ci ne touche pas au local."""
+    from tortoisepy.core.operations import delete_remote_branch
+
+    _, work = _avec_branche_distante(tmp_path)
+    delete_remote_branch(pygit2.Repository(str(work)), "feature")
+
+    local = pygit2.Repository(str(work))
+    assert "feature" in list(local.branches.local), (
+        "la branche locale doit survivre"
+    )
+
+
+def test_deleting_a_branch_absent_from_the_server_is_refused(tmp_path):
+    """pygit2 accepte en silence (vérifié) ; `git` refuse, et c'est mieux.
+
+    Un nom mal tapé passerait sinon pour une réussite.
+    """
+    from tortoisepy.core.operations import delete_remote_branch
+
+    _, work = _avec_branche_distante(tmp_path)
+    result = delete_remote_branch(pygit2.Repository(str(work)), "nexiste-pas")
+    assert result.success is False
+    assert "does not exist" in (result.git_error or "").lower()
+
+
+def test_deleting_the_servers_default_branch_is_refused(tmp_path):
+    """Le garde-fou que libgit2 n'applique pas.
+
+    Vérifié : le refspec `:refs/heads/main` de pygit2 a **détruit** `main`
+    sur un dépôt nu, alors que `git push --delete` le refuse
+    (« deletion of the current branch prohibited »). D'où la délégation.
+    """
+    from tortoisepy.core.operations import delete_remote_branch
+
+    bare, work = _avec_branche_distante(tmp_path)
+    result = delete_remote_branch(pygit2.Repository(str(work)), "main")
+
+    assert result.success is False
+    serveur = pygit2.Repository(str(bare))
+    assert "refs/heads/main" in list(serveur.references), (
+        "la branche par défaut du serveur ne doit pas disparaître"
+    )
+
+
+def test_deleting_a_remote_branch_without_a_remote_is_refused(tmp_path):
+    from tortoisepy.core.operations import delete_remote_branch
+
+    path = tmp_path / "seul"
+    path.mkdir()
+    run_git(path, "init", "-q", "-b", "main")
+    (path / "f.txt").write_text("a\n")
+    run_git(path, "add", ".")
+    run_git(path, "commit", "-q", "-m", "base")
+
+    # Une branche NON protégée : sinon c'est la protection qui répond,
+    # et non l'absence de remote qu'on veut éprouver ici.
+    run_git(path, "checkout", "-q", "-b", "feature")
+
+    result = delete_remote_branch(pygit2.Repository(str(path)), "feature")
+    assert result.success is False
+    assert "no remote" in (result.git_error or "").lower()
+
+
+def test_integration_branches_cannot_be_deleted_remotely(tmp_path):
+    """Demandé par l'utilisateur, et git ne suffit pas.
+
+    Git ne protège que la branche par défaut du serveur : **vérifié**,
+    `develop` et `master` ont été supprimées sans résistance sur un dépôt
+    dont la branche par défaut était `main`. Perdre la branche
+    d'intégration d'une équipe ne doit pas tenir à un clic.
+    """
+    from tortoisepy.core.operations import (
+        PROTECTED_BRANCHES,
+        delete_remote_branch,
+    )
+
+    bare, work = _serveur_et_clone(tmp_path)
+    for nom in ("develop", "master"):
+        run_git(work, "checkout", "-q", "-b", nom)
+        (work / f"{nom}.txt").write_text("x\n")
+        run_git(work, "add", ".")
+        run_git(work, "commit", "-q", "-m", nom)
+        run_git(work, "push", "-q", "origin", nom)
+    run_git(work, "checkout", "-q", "main")
+
+    assert PROTECTED_BRANCHES == {"main", "master", "develop"}
+
+    serveur = pygit2.Repository(str(bare))
+    for nom in sorted(PROTECTED_BRANCHES):
+        result = delete_remote_branch(pygit2.Repository(str(work)), nom)
+        assert result.success is False, nom
+        assert "integration branch" in (result.git_error or ""), nom
+        assert f"refs/heads/{nom}" in list(serveur.references), (
+            f"{nom} ne doit pas disparaître du serveur"
+        )
+
+
+def test_an_ordinary_branch_is_still_deletable(tmp_path):
+    """La protection ne doit pas bloquer le cas normal."""
+    from tortoisepy.core.operations import delete_remote_branch
+
+    bare, work = _avec_branche_distante(tmp_path)
+    result = delete_remote_branch(pygit2.Repository(str(work)), "feature")
+    assert result.success is True, result.git_error
+    assert "refs/heads/feature" not in list(pygit2.Repository(str(bare)).references)
+
+
+def test_a_server_refusal_is_reported_without_its_boilerplate(tmp_path):
+    """Un refus serveur tient en une ligne, pas en douze.
+
+    Vérifié : git répond une douzaine de lignes `remote:` de conseils de
+    configuration, où « deletion of the current branch prohibited » se
+    perd.
+    """
+    from tortoisepy.core.operations import _refus_de_suppression
+
+    sortie = (
+        "remote: error: By default, deleting the current branch is denied,\n"
+        "remote: You can set 'receive.denyDeleteCurrent' configuration\n"
+        "To ../s2.git\n"
+        " ! [remote rejected] main (deletion of the current branch prohibited)\n"
+        "error: failed to push some refs to '../s2.git'\n"
+    )
+    assert _refus_de_suppression(sortie) == (
+        "[remote rejected] main (deletion of the current branch prohibited)"
+    )
+    assert _refus_de_suppression("") == "deletion failed"
