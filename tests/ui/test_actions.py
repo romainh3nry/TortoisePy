@@ -96,6 +96,39 @@ def test_create_branch_uses_the_given_name(repo):
     assert "refs/heads/issue-42" in repo.references
 
 
+def test_creating_a_branch_switches_onto_it(repo):
+    """Demandé par l'utilisateur : `git checkout -b`, pas `git branch`.
+
+    Créer une branche pour rester sur l'ancienne n'a pratiquement jamais
+    d'intérêt — on la crée pour y travailler.
+    """
+    execute_action(
+        "create_branch", context(repo, ask_name=lambda *a, **k: "ma-feature")
+    )
+    assert read_state(repo).head_branch == "ma-feature"
+
+
+def test_creating_a_branch_keeps_uncommitted_work(repo, tmp_path):
+    """La bascule ne doit pas emporter le travail en cours.
+
+    Sans risque ici : la nouvelle branche part du même commit, il n'y a
+    donc rien à remplacer dans l'arbre de travail. Le test le verrouille.
+    """
+    import os
+
+    chemin = os.path.join(repo.workdir, "en-cours.txt")
+    with open(chemin, "w") as handle:
+        handle.write("mon travail\n")
+
+    execute_action(
+        "create_branch", context(repo, ask_name=lambda *a, **k: "autre")
+    )
+
+    assert read_state(repo).head_branch == "autre"
+    with open(chemin) as handle:
+        assert handle.read() == "mon travail\n"
+
+
 def test_cancelling_a_name_does_nothing(repo):
     """Annuler la saisie ne doit RIEN écrire (§7.0)."""
     before = set(repo.references)

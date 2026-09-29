@@ -15,7 +15,7 @@ import pygit2
 
 from tortoisepy.core import operations
 from tortoisepy.core.model import DisplayNode, RefType
-from tortoisepy.core.results import OperationResult, succeeded
+from tortoisepy.core.results import OperationResult, failed, succeeded
 from tortoisepy.core.state import RepositoryState
 from tortoisepy.ui.dialogs import confirmation_for
 
@@ -69,10 +69,29 @@ def _checkout_branch(ctx: ActionContext) -> OperationResult | None:
 
 
 def _create_branch(ctx: ActionContext) -> OperationResult | None:
+    """Crée la branche **et bascule dessus**, comme `git checkout -b`.
+
+    Demandé par l'utilisateur : créer une branche pour rester sur l'ancienne
+    n'a pratiquement jamais d'intérêt — on la crée pour y travailler.
+
+    Si le checkout échoue, la branche existe malgré tout : on rapporte
+    l'échec du basculement sans laisser croire que rien n'a été fait.
+    """
     name = ctx.ask_name(ctx.parent, "Create Branch", "Branch name:")
     if not name:
         return None
-    return operations.create_branch(ctx.repository, name, ctx.node.oid)
+
+    created = operations.create_branch(ctx.repository, name, ctx.node.oid)
+    if not created.success:
+        return created
+
+    switched = operations.checkout_branch(ctx.repository, name)
+    if not switched.success:
+        return failed(
+            f"Création de « {name} »",
+            f"branch created, but switching failed: {switched.git_error}",
+        )
+    return succeeded(f"Branche « {name} » créée, basculé dessus")
 
 
 def _create_tag(ctx: ActionContext) -> OperationResult | None:
@@ -141,6 +160,11 @@ def _push_branch(ctx: ActionContext) -> OperationResult | None:
     return None
 
 
+def _pull_branch(ctx: ActionContext) -> OperationResult | None:
+    """La fenêtre principale s'en charge : le pull part en arrière-plan."""
+    return None
+
+
 def _abort_operation(ctx: ActionContext) -> OperationResult | None:
     return operations.abort_operation(ctx.repository)
 
@@ -180,6 +204,7 @@ ACTION_HANDLERS: dict[str, Callable[[ActionContext], OperationResult | None]] = 
     "reset_to": _reset_to,
     "fetch_remote": _fetch_remote,
     "push_branch": _push_branch,
+    "pull_branch": _pull_branch,
     "abort_operation": _abort_operation,
     "copy_hash": _copy_hash,
     "show_log": _show_log,

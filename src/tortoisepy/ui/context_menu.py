@@ -139,6 +139,14 @@ def _single_node_menu(
                     # branche demanderait un checkout, qui existe déjà (§9).
                     enabled=is_current,
                 ),
+                MenuEntry(
+                    "Pull",
+                    "pull_branch",
+                    # Comme Push : seulement sur la branche courante ;
+                    # récupérer dans une autre demanderait un checkout, qui
+                    # existe déjà.
+                    enabled=is_current,
+                ),
             ),
         ),
         MenuEntry(

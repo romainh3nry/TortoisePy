@@ -138,6 +138,35 @@ def ask_reset_mode(parent) -> str | None:
     return choice.split(" — ", 1)[0]
 
 
+def ask_pull_strategy(parent, state) -> str | None:
+    """Merge ou rebase ? `None` si l'utilisateur annule (§5).
+
+    Posée seulement quand les deux côtés ont avancé. Le rebase est le seul
+    des deux à réécrire des commits déjà faits : on le dit, plutôt que de
+    laisser l'utilisateur le découvrir après coup.
+    """
+    choices = [
+        "Merge — keep both histories, add a merge commit",
+        "Rebase — replay your commits on top (rewrites them)",
+    ]
+    choice, accepted = QInputDialog.getItem(
+        parent,
+        "Pull",
+        (
+            f"{state.branch} and {state.remote_name}/{state.branch} have "
+            f"both moved on\n"
+            f"({state.incoming} incoming, {state.outgoing} local).\n\n"
+            "How should they be combined?"
+        ),
+        choices,
+        0,
+        False,
+    )
+    if not accepted:
+        return None
+    return "merge" if choice.startswith("Merge") else "rebase"
+
+
 def ask_credentials(parent, url: str) -> tuple[Credentials | None, bool]:
     """Demande identifiant et mot de passe. `(None, False)` si annulé.
 

@@ -630,6 +630,70 @@ def test_push_asks_for_confirmation(window, monkeypatch):
     assert demandes, "aucune confirmation demandée"
 
 
+def test_pull_action_exists(window):
+    assert window.pull_action is not None
+    assert window.pull_action.text() == "Pull"
+
+
+def test_pull_is_disabled_without_a_remote(window):
+    window._update_pull_action()
+    assert window.pull_action.isEnabled() is False
+
+
+def test_disabled_pull_explains_why(window):
+    window._update_pull_action()
+    assert window.pull_action.toolTip()
+
+
+def test_pull_is_enabled_when_something_is_incoming(window, monkeypatch):
+    from tortoisepy.core.pull import PullKind, PullState
+    from tortoisepy.ui import main_window as module
+
+    monkeypatch.setattr(
+        module,
+        "analyse_pull",
+        lambda repo: PullState(
+            PullKind.FAST_FORWARD, branch="main",
+            remote_name="origin", incoming=3,
+        ),
+    )
+    window._update_pull_action()
+    assert window.pull_action.isEnabled() is True
+
+
+def test_pull_refuses_when_a_task_is_running(window):
+    class Busy:
+        def is_running(self):
+            return True
+
+    window._task = Busy()
+    window._start_pull()
+    assert "running" in window.statusBar().currentMessage().lower()
+
+
+def test_pull_reports_its_result(window):
+    from tortoisepy.core.results import succeeded
+
+    window._on_pull_finished(succeeded("Pulled 3 commits from origin"))
+    assert "Pulled 3 commits" in window.statusBar().currentMessage()
+
+
+def test_pull_conflict_opens_the_resolution_window(window, monkeypatch):
+    """Un conflit n'est pas une impasse : la fenêtre doit s'ouvrir."""
+    from tortoisepy.core.results import failed
+    from tortoisepy.ui import main_window as module
+
+    ouvertes = []
+    monkeypatch.setattr(
+        module.MainWindow, "open_conflict_window",
+        lambda self: ouvertes.append(True),
+    )
+    monkeypatch.setattr(module, "show_error", lambda *a, **k: None)
+
+    window._on_pull_finished(failed("Pull", "conflicts in: f.txt"))
+    assert ouvertes, "la fenêtre de résolution doit s'ouvrir"
+
+
 def test_open_detail_windows_stay_referenced(window):
     """À l'inverse : une fenêtre encore ouverte ne doit pas disparaître.
 
@@ -644,3 +708,172 @@ def test_open_detail_windows_stay_referenced(window):
     assert len(window._detail_windows) == 1
     assert not window._detail_windows[0].isHidden()
     window._detail_windows[0].close()
+
+
+def test_pull_stays_enabled_when_nothing_is_known_yet(window, monkeypatch):
+    """Revue finale, phase 8 : les commits entrants ne sont pas connaissables
+    sans fetch. Griser le bouton sur `analyse_pull` affichait
+    « Already up to date » alors qu'un pull ramènerait du travail — le cas
+    courant signalé par l'utilisateur.
+    """
+    from tortoisepy.core.pull import PullKind, PullState
+    from tortoisepy.ui import main_window as module
+
+    monkeypatch.setattr(
+        module,
+        "analyse_pull",
+        lambda repo: PullState(
+            PullKind.UP_TO_DATE, branch="main", remote_name="origin"
+        ),
+    )
+    window._update_pull_action()
+
+    assert window.pull_action.isEnabled() is True
+    assert "up to date" not in window.pull_action.toolTip().lower()
+
+
+def test_pull_is_disabled_without_a_remote(window, monkeypatch):
+    from tortoisepy.core.pull import PullKind, PullState
+    from tortoisepy.ui import main_window as module
+
+    monkeypatch.setattr(
+        module,
+        "analyse_pull",
+        lambda repo: PullState(PullKind.UNAVAILABLE, reason="no remote"),
+    )
+    window._update_pull_action()
+    assert window.pull_action.isEnabled() is False
+    assert window.pull_action.toolTip()
+
+
+def test_a_rolled_back_rebase_does_not_open_an_empty_window(
+    window, monkeypatch
+):
+    """Revue finale : le message porte « conflict » alors que tout a été
+    restauré. Ouvrir la fenêtre montrait une liste vide avec « Resolve »
+    actif, et cachait le conseil « try merge instead ».
+    """
+    from tortoisepy.core.results import failed
+    from tortoisepy.ui import main_window as module
+
+    ouvertes = []
+    monkeypatch.setattr(
+        module.MainWindow,
+        "open_conflict_window",
+        lambda self: ouvertes.append(True),
+    )
+    monkeypatch.setattr(module, "show_error", lambda *a, **k: None)
+
+    window._on_pull_finished(
+        failed(
+            "Pull",
+            "conflicts in: f.txt (rebase rolled back, branch restored "
+            "— try merge instead)",
+        )
+    )
+    assert not ouvertes, "aucune fenêtre ne doit s'ouvrir : rien à résoudre"
+
+
+def test_a_real_conflict_still_opens_the_window(window, monkeypatch):
+    """La garde ci-dessus ne doit pas fermer la porte au vrai cas."""
+    from tortoisepy.core.results import failed
+    from tortoisepy.ui import main_window as module
+
+    ouvertes = []
+    monkeypatch.setattr(
+        module.MainWindow,
+        "open_conflict_window",
+        lambda self: ouvertes.append(True),
+    )
+    monkeypatch.setattr(module, "show_error", lambda *a, **k: None)
+
+    window._on_pull_finished(failed("Pull", "conflicts in: f.txt"))
+    assert ouvertes
+
+
+def test_the_current_branch_is_always_visible(window):
+    """Demandé par l'utilisateur : savoir en permanence où l'on est."""
+    assert window.branch_label.text()
+    assert window.state.head_branch in window.branch_label.text()
+
+
+def test_the_branch_survives_a_temporary_message(window):
+    """Un widget permanent n'est pas recouvert par `showMessage`.
+
+    C'était le défaut : après un commit, un pull ou un push, le message
+    temporaire écrasait « Sur <branche> » et la branche disparaissait.
+    """
+    from tortoisepy.core.results import succeeded
+
+    avant = window.branch_label.text()
+    window._on_committed(succeeded("Committed 2 files — a1b2c3d4"), None)
+
+    assert "Committed" in window.statusBar().currentMessage()
+    assert window.branch_label.text() == avant
+
+
+def test_the_title_carries_the_branch(window):
+    """Lisible depuis le sélecteur de fenêtres, hors premier plan."""
+    assert f"[{window.state.head_branch}]" in window.windowTitle()
+
+
+def test_a_detached_head_is_announced(window, monkeypatch):
+    """Ne pas laisser croire qu'on est sur une branche quand on n'y est pas."""
+    import dataclasses
+
+    window.state = dataclasses.replace(
+        window.state, head_branch=None, detached=True, head_oid="a" * 40
+    )
+    window._update_branch_label()
+
+    texte = window.branch_label.text().lower()
+    assert "détaché" in texte or "detached" in texte
+    assert "aaaaaaaa" in window.branch_label.text()
+
+
+def test_fetch_is_in_the_toolbar(window):
+    """Demandé par l'utilisateur : Fetch n'était qu'au clic droit."""
+    assert window.fetch_action is not None
+    assert window.fetch_action.text() == "Fetch"
+
+
+def test_fetch_is_disabled_without_a_remote(window):
+    """Le dépôt de test n'a pas de remote."""
+    window._update_fetch_action()
+    assert window.fetch_action.isEnabled() is False
+    assert window.fetch_action.toolTip()
+
+
+def test_fetch_is_enabled_with_a_remote(qtbot, tmp_path):
+    """Un vrai remote : `pygit2.Repository` est natif, sa propriété
+    `remotes` ne peut pas être remplacée par un monkeypatch.
+    """
+    import subprocess
+
+    from tortoisepy.ui.main_window import MainWindow
+
+    bare = tmp_path / "s.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(bare)], capture_output=True
+    )
+    work = tmp_path / "w"
+    subprocess.run(
+        ["git", "clone", "-q", str(bare), str(work)], capture_output=True
+    )
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    (work / "f.txt").write_text("a\n")
+    subprocess.run(["git", "add", "."], cwd=work, env=env, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "base"],
+        cwd=work, env=env, capture_output=True,
+    )
+
+    fenetre = MainWindow(pygit2.Repository(str(work)))
+    qtbot.addWidget(fenetre)
+
+    assert fenetre.fetch_action.isEnabled() is True
+    assert "origin" in fenetre.fetch_action.toolTip()

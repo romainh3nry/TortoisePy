@@ -14,6 +14,7 @@ import shiboken6
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
+    QLabel,
     QMainWindow,
     QMenu,
     QProgressBar,
@@ -24,7 +25,15 @@ from PySide6.QtWidgets import (
 from tortoisepy.core.commits import commits_for_node
 from tortoisepy.core.graph import build_graph
 from tortoisepy.core.credentials import is_https, remember
+from tortoisepy.core.pull import (
+    PullKind,
+    analyse_pull,
+    pull_fast_forward,
+    pull_merge,
+    pull_rebase,
+)
 from tortoisepy.core.push_state import push_state, unpushed_oids
+from tortoisepy.core.results import failed, succeeded
 from tortoisepy.core.state import read_state
 from tortoisepy.layout.engine import layout_graph
 from tortoisepy.ui import actions
@@ -32,11 +41,13 @@ from tortoisepy.ui.actions import ActionContext
 from tortoisepy.ui.commit_detail_window import CommitDetailWindow
 from tortoisepy.ui.commit_panel import CommitPanel
 from tortoisepy.ui.commit_window import CommitWindow
+from tortoisepy.ui.conflict_window import ConflictWindow
 from tortoisepy.ui.context_menu import MenuEntry, build_menu_model
 from tortoisepy.ui.dialogs import (
     ConfirmationRequest,
     ask_credentials,
     ask_name,
+    ask_pull_strategy,
     ask_reset_mode,
     confirm,
     show_error,
@@ -45,6 +56,14 @@ from tortoisepy.ui.graph_view import GraphView
 from tortoisepy.ui.tasks import BackgroundTask, FetchWorker
 from tortoisepy.ui.theme import QtMeasurer
 from tortoisepy.ui.watcher import RepositoryWatcher
+
+
+_NEEDS_STRATEGY = "diverged: ask how to combine"
+"""Marqueur interne : le fil de fond rend la main pour poser la question.
+
+Ce n'est pas une erreur — juste le seul moyen de faire ouvrir un dialogue
+par le fil d'interface, Qt l'interdisant depuis un fil de travail.
+"""
 
 
 _AUTH_MARKERS = ("authentication", "credential", "401", "403")
@@ -122,9 +141,18 @@ class MainWindow(QMainWindow):
         self.progress.hide()
         self.statusBar().addPermanentWidget(self.progress)
 
+        # Permanent, à droite : les messages temporaires (commit, pull,
+        # push…) écrasent le message ordinaire de la barre d'état, et la
+        # branche courante disparaissait alors de l'écran. Un widget
+        # permanent n'est jamais recouvert.
+        self.branch_label = QLabel()
+        self.branch_label.setContentsMargins(0, 0, 8, 0)
+        self.statusBar().addPermanentWidget(self.branch_label)
+
         self._task: BackgroundTask | None = None
         self._fetch_summary: str | None = None
         self.commit_window: CommitWindow | None = None
+        self.conflict_window: ConflictWindow | None = None
 
         self.setWindowTitle(self._title())
         self.resize(1400, 850)
@@ -142,6 +170,8 @@ class MainWindow(QMainWindow):
         self._center_on_head()
         self._update_status()
         self._update_push_action()
+        self._update_fetch_action()
+        self._update_pull_action()
 
     def closeEvent(self, event) -> None:
         self.watcher.stop()
@@ -193,8 +223,18 @@ class MainWindow(QMainWindow):
         self._update_status()
 
     def _title(self) -> str:
+        """Nom du dépôt, branche courante, puis l'application.
+
+        La branche figure dans le titre pour rester lisible depuis le
+        sélecteur de fenêtres, même quand tortoisePy n'est pas au premier
+        plan.
+        """
         workdir = self.repository.workdir
         name = Path(workdir).name if workdir else Path(self.repository.path).name
+
+        branch = getattr(self.state, "head_branch", None) if self.state else None
+        if branch:
+            return f"{name} [{branch}] — tortoisePy"
         return f"{name} — tortoisePy"
 
     def _build_toolbar(self) -> QToolBar:
@@ -213,6 +253,10 @@ class MainWindow(QMainWindow):
             ("Rafraîchir", QKeySequence.StandardKey.Refresh, self.refresh),
             ("Commit…", QKeySequence("Ctrl+K"), self.open_commit_window),
             ("Push", QKeySequence("Ctrl+P"), self._start_push),
+            ("Pull", QKeySequence("Ctrl+L"), self._start_pull),
+            # À côté de Pull : c'est la même famille de gestes, et Fetch
+            # n'était atteignable que par le clic droit.
+            ("Fetch", QKeySequence("Ctrl+Shift+F"), self._start_fetch),
         ]
 
         for label, shortcut, slot in specs:
@@ -223,6 +267,10 @@ class MainWindow(QMainWindow):
             self.toolbar.addAction(action)
             if label == "Push":
                 self.push_action = action
+            if label == "Pull":
+                self.pull_action = action
+            if label == "Fetch":
+                self.fetch_action = action
 
     def _update_status(self) -> None:
         if self.state is None:
@@ -241,6 +289,24 @@ class MainWindow(QMainWindow):
             message += f" — {len(self.state.conflicted_paths)} conflit(s)"
 
         self.statusBar().showMessage(message)
+        self._update_branch_label()
+        self.setWindowTitle(self._title())
+
+    def _update_branch_label(self) -> None:
+        """Affiche la branche courante en permanence, à droite."""
+        if self.state is None:
+            self.branch_label.setText("")
+            return
+
+        if self.state.head_branch:
+            texte = f"⎇ {self.state.head_branch}"
+        elif self.state.detached:
+            texte = f"⎇ HEAD détaché ({(self.state.head_oid or '')[:8]})"
+        else:
+            texte = "⎇ sans commit"
+
+        self.branch_label.setText(texte)
+        self.branch_label.setToolTip(texte.removeprefix("⎇ "))
 
     def _show_context_menu(self, position) -> None:
         """Construit le QMenu à partir du modèle (§7.3)."""
@@ -294,6 +360,30 @@ class MainWindow(QMainWindow):
         self.commit_window = CommitWindow(self.repository, self)
         self.commit_window.committed.connect(self._on_committed)
         self.commit_window.show()
+
+    def open_conflict_window(self) -> None:
+        """Ouvre la résolution de conflits, ou ramène celle déjà ouverte.
+
+        Une seule à la fois : deux vues d'un même index se contrediraient.
+        """
+        if (
+            self.conflict_window is not None
+            and not self.conflict_window.isHidden()
+        ):
+            self.conflict_window.raise_()
+            self.conflict_window.activateWindow()
+            return
+
+        self.conflict_window = ConflictWindow(self.repository, self)
+        self.conflict_window.finished.connect(self._on_conflicts_finished)
+        self.conflict_window.show()
+
+    def _on_conflicts_finished(self, result) -> None:
+        if result.repository_changed:
+            self.refresh()
+        self.statusBar().showMessage(
+            result.summary or (result.git_error or ""), 15000
+        )
 
     def _on_committed(self, result, pushed=None) -> None:
         """Un commit change l'historique : le graphe doit le refléter.
@@ -400,6 +490,10 @@ class MainWindow(QMainWindow):
 
         if action == "push_branch":
             self._start_push()
+            return
+
+        if action == "pull_branch":
+            self._start_pull()
             return
 
         with self.watcher.suspended():
@@ -583,3 +677,152 @@ class MainWindow(QMainWindow):
         clipboard = QGuiApplication.clipboard()
         if clipboard is not None:
             clipboard.setText(text)
+
+    def _update_fetch_action(self) -> None:
+        """Grise Fetch quand il n'y a pas de remote à interroger."""
+        remotes = list(self.repository.remotes.names())
+        self.fetch_action.setEnabled(bool(remotes))
+        if remotes:
+            self.fetch_action.setToolTip(
+                "Fetch from " + ", ".join(remotes[:3])
+            )
+        else:
+            self.fetch_action.setToolTip("no remote configured")
+
+    def _update_pull_action(self) -> None:
+        """Active le bouton dès qu'une récupération est possible.
+
+        Contrairement à Push, on ne peut pas savoir **sans fetch** ce qui
+        attend sur le serveur : `analyse_pull` compare à une référence
+        distante qui peut dater. Griser sur cette base afficherait
+        « Already up to date » alors qu'un pull ramènerait du travail —
+        exactement le cas courant, signalé par l'utilisateur.
+
+        Le bouton reste donc actif dès qu'il y a un remote et une branche :
+        c'est le pull lui-même, qui fetch d'abord, qui tranche.
+        """
+        state = analyse_pull(self.repository)
+        self.pull_action.setEnabled(state.kind is not PullKind.UNAVAILABLE)
+
+        if state.kind is PullKind.UNAVAILABLE:
+            self.pull_action.setToolTip(state.reason or "nothing to pull")
+        elif state.incoming:
+            self.pull_action.setToolTip(
+                f"Pull {state.incoming} commit(s) from {state.remote_name}"
+            )
+        else:
+            # « d'après ce qu'on sait » : le fetch peut révéler autre chose.
+            self.pull_action.setToolTip(
+                f"Fetch and pull from {state.remote_name}"
+            )
+
+    def _start_pull(self) -> None:
+        """Récupère en arrière-plan.
+
+        Un fetch d'abord, **toujours** : sans lui l'analyse porterait sur
+        une ref distante périmée et conclurait « à jour » à tort (§3).
+        Pull n'est pas confirmé : son effet reste annulable (§4).
+        """
+        if self._task is not None and self._task.is_running():
+            self.statusBar().showMessage("A background task is running", 3000)
+            return
+
+        # La stratégie n'est PAS choisie ici : avant le fetch, l'analyse
+        # porte sur une référence distante périmée et ne voit pas encore la
+        # divergence. Le fil de fond s'arrêtera pour poser la question.
+        self._pull_strategy = None
+
+        self.progress.setRange(0, 0)
+        self.progress.setFormat("Pulling…")
+        self.progress.show()
+        self.statusBar().showMessage("Pulling…")
+
+        worker = FetchWorker(
+            lambda on_progress: self._pull_after_fetch(on_progress)
+        )
+        self._task = BackgroundTask(worker, self)
+        self._task.progress.connect(self._on_fetch_progress)
+        self._task.finished.connect(self._on_pull_finished)
+        self._task.start()
+
+    def _pull_after_fetch(self, on_progress):
+        """Fetch, puis applique la stratégie qui convient.
+
+        Tourne dans le fil de fond. La stratégie a été choisie **avant**,
+        dans le fil d'interface : Qt interdit d'ouvrir un dialogue ici.
+        """
+        from tortoisepy.core import operations
+
+        fetched = operations.fetch_remote(
+            self.repository, on_progress=on_progress
+        )
+        if not fetched.success:
+            return fetched
+
+        state = analyse_pull(self.repository)
+        if state.kind is PullKind.UP_TO_DATE:
+            return succeeded("Already up to date", repository_changed=False)
+        if state.kind is PullKind.FAST_FORWARD:
+            return pull_fast_forward(self.repository)
+        if state.kind is PullKind.UNAVAILABLE:
+            return failed("Pull", state.reason)
+
+        # Divergence : on ne choisit pas à la place de l'utilisateur (D11).
+        # Qt interdit d'ouvrir un dialogue depuis ce fil, donc on rend la
+        # main ; `_on_pull_finished` posera la question et relancera.
+        if self._pull_strategy is None:
+            return failed(
+                "Pull", _NEEDS_STRATEGY, repository_changed=False
+            )
+
+        if self._pull_strategy == "rebase":
+            return pull_rebase(self.repository)
+        return pull_merge(self.repository)
+
+    def _resume_pull_with_strategy(self) -> None:
+        """Pose la question merge/rebase, puis reprend le pull.
+
+        Le fetch a déjà eu lieu, donc l'analyse est cette fois exacte.
+        Annuler laisse simplement les nouvelles refs distantes en place,
+        ce qui est sans danger (§5).
+        """
+        state = analyse_pull(self.repository)
+        if state.kind is not PullKind.DIVERGED:
+            return  # la situation a changé entre-temps
+
+        chosen = ask_pull_strategy(self, state)
+        if chosen is None:
+            self.statusBar().showMessage("Pull cancelled", 8000)
+            return
+
+        self._pull_strategy = chosen
+        if chosen == "rebase":
+            result = pull_rebase(self.repository)
+        else:
+            result = pull_merge(self.repository)
+        self._on_pull_finished(result)
+
+    def _on_pull_finished(self, result) -> None:
+        """Un conflit ouvre la fenêtre de résolution, jamais une impasse."""
+        self.progress.hide()
+        self.refresh()          # d'abord : `refresh` réécrit la barre d'état
+        self.statusBar().showMessage(result.summary or "Pull finished", 15000)
+
+        if result.success:
+            return
+
+        # Divergence : la question n'a pas pu être posée depuis le fil de
+        # fond, on la pose maintenant et on reprend.
+        if (result.git_error or "") == _NEEDS_STRATEGY:
+            self._resume_pull_with_strategy()
+            return
+
+        # « rolled back » : le rebase a tout restauré, il n'y a plus rien à
+        # résoudre. Ouvrir la fenêtre afficherait une liste vide et cacherait
+        # le conseil (« try merge instead ») derrière une fausse piste.
+        message = (result.git_error or "").lower()
+        if "conflict" in message and "rolled back" not in message:
+            self.open_conflict_window()
+            return
+
+        show_error(self, result)
