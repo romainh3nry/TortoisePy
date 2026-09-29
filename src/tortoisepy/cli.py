@@ -48,7 +48,7 @@ def application_icon():
 
     Note : sur Windows, cela suffit pour la fenêtre **et** la barre des
     tâches. Sur macOS, le Dock lit l'icône du bundle, pas celle-ci — voir
-    `scripts/make-app-bundle.sh`.
+    `tortoisepy.desktop`, posé au premier lancement.
     """
     import sys
     from pathlib import Path
@@ -105,10 +105,15 @@ def main(argv: list[str] | None = None) -> int:
 
     from tortoisepy.ui.main_window import MainWindow
 
-    # La QApplication doit exister avant toute opération de police :
-    # sans elle, Qt abandonne le processus au lieu de lever (vérifié).
-    app = QApplication(sys.argv[:1])
+    # Le nom affiché vient de `argv[0]`, lu par Qt **à la construction**
+    # de la QApplication : appelé après, `setApplicationName` ne change
+    # plus l'infobulle du Dock ni le menu de l'application. Lancé via
+    # `python -c`, `argv[0]` vaut « -c » et macOS affichait « Python »
+    # (signalé par l'utilisateur, capture à l'appui).
+    app = QApplication(["tortoisePy"])
     app.setApplicationName("tortoisePy")
+    app.setApplicationDisplayName("tortoisePy")
+    app.setOrganizationName("tortoisePy")
     app.setWindowIcon(application_icon())
 
     # Le Dock de macOS lit l'icône du bundle, pas celle de la fenêtre :

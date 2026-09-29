@@ -40,8 +40,19 @@ _INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 
 _LANCEUR = """#!/bin/bash
 # Ouvre le dépôt du dossier courant, ou celui passé en argument.
-exec "{python}" -c "from tortoisepy.cli import main; raise SystemExit(main())" "$@"
+exec "{python}" "{point_entree}" "$@"
 """
+
+_POINT_ENTREE = '''"""Point d\'entrée du bundle macOS.
+
+Un fichier plutôt qu\'un `python -c` : avec `-c`, `sys.argv[0]` vaut
+« -c », et Qt en tire le nom affiché de l\'application.
+"""
+
+from tortoisepy.cli import main
+
+raise SystemExit(main())
+'''
 
 
 def icon_path(name: str) -> Path:
@@ -93,12 +104,20 @@ def install_bundle(location: Path | None = None) -> Path | None:
             _INFO_PLIST.format(version=__version__), encoding="utf-8"
         )
 
+        # Un vrai fichier plutôt qu'un `python -c` : avec `-c`,
+        # `sys.argv[0]` vaut « -c » et Qt en tire le nom affiché.
+        point_entree = contents / "Resources" / "lanceur.py"
+        point_entree.write_text(_POINT_ENTREE, encoding="utf-8")
+
         lanceur = contents / "MacOS" / "tortoisepy"
         # `sys.executable` : l'interpréteur courant est celui qui sait
         # importer `tortoisepy`. Un `python3` du PATH pourrait ne pas
         # avoir le paquet.
         lanceur.write_text(
-            _LANCEUR.format(python=sys.executable), encoding="utf-8"
+            _LANCEUR.format(
+                python=sys.executable, point_entree=point_entree
+            ),
+            encoding="utf-8",
         )
         lanceur.chmod(0o755)
 
