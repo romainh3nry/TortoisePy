@@ -178,15 +178,21 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _center_on_head(self) -> None:
-        """Place la vue sur la branche courante.
+        """Place la vue sur la branche courante **et la sélectionne**.
 
         Le nœud vert est le repère de l'utilisateur : sur un dépôt dont le
         graphe fait plusieurs milliers de pixels de haut, s'ouvrir ailleurs
         l'oblige à chercher où il se trouve.
+
+        La sélection suit le centrage : après un checkout, la vue se
+        déplaçait bien sur la branche, mais le panneau latéral restait vide
+        faute de sélection — comme si l'utilisateur n'avait rien cliqué,
+        alors qu'il venait justement de choisir cette branche.
         """
         if self.state is None or self.state.head_oid is None:
             return
         self.view.center_on_node(self.state.head_oid)
+        self.view.select_node(self.state.head_oid)
 
     def _on_selection_changed(self) -> None:
         """Un nœud sélectionné montre ses commits ; plusieurs, ou aucun, non.
@@ -341,8 +347,9 @@ class MainWindow(QMainWindow):
                 action = menu.addAction(entry.label)
                 action.setEnabled(entry.enabled)
                 action.triggered.connect(
-                    lambda checked=False, name=entry.action: self._run_action(
-                        name, self._selected_node()
+                    lambda checked=False, name=entry.action,
+                    branch=entry.branch: self._run_action(
+                        name, self._selected_node(), branch
                     )
                 )
 
@@ -456,7 +463,9 @@ class MainWindow(QMainWindow):
             return None
         return self.graph.node(selected[0])
 
-    def _run_action(self, action: str | None, node) -> None:
+    def _run_action(
+        self, action: str | None, node, branch: str | None = None
+    ) -> None:
         """Exécute une action du menu — le seul endroit qui écrit (§7.0).
 
         La surveillance est suspendue le temps de l'opération : le
@@ -476,6 +485,7 @@ class MainWindow(QMainWindow):
             ask_mode=ask_reset_mode,
             confirm=confirm,
             copy=self._copy_to_clipboard,
+            chosen_branch=branch,
         )
 
         if action == "fetch_remote":

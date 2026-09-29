@@ -31,9 +31,20 @@ class ActionContext:
     confirm: Callable[..., bool] = lambda *a, **k: False
     copy: Callable[[str], None] = lambda text: None
 
+    chosen_branch: str | None = None
+    """Branche désignée par le menu, quand le nœud en porte plusieurs."""
+
     @property
     def branch(self) -> str | None:
-        """Nom de la branche locale portée par le nœud, s'il y en a une."""
+        """Branche locale sur laquelle agir.
+
+        `chosen_branch` prime quand le menu l'a précisée : plusieurs
+        branches peuvent partager un commit, donc un même nœud, et se
+        rabattre sur la première rendait les autres inatteignables
+        (signalé par l'utilisateur).
+        """
+        if self.chosen_branch is not None:
+            return self.chosen_branch
         for ref in self.node.refs:
             if ref.type is RefType.LOCAL_BRANCH:
                 return ref.name

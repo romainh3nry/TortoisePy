@@ -104,8 +104,12 @@ def test_empty_repository_does_not_crash(qtbot, tmp_path):
     assert w.view.scene() is not None
 
 
-def test_commit_panel_starts_empty(window):
-    assert window.commit_panel.count() == 0
+def test_commit_panel_starts_on_the_current_branch(window):
+    """Change de comportement (demandé par l'utilisateur) : la branche
+    courante est sélectionnée à l'ouverture, donc ses commits s'affichent
+    sans qu'on ait à cliquer."""
+    assert window.commit_panel.count() > 0
+    assert window.view.selected_oids() == (window.state.head_oid,)
 
 
 def test_double_click_shows_the_hidden_commits(window):
@@ -128,21 +132,24 @@ def test_double_click_titles_the_panel_with_the_branch(window):
 
 
 def test_double_click_on_unknown_node_is_ignored(window):
+    window.commit_panel.clear()
     window._show_commits("0" * 40)  # ne doit pas lever
     assert window.commit_panel.count() == 0
 
 
-def test_refresh_clears_the_panel(window):
-    """Le panneau porte sur un graphe donné : le reconstruire l'invalide."""
+def test_refresh_returns_the_focus_to_the_current_branch(window):
+    """Reconstruire le graphe invalide le panneau, puis la sélection
+    revient sur la branche courante — le repère de l'utilisateur."""
     node = next(
         n for n in window.graph.nodes
         if any(r.name == "feature" for r in n.refs)
     )
     window._show_commits(node.oid)
-    assert window.commit_panel.count() > 0
+    assert "feature" in window.commit_panel._title.text()
 
     window.refresh()
-    assert window.commit_panel.count() == 0
+    assert window.view.selected_oids() == (window.state.head_oid,)
+    assert "feature" not in window.commit_panel._title.text()
 
 
 def test_view_and_panel_share_a_splitter(window):
@@ -162,7 +169,13 @@ def _node_item(window, branch: str):
 
 
 def test_single_click_shows_the_commits(window):
-    """Sélectionner un nœud suffit : c'est le même geste."""
+    """Sélectionner un nœud suffit : c'est le même geste.
+
+    La scène est vidée d'abord : la branche courante est sélectionnée à
+    l'ouverture, et `setSelected` **cumule** (contrairement à un clic
+    souris, où Qt efface d'abord). Sans cela on testerait deux nœuds.
+    """
+    window.view.scene().clearSelection()
     _node_item(window, "feature").setSelected(True)
     assert window.commit_panel.count() > 0
     assert "feature" in window.commit_panel._title.text()
@@ -171,6 +184,7 @@ def test_single_click_shows_the_commits(window):
 def test_two_selected_nodes_clear_the_panel(window):
     """Avec deux nœuds, le menu bascule sur la comparaison (§7.4) :
     montrer les commits de l'un des deux serait arbitraire."""
+    window.view.scene().clearSelection()
     _node_item(window, "feature").setSelected(True)
     assert window.commit_panel.count() > 0
 
@@ -192,6 +206,7 @@ def test_returning_to_one_selection_shows_commits_again(window):
 
 
 def test_deselecting_everything_clears_the_panel(window):
+    window.view.scene().clearSelection()
     item = _node_item(window, "feature")
     item.setSelected(True)
     assert window.commit_panel.count() > 0
@@ -877,3 +892,62 @@ def test_fetch_is_enabled_with_a_remote(qtbot, tmp_path):
 
     assert fenetre.fetch_action.isEnabled() is True
     assert "origin" in fenetre.fetch_action.toolTip()
+
+
+def test_the_current_branch_is_selected_on_opening(window):
+    """Demandé par l'utilisateur : la branche courante doit avoir le focus.
+
+    La vue se recentrait bien dessus, mais rien n'était sélectionné : le
+    panneau latéral restait vide, comme si on n'avait rien cliqué.
+    """
+    assert window.view.selected_oids() == (window.state.head_oid,)
+
+
+def test_selecting_the_head_fills_the_commit_panel(window):
+    """La sélection doit produire le même effet qu'un clic."""
+    assert window.commit_panel.count() > 0
+
+
+def test_the_selection_follows_a_checkout(qtbot, tmp_path):
+    """Après un checkout, le focus suit la nouvelle branche courante."""
+    import subprocess
+
+    from tortoisepy.core.state import read_state
+    from tortoisepy.ui.main_window import MainWindow
+
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@t",
+    }
+
+    def git(*args):
+        subprocess.run(
+            ["git", *args], cwd=tmp_path, env=env, capture_output=True
+        )
+
+    git("init", "-q", "-b", "main")
+    (tmp_path / "f.txt").write_text("a\n")
+    git("add", ".")
+    git("commit", "-q", "-m", "premier")
+    git("checkout", "-q", "-b", "autre")
+    (tmp_path / "f.txt").write_text("b\n")
+    git("add", ".")
+    git("commit", "-q", "-m", "second")
+    git("checkout", "-q", "main")
+
+    repository = pygit2.Repository(str(tmp_path))
+    fenetre = MainWindow(repository)
+    qtbot.addWidget(fenetre)
+
+    cible = str(repository.branches["autre"].target)
+    assert fenetre.view.selected_oids() != (cible,)
+
+    subprocess.run(
+        ["git", "checkout", "-q", "autre"],
+        cwd=tmp_path, env=env, capture_output=True,
+    )
+    fenetre.refresh()
+
+    assert fenetre.view.selected_oids() == (cible,)
+    assert fenetre.commit_panel.count() > 0

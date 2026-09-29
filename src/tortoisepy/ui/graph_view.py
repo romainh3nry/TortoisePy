@@ -68,6 +68,28 @@ class GraphView(QGraphicsView):
 
         return False
 
+    def select_node(self, oid: Oid) -> bool:
+        """Sélectionne un nœud comme si l'utilisateur l'avait cliqué.
+
+        Sert après un checkout : la vue se recentrait sur la branche, mais
+        rien n'était sélectionné — le panneau latéral restait vide alors
+        que l'utilisateur venait justement de choisir cette branche.
+
+        La sélection précédente est effacée : deux nœuds sélectionnés
+        changeraient le menu contextuel (il propose alors des comparaisons).
+        """
+        scene = self.scene()
+        if scene is None:
+            return False
+
+        for item in scene.items():
+            if isinstance(item, NodeItem) and item.node.oid == oid:
+                scene.clearSelection()
+                item.setSelected(True)
+                return True
+
+        return False
+
     def selected_oids(self) -> tuple[Oid, ...]:
         """OID des nœuds sélectionnés, triés pour rester déterministes."""
         scene = self.scene()
