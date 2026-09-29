@@ -34,12 +34,62 @@ def find_repository(start: str) -> pygit2.Repository | None:
         return None
 
 
+def application_icon():
+    """Icône de l'application, à toutes les tailles fournies.
+
+    Sans elle, le système affiche l'icône de l'interpréteur Python — la
+    fusée. Les fichiers sont livrés avec le paquet, donc l'icône est la
+    même pour tout le monde, sans dépendre de l'installation.
+
+    Windows préfère le `.ico`, qui contient déjà ses six tailles ; ailleurs
+    on charge les PNG un par un. Dans les deux cas Qt prend la taille la
+    plus proche du besoin, et un rendu dédié en 16 px reste net là où une
+    réduction du 512 baverait.
+
+    Note : sur Windows, cela suffit pour la fenêtre **et** la barre des
+    tâches. Sur macOS, le Dock lit l'icône du bundle, pas celle-ci — voir
+    `scripts/make-app-bundle.sh`.
+    """
+    import sys
+    from pathlib import Path
+
+    from PySide6.QtGui import QIcon, QPixmap
+
+    resources = Path(__file__).parent / "resources"
+
+    if sys.platform.startswith("win"):
+        windows_icon = resources / "tortoisepy.ico"
+        if windows_icon.exists():
+            return QIcon(str(windows_icon))
+
+    icon = QIcon()
+    for size in (512, 256, 128, 64, 48, 32, 16):
+        chemin = resources / f"icon-{size}.png"
+        if chemin.exists():
+            icon.addPixmap(QPixmap(str(chemin)))
+    return icon
+
+
 def main(argv: list[str] | None = None) -> int:
     """Ouvre la fenêtre sur le dépôt demandé."""
     arguments = list(sys.argv[1:] if argv is None else argv)
 
     if arguments and arguments[0] in ("--version", "-V"):
         print(f"tortoisePy {__version__}")
+        return 0
+
+    if arguments and arguments[0] == "--install-icon":
+        from tortoisepy.desktop import install_bundle
+
+        bundle = install_bundle()
+        if bundle is None:
+            print(
+                "Icône système non installée : "
+                "réservée à macOS, et l'icône doit être présente.",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"Icône installée : {bundle}")
         return 0
 
     target = arguments[0] if arguments else "."
@@ -58,6 +108,15 @@ def main(argv: list[str] | None = None) -> int:
     # La QApplication doit exister avant toute opération de police :
     # sans elle, Qt abandonne le processus au lieu de lever (vérifié).
     app = QApplication(sys.argv[:1])
+    app.setApplicationName("tortoisePy")
+    app.setWindowIcon(application_icon())
+
+    # Le Dock de macOS lit l'icône du bundle, pas celle de la fenêtre :
+    # sans lui, tortoisePy y apparaît sous les traits de l'interpréteur
+    # Python. On le pose au premier lancement, puis plus jamais.
+    from tortoisepy.desktop import install_if_missing
+
+    install_if_missing()
 
     window = MainWindow(repository)
     window.show()

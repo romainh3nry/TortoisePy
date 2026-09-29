@@ -1,5 +1,6 @@
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -65,3 +66,177 @@ def test_finding_a_repository_writes_nothing(repo_path):
     before = fingerprint()
     find_repository(str(repo_path))
     assert fingerprint() == before
+
+
+def test_the_icon_is_available(qtbot):
+    """Sans icône, macOS affiche la fusée de l'interpréteur Python."""
+    from tortoisepy.cli import application_icon
+
+    icon = application_icon()
+    assert icon.isNull() is False
+
+
+def test_the_icon_ships_several_sizes(qtbot):
+    """Un rendu dédié en 16 px reste net là où une réduction baverait."""
+    from tortoisepy.cli import application_icon
+
+    tailles = sorted(size.width() for size in application_icon().availableSizes())
+    assert 16 in tailles
+    assert 512 in tailles
+
+
+def test_the_icon_files_travel_with_the_package():
+    """Sans `package-data`, les PNG ne sont pas installés chez les autres
+    utilisateurs et l'icône retombe sur celle de Python."""
+    import tomllib
+    from pathlib import Path
+
+    racine = Path(__file__).resolve().parents[1]
+    config = tomllib.loads((racine / "pyproject.toml").read_text())
+    donnees = config["tool"]["setuptools"]["package-data"]["tortoisepy"]
+    assert any("resources" in motif for motif in donnees)
+
+    ressources = racine / "src" / "tortoisepy" / "resources"
+    assert list(ressources.glob("icon-*.png")), "les PNG doivent exister"
+
+
+def test_the_icon_is_roughly_square(qtbot):
+    """Une icône non carrée est déformée par le système."""
+    from PySide6.QtGui import QImage
+
+    from tortoisepy import cli
+
+    chemin = Path(cli.__file__).parent / "resources" / "icon-256.png"
+    image = QImage(str(chemin))
+    assert image.width() == image.height() == 256
+
+
+def test_the_icon_drops_the_wordmark(qtbot):
+    """Le mot « tortoisePy » est retiré des icônes.
+
+    Sous 64 px il devient illisible et brouille la silhouette. Le bas de
+    l'icône doit donc être bien plus vide que sa moitié haute, où se
+    trouve le dessin — un logo complet remplirait les deux.
+    """
+    from PySide6.QtGui import QImage
+
+    from tortoisepy import cli
+
+    chemin = Path(cli.__file__).parent / "resources" / "icon-256.png"
+    image = QImage(str(chemin))
+
+    def sombres(debut: int, fin: int) -> float:
+        """Part de pixels sombres : le texte est bleu marine.
+
+        On ne peut pas compter le « non blanc » : depuis l'ajout du fond
+        arrondi, celui-ci compte aussi et noie la mesure (56 % au lieu
+        de 14 %). Seule la teinte du texte le distingue du fond clair.
+        """
+        marques = 0
+        total = 0
+        for y in range(debut, fin, 2):
+            for x in range(0, image.width(), 2):
+                couleur = image.pixelColor(x, y)
+                total += 1
+                if (
+                    couleur.alpha() > 20
+                    and couleur.red() < 150
+                    and couleur.green() < 150
+                ):
+                    marques += 1
+        return marques / max(total, 1)
+
+    # Bande où le mot atterrirait si le logo complet était remis à
+    # l'échelle. Une première version regardait 215-256, vide dans les
+    # deux cas — le test ne détectait alors rien.
+    bas = sombres(190, 240)
+
+    assert sombres(60, 170) > 0.05, (
+        "le dessin doit occuper le corps de l'icône"
+    )
+    assert bas < 0.04, (
+        f"{bas:.1%} de pixels sombres en bas : le mot « tortoisePy » "
+        "a-t-il été réintroduit ? (0 % attendu sans lui)"
+    )
+
+
+def test_the_icon_has_rounded_corners(qtbot):
+    """macOS attend un carré arrondi, pas une image carrée.
+
+    Sans cela l'icône tranche avec ses voisines dans le Dock — signalé
+    par l'utilisateur, capture à l'appui.
+    """
+    from PySide6.QtGui import QImage
+
+    from tortoisepy import cli
+
+    chemin = Path(cli.__file__).parent / "resources" / "icon-512.png"
+    image = QImage(str(chemin))
+    n = image.width()
+
+    for x, y in ((6, 6), (n - 6, 6), (6, n - 6), (n - 6, n - 6)):
+        assert image.pixelColor(x, y).alpha() == 0, (
+            "les coins doivent être transparents : sans arrondi, "
+            "l'icône apparaît comme un carré plein"
+        )
+
+
+def test_the_icon_respects_the_macos_margin(qtbot):
+    """Mesuré sur une icône système : ~9,4 % de marge.
+
+    Trop peu, l'icône paraît plus grande que ses voisines ; trop, plus
+    petite.
+    """
+    from PySide6.QtGui import QImage
+
+    from tortoisepy import cli
+
+    chemin = Path(cli.__file__).parent / "resources" / "icon-512.png"
+    image = QImage(str(chemin))
+
+    marge = next(
+        y
+        for y in range(image.height())
+        if any(
+            image.pixelColor(x, y).alpha() > 40
+            for x in range(0, image.width(), 4)
+        )
+    )
+    proportion = marge / image.height()
+    assert 0.06 <= proportion <= 0.14, (
+        f"marge de {proportion:.1%} : hors de la grille macOS (~10 %)"
+    )
+
+
+def test_the_icon_has_no_white_box(qtbot):
+    """Le logo source est sur fond blanc ; ce fond doit disparaître.
+
+    Sinon le Dock affiche un carré blanc au lieu de la silhouette —
+    mesuré à 38 % de l'image avant correction.
+    """
+    from PySide6.QtGui import QImage
+
+    from tortoisepy import cli
+
+    chemin = Path(cli.__file__).parent / "resources" / "icon-512.png"
+    image = QImage(str(chemin))
+
+    blancs = 0
+    total = 0
+    for y in range(0, image.height(), 4):
+        for x in range(0, image.width(), 4):
+            couleur = image.pixelColor(x, y)
+            total += 1
+            if (
+                couleur.alpha() > 200
+                and couleur.red() > 245
+                and couleur.green() > 245
+                and couleur.blue() > 245
+            ):
+                blancs += 1
+
+    part = blancs / max(total, 1)
+    assert part < 0.12, (
+        f"{part:.0%} de blanc opaque : le fond du logo est-il revenu ? "
+        "(38 % avant correction, 4 % après)"
+    )

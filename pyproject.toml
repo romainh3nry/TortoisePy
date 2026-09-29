@@ -18,5 +18,10 @@ tgraph = "tortoisepy.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Les PNG de l'icône voyagent avec le paquet : sans cette déclaration,
+# ils ne sont pas installés et macOS retombe sur l'icône de Python.
+[tool.setuptools.package-data]
+tortoisepy = ["resources/*.png", "resources/*.ico", "resources/*.icns"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
