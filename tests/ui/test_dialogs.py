@@ -104,3 +104,89 @@ def test_request_is_frozen():
     request = ConfirmationRequest(title="t", message="m", destructive=True)
     with pytest.raises(AttributeError):
         request.destructive = False
+
+
+def test_the_completer_offers_every_branch(qtbot):
+    from tortoisepy.ui.dialogs import _branch_completer
+
+    completer = _branch_completer(["main", "develop", "origin/main"])
+    completer.setCompletionPrefix("")
+    propositions = {
+        completer.completionModel().index(i, 0).data()
+        for i in range(completer.completionCount())
+    }
+    assert {"main", "develop", "origin/main"} <= propositions
+
+
+def test_the_completer_matches_anywhere_in_the_name(qtbot):
+    """Saisir « main » doit aussi proposer « origin/main »."""
+    from tortoisepy.ui.dialogs import _branch_completer
+
+    completer = _branch_completer(["main", "develop", "origin/main"])
+    completer.setCompletionPrefix("main")
+    propositions = {
+        completer.completionModel().index(i, 0).data()
+        for i in range(completer.completionCount())
+    }
+    assert propositions == {"main", "origin/main"}
+
+
+def test_the_completer_ignores_case(qtbot):
+    from tortoisepy.ui.dialogs import _branch_completer
+
+    completer = _branch_completer(["Develop"])
+    completer.setCompletionPrefix("dev")
+    assert completer.completionCount() == 1
+
+
+def _ask_branch(monkeypatch, saisie, accepte=True, choices=None):
+    """Joue `ask_branch` en simulant ce que l'utilisateur tape et clique."""
+    from PySide6.QtWidgets import QInputDialog
+
+    from tortoisepy.ui import dialogs
+
+    def exec_simule(self):
+        self.setTextValue(saisie)
+        return (
+            QInputDialog.DialogCode.Accepted
+            if accepte
+            else QInputDialog.DialogCode.Rejected
+        )
+
+    monkeypatch.setattr(QInputDialog, "exec", exec_simule)
+    branches = ["main", "develop", "origin/main"] if choices is None else choices
+    return dialogs.ask_branch(None, "Rebase", "Onto:", branches)
+
+
+def test_ask_branch_returns_a_known_branch(qtbot, monkeypatch):
+    assert _ask_branch(monkeypatch, "develop") == "develop"
+
+
+def test_ask_branch_refuses_a_name_it_does_not_know(qtbot, monkeypatch):
+    """Un nom libre atteindrait libgit2 et produirait un message opaque."""
+    assert _ask_branch(monkeypatch, "nimporte-quoi") is None
+
+
+def test_ask_branch_refuses_a_name_that_differs_only_by_case(
+    qtbot, monkeypatch
+):
+    """L'autocomplétion ignore la casse ; l'acceptation non — git non plus."""
+    assert _ask_branch(monkeypatch, "Main") is None
+
+
+def test_ask_branch_trims_what_the_user_typed(qtbot, monkeypatch):
+    assert _ask_branch(monkeypatch, "  main  ") == "main"
+
+
+def test_ask_branch_returns_none_when_cancelled(qtbot, monkeypatch):
+    assert _ask_branch(monkeypatch, "main", accepte=False) is None
+
+
+def test_ask_branch_refuses_an_empty_input(qtbot, monkeypatch):
+    assert _ask_branch(monkeypatch, "   ") is None
+
+
+def test_ask_branch_accepts_a_one_shot_iterator(qtbot, monkeypatch):
+    """`choices` est lu deux fois : un générateur ne doit pas tout rejeter."""
+    branches = (n for n in ["main", "develop"])
+    assert _ask_branch(monkeypatch, "develop", choices=branches) == "develop"

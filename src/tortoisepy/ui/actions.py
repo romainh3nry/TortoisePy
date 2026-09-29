@@ -176,6 +176,21 @@ def _pull_branch(ctx: ActionContext) -> OperationResult | None:
     return None
 
 
+def _force_push_branch(ctx: ActionContext) -> OperationResult | None:
+    """La fenêtre principale s'en charge : push en arrière-plan."""
+    return None
+
+
+def _rebase_branch(ctx: ActionContext) -> OperationResult | None:
+    """La fenêtre principale s'en charge : elle doit demander la cible."""
+    return None
+
+
+def _open_conflicts(ctx: ActionContext) -> OperationResult | None:
+    """La fenêtre principale s'en charge : elle ouvre une fenêtre."""
+    return None
+
+
 def _abort_operation(ctx: ActionContext) -> OperationResult | None:
     return operations.abort_operation(ctx.repository)
 
@@ -210,11 +225,14 @@ ACTION_HANDLERS: dict[str, Callable[[ActionContext], OperationResult | None]] = 
     "rename_branch": _rename_branch,
     "delete_branch": _delete_branch,
     "merge_branch": _merge_branch,
+    "rebase_branch": _rebase_branch,
+    "open_conflicts": _open_conflicts,
     "cherry_pick": _cherry_pick,
     "revert_commit": _revert_commit,
     "reset_to": _reset_to,
     "fetch_remote": _fetch_remote,
     "push_branch": _push_branch,
+    "force_push_branch": _force_push_branch,
     "pull_branch": _pull_branch,
     "abort_operation": _abort_operation,
     "copy_hash": _copy_hash,

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 
 import pygit2
 from pygit2.enums import FileMode
@@ -19,6 +20,10 @@ from pygit2.enums import FileMode
 from tortoisepy.core.credentials import credentials_for, is_https
 from tortoisepy.core.model import Oid
 from tortoisepy.core.results import OperationResult, failed, guarded, succeeded
+
+# Un push traverse le réseau : large, mais pas infini — une application
+# graphique ne doit jamais rester suspendue sans issue.
+_PUSH_TIMEOUT = 300
 
 
 def _commit(repo: pygit2.Repository, oid: Oid) -> pygit2.Commit:
@@ -178,6 +183,18 @@ def abort_operation(repo: pygit2.Repository) -> OperationResult:
         return failed(
             "Abandon", "no operation in progress", repository_changed=False
         )
+
+    # Un rebase ne s'abandonne PAS ainsi. `state_cleanup()` supprime
+    # `.git/rebase-merge` et `reset(HARD)` remet la HEAD détachée sur
+    # elle-même : la branche n'est jamais rattachée, et comme les
+    # métadonnées ont disparu, `abort_rebase` ne peut plus rien
+    # récupérer. Vérifié : l'utilisateur restait sur `## HEAD (no
+    # branch)` après qu'on lui ait annoncé « rebase abandonné ».
+    # C'est le défaut de la phase 8 que §5.4 interdit ; on délègue.
+    if state.operation_in_progress == "rebase":
+        from tortoisepy.core.rebase import abort_rebase
+
+        return abort_rebase(repo)
 
     repo.state_cleanup()
     repo.reset(repo.head.target, ResetMode.HARD)
@@ -524,6 +541,69 @@ class PushCallbacks(pygit2.RemoteCallbacks):
             self.rejections.append((refname, message))
 
 
+def _push_with_lease(
+    repo: pygit2.Repository, branch: str, remote_name: str
+) -> OperationResult:
+    """Pousse en forçant, **le bail arbitré par le serveur**.
+
+    Délégué au `git` du système, et non à pygit2 : le vrai
+    `--force-with-lease` transmet au serveur la valeur qu'on **attend**
+    pour la ref, et c'est le serveur qui refuse si elle a bougé. libgit2
+    1.20 ne sait pas exprimer cela — son refspec `+` force sans
+    condition.
+
+    Vérifié, et c'est la raison de ce détour : une vérification faite
+    côté client puis suivie d'un `+` laisse une fenêtre de course. Un
+    collègue qui pousse dans cet intervalle voyait son commit **détruit**
+    alors que le bail venait d'être jugé valide. Avec `git`, le même
+    scénario est refusé (« stale info ») et son travail survit.
+
+    Le projet appelle déjà `git` en sous-processus pour les identifiants
+    (`core/credentials.py`) : le précédent existe.
+    """
+    try:
+        resultat = subprocess.run(
+            ["git", "push", "--force-with-lease", remote_name, branch],
+            cwd=repo.workdir or str(repo.path),
+            capture_output=True,
+            text=True,
+            timeout=_PUSH_TIMEOUT,
+            # Sans cela, git poserait une question sur un terminal qui
+            # n'existe pas dans une application graphique, et l'appel
+            # resterait suspendu (même raison que dans `credentials.py`).
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except subprocess.TimeoutExpired:
+        # `repository_changed=True` : un `git push` interrompu a pu
+        # terminer côté serveur **et** avancer la ref de suivi locale.
+        # Annoncer l'inverse supprimerait le rafraîchissement qui le
+        # montrerait, et l'affichage mentirait sur l'état du dépôt.
+        return failed(
+            "Push",
+            f"push to '{remote_name}' timed out after "
+            f"{_PUSH_TIMEOUT}s",
+            repository_changed=True,
+        )
+    except OSError as erreur:
+        return failed("Push", f"cannot run git: {erreur}",
+                      repository_changed=False)
+
+    if resultat.returncode == 0:
+        return succeeded(f"Pushed {branch} to {remote_name} (forced)")
+
+    detail = (resultat.stderr or resultat.stdout or "").strip()
+    if "stale info" in detail:
+        # Le message brut de git nomme des refs ; celui-ci dit quoi faire.
+        return failed(
+            "Push",
+            f"'{remote_name}/{branch}' has moved since your last fetch — "
+            "someone else pushed. Fetch before forcing.",
+            repository_changed=False,
+        )
+    return failed("Push", detail or "push failed",
+                  repository_changed=False)
+
+
 def _default_remote(repo: pygit2.Repository, branch: str) -> str | None:
     """Remote vers lequel pousser cette branche.
 
@@ -553,12 +633,19 @@ def push_branch(
     repo: pygit2.Repository,
     remote_name: str | None = None,
     on_progress=None,
+    force_with_lease: bool = False,
 ) -> OperationResult:
     """Pousse la branche courante vers son remote.
 
-    Jamais de push forcé : `--force` réécrit l'historique d'autrui et
-    aucune interface de tortoisePy ne l'expose (§6.2). Un push rejeté se
-    résout en récupérant d'abord les changements distants.
+    `force_with_lease` réécrit la branche distante, **mais seulement si
+    elle est encore là où notre dernier fetch l'a vue** : on remplace son
+    propre historique, jamais celui d'un autre. `--force` inconditionnel
+    n'existe nulle part dans cette application (D15) — c'est lui, et non
+    le forçage en soi, que la phase 7 excluait.
+
+    Un rebase réécrit les commits : sans cela, la branche ne peut plus
+    être poussée du tout (vérifié : « cannot push non-fastforwardable
+    reference »).
     """
     if repo.head_is_unborn or repo.head_is_detached:
         return failed("Push", "no branch to push (detached or unborn HEAD)")
@@ -573,6 +660,18 @@ def push_branch(
         return failed("Push", "no remote configured")
 
     remote = repo.remotes[name]
+
+    if force_with_lease:
+        # Confié à `git` : lui seul sait faire arbitrer le bail par le
+        # serveur. Le refspec « + » de libgit2 forcerait sans condition
+        # et détruirait le travail d'un tiers arrivé entre-temps.
+        #
+        # **Placé avant les garde-fous pygit2 ci-dessous, à dessein** :
+        # ils protègent d'un segfault de libgit2 sur un remote
+        # `pushurl`-only, que ce chemin ne touche pas. Vérifié : `git`
+        # pousse très bien dans cette configuration, alors que le refus
+        # invoquait une limite de pygit2 dans un chemin sans pygit2.
+        return _push_with_lease(repo, branch, remote.name)
 
     # `push_url` prime sur `url` pour l'identifiant passé à `PushCallbacks`
     # (donc à `_credentials`) : un remote push-only laisse `url` à `None`.
@@ -600,7 +699,11 @@ def push_branch(
 
     # Construit depuis la branche courante : coder « master » en dur
     # échouerait sur un dépôt cloné récemment, qui est sur « main ».
-    remote.push([f"refs/heads/{branch}:refs/heads/{branch}"], callbacks=callbacks)
+    # **Aucun « + » ici** : ce chemin ne force jamais (D15).
+    remote.push(
+        [f"refs/heads/{branch}:refs/heads/{branch}"],
+        callbacks=callbacks,
+    )
 
     # `remote.push()` n'a pas levé, mais le serveur a pu refuser la ref :
     # annoncer un succès ici serait un mensonge.

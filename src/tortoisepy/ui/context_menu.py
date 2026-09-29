@@ -116,6 +116,14 @@ def _single_node_menu(
                     exclude=state.head_branch,
                 ),
                 MenuEntry(
+                    "Rebase…",
+                    "rebase_branch",
+                    # C'est la branche COURANTE qu'on rebase : l'entrée
+                    # vaut pour elle, où que l'on ait cliqué.
+                    enabled=not busy and state.head_branch is not None,
+                    needs_confirmation=dirty,
+                ),
+                MenuEntry(
                     "Cherry Pick this commit…",
                     "cherry_pick",
                     enabled=actionable,
@@ -159,6 +167,15 @@ def _single_node_menu(
                     enabled=is_current,
                 ),
                 MenuEntry(
+                    "Push (force with lease)…",
+                    "force_push_branch",
+                    # Comme Push : seulement la branche courante. Toujours
+                    # visible (D16) — la faire apparaître selon l'état
+                    # dérouterait, et supposerait un fetch récent.
+                    enabled=is_current,
+                    needs_confirmation=True,
+                ),
+                MenuEntry(
                     "Pull",
                     "pull_branch",
                     # Comme Push : seulement sur la branche courante ;
@@ -193,6 +210,19 @@ def _single_node_menu(
 
     if busy:
         entries.append(SEPARATOR)
+        if state.has_conflicts:
+            # Fermer la fenêtre de conflits ne les résout pas, et rien
+            # d'autre ne sait la rouvrir : les deux seuls appels sont des
+            # gestionnaires d'échec, sur le moment. Sans cette entrée,
+            # l'utilisateur qui la ferme n'a plus aucun chemin vers ses
+            # propres conflits (§6 promet qu'elle se rouvre).
+            entries.append(
+                MenuEntry(
+                    "Resolve conflicts…",
+                    "open_conflicts",
+                    enabled=True,
+                )
+            )
         entries.append(
             MenuEntry(
                 f"Abort {state.operation_in_progress}",

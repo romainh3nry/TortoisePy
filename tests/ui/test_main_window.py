@@ -951,3 +951,150 @@ def test_the_selection_follows_a_checkout(qtbot, tmp_path):
 
     assert fenetre.view.selected_oids() == (cible,)
     assert fenetre.commit_panel.count() > 0
+
+
+def test_rebase_asks_for_a_target(window, monkeypatch):
+    from tortoisepy.ui import main_window as module
+
+    demandes = []
+    monkeypatch.setattr(
+        module, "ask_branch",
+        lambda parent, titre, label, choix, default="": demandes.append(choix),
+    )
+    window.start_rebase_onto()
+    assert demandes, "la cible doit être demandée"
+
+
+def test_cancelling_the_target_does_nothing(window, monkeypatch):
+    """§7.0 : annuler n'écrit rien."""
+    from tortoisepy.ui import main_window as module
+
+    monkeypatch.setattr(
+        module, "ask_branch", lambda *a, **k: None
+    )
+    avant = window.repository.head.target
+    window.start_rebase_onto()
+    assert window.repository.head.target == avant
+
+
+def test_a_rebase_conflict_opens_the_window(window, monkeypatch):
+    from tortoisepy.core.results import failed
+    from tortoisepy.ui import main_window as module
+
+    ouvertes = []
+    monkeypatch.setattr(
+        module.MainWindow, "open_conflict_window",
+        lambda self: ouvertes.append(True),
+    )
+    monkeypatch.setattr(module, "show_error", lambda *a, **k: None)
+    monkeypatch.setattr(module, "ask_branch", lambda *a, **k: "main")
+    monkeypatch.setattr(
+        module, "start_rebase",
+        lambda repo, onto: failed("Rebase", "conflicts in: f.txt"),
+    )
+
+    window.start_rebase_onto()
+    assert ouvertes, "un conflit doit ouvrir la fenêtre de résolution"
+
+
+def test_force_push_is_confirmed_before_anything_happens(window, monkeypatch):
+    """§7.0 : refuser la confirmation n'envoie rien."""
+    from tortoisepy.ui import main_window as module
+
+    appels = []
+    monkeypatch.setattr(module, "confirm", lambda *a, **k: False)
+    monkeypatch.setattr(
+        module.operations, "push_branch",
+        lambda *a, **k: appels.append(k) or None,
+    )
+    window._start_push(force=True)
+    assert not appels, "rien ne doit partir sans confirmation"
+
+
+def test_the_confirmation_says_the_history_will_be_rewritten(window, monkeypatch):
+    from tortoisepy.ui import main_window as module
+
+    vus = []
+    monkeypatch.setattr(
+        module, "confirm", lambda parent, request: vus.append(request) or False
+    )
+    window._start_push(force=True)
+    assert vus, "aucune confirmation demandée"
+    texte = (vus[0].title + vus[0].message).lower()
+    assert "force" in texte
+    assert vus[0].destructive is True
+
+
+def test_the_git_cli_asking_for_a_password_counts_as_authentication():
+    """Revue finale, Important : sinon impasse au premier push forcé.
+
+    Le push forcé passe par le `git` du système, qui ne parle pas comme
+    libgit2. Sans identifiant en cache et avec `GIT_TERMINAL_PROMPT=0`, il
+    répond « could not read Username for … : terminal prompts disabled »
+    — vérifié sur git 2.50. Aucun des marqueurs de libgit2 n'y figurait,
+    donc la fenêtre d'identifiants ne s'ouvrait pas : l'utilisateur voyait
+    une erreur sans aucune issue, précisément au premier usage.
+    """
+    from tortoisepy.core.results import failed
+    from tortoisepy.ui.main_window import _needs_authentication
+
+    for message in (
+        "fatal: could not read Username for 'https://gitlab.com': "
+        "terminal prompts disabled",
+        "fatal: could not read Password for 'https://x@gitlab.com': "
+        "terminal prompts disabled",
+        "fatal: Authentication failed for 'https://gitlab.com/x.git/'",
+        "remote authentication required but no callback set",
+    ):
+        assert _needs_authentication(failed("Push", message)) is True, message
+
+
+def test_a_broken_lease_is_not_an_authentication_problem():
+    """L'inverse : ne pas demander un mot de passe pour un bail rompu."""
+    from tortoisepy.core.results import failed
+    from tortoisepy.ui.main_window import _needs_authentication
+
+    for message in (
+        "'origin/main' has moved since your last fetch — someone else "
+        "pushed. Fetch before forcing.",
+        "cannot push non-fastforwardable reference",
+    ):
+        assert _needs_authentication(failed("Push", message)) is False, message
+
+
+def test_closing_during_a_background_task_waits_for_it(qtbot, repo):
+    """Revue finale : le fil était détruit en pleine exécution.
+
+    Reproduit avant correction : « QThread: Destroyed while thread is
+    still running ». Le défaut préexistait, mais un push forcé passe par
+    `git` et peut durer jusqu'à cinq minutes, là où un fetch se comptait
+    en secondes — la fenêtre pour tomber dessus est devenue large.
+
+    Fenêtre construite ici plutôt que par la fixture `window` : ce test la
+    **ferme**, et une fixture partagée fermée fait échouer le démontage
+    des tests suivants (vérifié).
+    """
+    import time
+
+    from tortoisepy.core.results import succeeded
+    from tortoisepy.ui.tasks import BackgroundTask, FetchWorker
+
+    fenetre = MainWindow(repo)
+    qtbot.addWidget(fenetre)
+
+    def lent(on_progress):
+        time.sleep(0.5)
+        return succeeded("fini")
+
+    fenetre._task = BackgroundTask(FetchWorker(lent), fenetre)
+    fenetre._task.start()
+    qtbot.waitUntil(lambda: fenetre._task.is_running(), timeout=2000)
+
+    # `closeEvent` directement : `close()` sur une fenêtre jamais affichée
+    # ne le déclenche pas toujours selon la plateforme.
+    from PySide6.QtGui import QCloseEvent
+
+    fenetre.closeEvent(QCloseEvent())
+    assert fenetre._task.is_running() is False, (
+        "la tâche doit être terminée quand `closeEvent` rend la main"
+    )

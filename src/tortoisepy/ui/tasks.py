@@ -77,6 +77,20 @@ class BackgroundTask(QObject):
         """Attend la fin du fil. Utile aux tests et à la fermeture."""
         return self._thread.wait(timeout_ms)
 
+    def stop(self, timeout_ms: int = 10_000) -> bool:
+        """Demande l'arrêt du fil, puis l'attend. Vrai s'il s'est arrêté.
+
+        `wait()` seul ne suffit pas à la fermeture : la boucle du fil ne
+        se termine qu'après `quit()`, que `_on_finished` appelle **depuis
+        le fil principal**. Attendre sans avoir demandé l'arrêt bloquait
+        donc jusqu'au délai maximum (vérifié).
+
+        `quit()` laisse l'opération en cours finir : on ne coupe pas un
+        push au milieu, on cesse seulement de traiter la suite.
+        """
+        self._thread.quit()
+        return self._thread.wait(timeout_ms)
+
     def _on_finished(self, result: OperationResult) -> None:
         self._thread.quit()
         self._thread.wait(5_000)

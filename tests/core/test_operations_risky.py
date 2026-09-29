@@ -177,3 +177,46 @@ def test_no_operation_appears_in_two_classes():
         for name in names:
             assert name not in seen, f"{name} classé deux fois"
             seen.add(name)
+
+
+def test_abort_of_a_rebase_reattaches_the_branch(tmp_path):
+    """Revue finale, Critical : « Abort rebase » laissait la HEAD détachée.
+
+    `state_cleanup()` supprime `.git/rebase-merge` et `reset(HARD)` remet
+    la HEAD détachée sur elle-même : la branche n'était jamais rattachée,
+    et les métadonnées ayant disparu, plus rien ne pouvait récupérer.
+    L'utilisateur restait sur `## HEAD (no branch)` **après** qu'on lui
+    ait annoncé « rebase abandonné » — bloqué, et mal informé.
+    """
+    from tortoisepy.core.rebase import start_rebase
+
+    path = tmp_path / "reb"
+    path.mkdir()
+    run_git(path, "init", "-q", "-b", "main")
+    (path / "f.txt").write_text("a\nb\n")
+    run_git(path, "add", ".")
+    run_git(path, "commit", "-q", "-m", "base")
+
+    run_git(path, "checkout", "-q", "-b", "feature")
+    (path / "f.txt").write_text("a\nFEATURE\n")
+    run_git(path, "add", ".")
+    run_git(path, "commit", "-q", "-m", "cote feature")
+
+    run_git(path, "checkout", "-q", "main")
+    (path / "f.txt").write_text("a\nMAIN\n")
+    run_git(path, "add", ".")
+    run_git(path, "commit", "-q", "-m", "cote main")
+    run_git(path, "checkout", "-q", "feature")
+
+    avant = str(pygit2.Repository(str(path)).head.target)
+    start_rebase(pygit2.Repository(str(path)), "main")
+    assert read_state(pygit2.Repository(str(path))).operation_in_progress == "rebase"
+
+    result = abort_operation(pygit2.Repository(str(path)))
+    assert result.success is True
+
+    fresh = pygit2.Repository(str(path))
+    assert fresh.head_is_detached is False, "la branche doit être rattachée"
+    assert fresh.head.shorthand == "feature"
+    assert str(fresh.head.target) == avant
+    assert read_state(fresh).operation_in_progress is None

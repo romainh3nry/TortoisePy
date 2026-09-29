@@ -135,3 +135,128 @@ def test_the_two_sides_are_coloured_differently(window):
     leur = next(l for l in lines if "DISTANT" in l and ">>>" not in l)
     assert notre.startswith("+")
     assert leur.startswith("-")
+
+
+def _rebase_conflict(tmp_path):
+    """Un dépôt en plein rebase conflictuel, `feature` sur `main`."""
+    from tortoisepy.core.rebase import start_rebase
+
+    path = tmp_path / "reb"
+    path.mkdir()
+    run_git(path, "init", "-q", "-b", "main")
+    (path / "f.txt").write_text("a\nb\n")
+    run_git(path, "add", ".")
+    run_git(path, "commit", "-q", "-m", "base")
+
+    run_git(path, "checkout", "-q", "-b", "feature")
+    (path / "f.txt").write_text("a\nFEATURE\n")
+    run_git(path, "add", ".")
+    run_git(path, "commit", "-q", "-m", "cote feature")
+
+    run_git(path, "checkout", "-q", "main")
+    (path / "f.txt").write_text("a\nMAIN\n")
+    run_git(path, "add", ".")
+    run_git(path, "commit", "-q", "-m", "cote main")
+    run_git(path, "checkout", "-q", "feature")
+
+    repo = pygit2.Repository(str(path))
+    start_rebase(repo, "main")
+    return repo
+
+
+def test_a_rebase_window_says_continue(qtbot, tmp_path):
+    """Résoudre ne termine pas un rebase : il reste des commits à rejouer."""
+    fenetre = ConflictWindow(_rebase_conflict(tmp_path))
+    qtbot.addWidget(fenetre)
+    assert fenetre.resolve_button.text() == "Continue"
+
+
+def test_a_merge_window_still_says_resolve(qtbot, conflicted):
+    fenetre = ConflictWindow(conflicted)
+    qtbot.addWidget(fenetre)
+    assert fenetre.resolve_button.text() == "Resolve"
+
+
+def test_the_rebase_buttons_name_the_real_sides(qtbot, tmp_path):
+    """Review Focus 1 : « Keep mine » serait un mensonge en rebase.
+
+    `ours` y désigne la cible, `theirs` le commit rejoué.
+    """
+    fenetre = ConflictWindow(_rebase_conflict(tmp_path))
+    qtbot.addWidget(fenetre)
+
+    assert "main" in fenetre.mine_button.text()
+    assert "commit" in fenetre.theirs_button.text().lower()
+
+
+def test_keeping_my_commit_during_a_rebase(qtbot, tmp_path):
+    """Le bouton « mon commit » doit retenir la version rejouée."""
+    repo = _rebase_conflict(tmp_path)
+    fenetre = ConflictWindow(repo)
+    qtbot.addWidget(fenetre)
+
+    fenetre.select_file("f.txt")
+    fenetre.take_theirs()
+
+    chemin = os.path.join(repo.workdir, "f.txt")
+    assert "FEATURE" in open(chemin).read()
+
+
+def test_continue_completes_the_rebase(qtbot, tmp_path):
+    repo = _rebase_conflict(tmp_path)
+    fenetre = ConflictWindow(repo)
+    qtbot.addWidget(fenetre)
+    fenetre.show()
+
+    fenetre.select_file("f.txt")
+    fenetre.take_theirs()
+    fenetre.resolve()
+
+    fresh = pygit2.Repository(repo.path)
+    assert fresh.state() == pygit2.enums.RepositoryState.NONE
+    assert fresh.head_is_detached is False
+    assert fenetre.isHidden() is True
+
+
+def test_aborting_a_rebase_restores_the_branch(qtbot, tmp_path):
+    """Review Focus 3 : `abort_operation` ne saurait pas le faire."""
+    repo = _rebase_conflict(tmp_path)
+    avant_oid = str(pygit2.Repository(repo.path).head.target)
+
+    fenetre = ConflictWindow(repo)
+    qtbot.addWidget(fenetre)
+    fenetre.show()
+    fenetre.abort()
+
+    fresh = pygit2.Repository(repo.path)
+    assert fresh.state() == pygit2.enums.RepositoryState.NONE
+    assert fresh.head_is_detached is False
+    assert fresh.head.shorthand == "feature"
+    assert fenetre.isHidden() is True
+
+
+def test_a_rebase_without_a_readable_target_still_names_the_sides(
+    qtbot, tmp_path
+):
+    """Métadonnées illisibles : décrire le camp plutôt que le mal nommer.
+
+    `onto_label` vaut alors `None`. Un bouton « Keep target » n'apprend
+    rien à qui doit choisir entre deux versions ; la description, elle,
+    reste vraie sans le nom.
+    """
+    import glob
+
+    repo = _rebase_conflict(tmp_path)
+    for dossier in glob.glob(os.path.join(repo.path, "rebase-*")):
+        onto = os.path.join(dossier, "onto")
+        if os.path.exists(onto):
+            open(onto, "w").write("nimportequoi\n")
+
+    fenetre = ConflictWindow(pygit2.Repository(repo.path))
+    qtbot.addWidget(fenetre)
+
+    assert fenetre.mine_button.text() == "Keep the branch I rebase onto"
+    assert fenetre.theirs_button.text() == "Keep my commit"
+    assert fenetre.windowTitle() == "Rebase in progress"
+    # Surtout : pas de titre bancal à double espace.
+    assert "  " not in fenetre.windowTitle()

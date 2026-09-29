@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QToolBar,
 )
 
+from tortoisepy.core import operations
 from tortoisepy.core.commits import commits_for_node
 from tortoisepy.core.graph import build_graph
 from tortoisepy.core.credentials import is_https, remember
@@ -33,6 +34,7 @@ from tortoisepy.core.pull import (
     pull_rebase,
 )
 from tortoisepy.core.push_state import push_state, unpushed_oids
+from tortoisepy.core.rebase import rebase_targets, start_rebase
 from tortoisepy.core.results import failed, succeeded
 from tortoisepy.core.state import read_state
 from tortoisepy.layout.engine import layout_graph
@@ -45,6 +47,7 @@ from tortoisepy.ui.conflict_window import ConflictWindow
 from tortoisepy.ui.context_menu import MenuEntry, build_menu_model
 from tortoisepy.ui.dialogs import (
     ConfirmationRequest,
+    ask_branch,
     ask_credentials,
     ask_name,
     ask_pull_strategy,
@@ -66,7 +69,22 @@ par le fil d'interface, Qt l'interdisant depuis un fil de travail.
 """
 
 
-_AUTH_MARKERS = ("authentication", "credential", "401", "403")
+_AUTH_MARKERS = (
+    "authentication",
+    "credential",
+    "401",
+    "403",
+    # Le push forcé passe par le `git` du système, qui ne parle pas comme
+    # libgit2. Sans identifiant en cache, et avec `GIT_TERMINAL_PROMPT=0`
+    # (indispensable pour ne pas suspendre l'application), il répond
+    # « could not read Username for 'https://…': terminal prompts
+    # disabled » — vérifié. Aucun des marqueurs de libgit2 n'y figure :
+    # sans ces trois-là, la fenêtre d'identifiants ne s'ouvrait pas et
+    # l'utilisateur restait devant une erreur sans issue.
+    "could not read username",
+    "could not read password",
+    "terminal prompts disabled",
+)
 
 
 def _needs_authentication(result) -> bool:
@@ -75,7 +93,7 @@ def _needs_authentication(result) -> bool:
     Vérifié : sans rappel, libgit2 lève `AuthError` avec le message
     « remote authentication required but no callback set ». On teste des
     marqueurs plutôt que la chaîne exacte, qui dépend de la version de
-    libgit2 et du serveur.
+    libgit2, du serveur, et — depuis le push forcé — du `git` installé.
     """
     message = (result.git_error or "").lower()
     return any(marker in message for marker in _AUTH_MARKERS)
@@ -174,7 +192,30 @@ class MainWindow(QMainWindow):
         self._update_pull_action()
 
     def closeEvent(self, event) -> None:
+        """Attend la tâche de fond avant de rendre la fenêtre.
+
+        Sans cette attente, fermer pendant un fetch ou un push détruisait
+        le `QThread` en pleine exécution — reproduit : « QThread:
+        Destroyed while thread is still running ». Le défaut préexistait,
+        mais un push forcé peut durer jusqu'à cinq minutes (il passe par
+        `git`), là où un fetch se comptait en secondes : la fenêtre pour
+        tomber dessus est devenue large.
+
+L'attente passe par `stop()`, qui **demande** l'arrêt avant
+        d'attendre : `wait()` seul bloquerait jusqu'au délai maximum,
+        puisque `quit()` n'est appelé que depuis le fil principal. Une
+        première version bouclait en pompant les événements et tournait
+        dix secondes pour rien face à un double de test dont
+        `is_running()` rend toujours vrai (vérifié — quatre tests en
+        démontage cassé). `getattr` parce que ces doubles n'ont pas
+        forcément la méthode.
+        """
         self.watcher.stop()
+        tache = self._task
+        if tache is not None:
+            arreter = getattr(tache, "stop", None)
+            if callable(arreter):
+                arreter(10_000)
         super().closeEvent(event)
 
     def _center_on_head(self) -> None:
@@ -392,6 +433,49 @@ class MainWindow(QMainWindow):
             result.summary or (result.git_error or ""), 15000
         )
 
+    def start_rebase_onto(self) -> None:
+        """Demande la cible, puis rebase la branche courante dessus.
+
+        Le rebase reste au premier plan : il ne passe pas par le réseau,
+        et laisser l'utilisateur agir pendant qu'on réécrit ses commits
+        inviterait les ennuis.
+        """
+        cibles = rebase_targets(self.repository)
+        if not cibles:
+            self.statusBar().showMessage("No branch to rebase onto", 8000)
+            return
+
+        courante = self.state.head_branch if self.state else None
+        cible = ask_branch(
+            self,
+            "Rebase",
+            f"Replay {courante} on top of:",
+            cibles,
+        )
+        if cible is None:
+            return
+
+        result = start_rebase(self.repository, cible)
+        self.refresh()
+        # En échec, `summary` vaut « Rebase » tout court — le décorateur
+        # `guarded` y met l'étiquette de l'opération et réserve le détail
+        # à `git_error`. Afficher `summary` seul donnerait un statut muet
+        # au moment précis où l'utilisateur a besoin de savoir pourquoi.
+        self.statusBar().showMessage(
+            result.summary if result.success
+            else (result.git_error or result.summary),
+            15000,
+        )
+
+        if result.success:
+            return
+
+        if "conflict" in (result.git_error or "").lower():
+            self.open_conflict_window()
+            return
+
+        show_error(self, result)
+
     def _on_committed(self, result, pushed=None) -> None:
         """Un commit change l'historique : le graphe doit le refléter.
 
@@ -502,8 +586,20 @@ class MainWindow(QMainWindow):
             self._start_push()
             return
 
+        if action == "force_push_branch":
+            self._start_push(force=True)
+            return
+
         if action == "pull_branch":
             self._start_pull()
+            return
+
+        if action == "rebase_branch":
+            self.start_rebase_onto()
+            return
+
+        if action == "open_conflicts":
+            self.open_conflict_window()
             return
 
         with self.watcher.suspended():
@@ -523,8 +619,6 @@ class MainWindow(QMainWindow):
         if self._task is not None and self._task.is_running():
             self.statusBar().showMessage("Fetch already running", 3000)
             return
-
-        from tortoisepy.core import operations
 
         self.progress.setRange(0, 0)  # indéterminé tant que le total est inconnu
         self.progress.setFormat("Fetching…")
@@ -592,12 +686,17 @@ class MainWindow(QMainWindow):
         else:
             self.push_action.setToolTip(state.reason or "nothing to push")
 
-    def _start_push(self, confirmed: bool = False) -> None:
+    def _start_push(self, confirmed: bool = False, force: bool = False) -> None:
         """Pousse en arrière-plan, comme le fetch (§6.3).
 
         `confirmed` sert au second essai après saisie des identifiants :
         l'utilisateur vient de confirmer puis de s'authentifier, lui
         redemander deux fois de suite serait pénible.
+
+        `force` sélectionne `--force-with-lease` : le bail est arbitré par
+        le **serveur**, pas vérifié côté client puis poussé sans condition
+        (D15 — voir `_push_with_lease` dans core/operations.py pour la
+        course qu'un simple `+` laissait ouverte).
         """
         if self._task is not None and self._task.is_running():
             self.statusBar().showMessage("A background task is running", 3000)
@@ -605,36 +704,56 @@ class MainWindow(QMainWindow):
 
         state = push_state(self.repository)
         if not confirmed:
-            request = ConfirmationRequest(
-                title="Push",
-                message=(
-                    f"git push {state.remote_name} {state.branch}\n\n"
-                    f"{state.unpushed_count} commit(s) will be sent to the "
-                    "shared server. This cannot be undone on your own."
-                ),
-                destructive=False,
-            )
+            if force:
+                request = ConfirmationRequest(
+                    title="Push (force with lease)",
+                    message=(
+                        f"git push --force-with-lease {state.remote_name} "
+                        f"{state.branch}\n\n"
+                        f"This REPLACES the history of {state.remote_name}/"
+                        f"{state.branch} with yours. It is refused if anyone "
+                        "else pushed since your last fetch."
+                    ),
+                    destructive=True,
+                )
+            else:
+                request = ConfirmationRequest(
+                    title="Push",
+                    message=(
+                        f"git push {state.remote_name} {state.branch}\n\n"
+                        f"{state.unpushed_count} commit(s) will be sent to the "
+                        "shared server. This cannot be undone on your own."
+                    ),
+                    destructive=False,
+                )
             if not confirm(self, request):
                 return
 
-        from tortoisepy.core import operations
-
         self.progress.setRange(0, 0)
-        self.progress.setFormat("Pushing…")
+        # Poussée forcée : un sous-processus git ne rapporte aucune
+        # progression par objet (contrairement à pygit2). La barre reste
+        # donc indéterminée jusqu'à la fin plutôt que de sembler figée à 0.
+        self.progress.setFormat(
+            "Pushing (force with lease)…" if force else "Pushing…"
+        )
         self.progress.show()
         self.statusBar().showMessage("Pushing…")
 
         worker = FetchWorker(
             lambda on_progress: operations.push_branch(
-                self.repository, on_progress=on_progress
+                self.repository,
+                on_progress=on_progress,
+                force_with_lease=force,
             )
         )
         self._task = BackgroundTask(worker, self)
         self._task.progress.connect(self._on_fetch_progress)
-        self._task.finished.connect(self._on_push_finished)
+        self._task.finished.connect(
+            lambda result: self._on_push_finished(result, force)
+        )
         self._task.start()
 
-    def _on_push_finished(self, result) -> None:
+    def _on_push_finished(self, result, force: bool = False) -> None:
         """Le graphe change : la branche de suivi a avancé."""
         self.progress.hide()
         self.refresh()          # d'abord : `refresh` réécrit la barre d'état
@@ -645,8 +764,10 @@ class MainWindow(QMainWindow):
 
         if _needs_authentication(result) and self._ask_and_store_credentials():
             # Git connaît désormais les identifiants : le rappel les
-            # retrouvera tout seul au prochain essai.
-            self._start_push(confirmed=True)
+            # retrouvera tout seul au prochain essai. `force` doit survivre
+            # à ce second essai, sinon il repartirait en push normal et
+            # échouerait à nouveau avec la même erreur non-fastforwardable.
+            self._start_push(confirmed=True, force=force)
             return
 
         show_error(self, result)
@@ -761,8 +882,6 @@ class MainWindow(QMainWindow):
         Tourne dans le fil de fond. La stratégie a été choisie **avant**,
         dans le fil d'interface : Qt interdit d'ouvrir un dialogue ici.
         """
-        from tortoisepy.core import operations
-
         fetched = operations.fetch_remote(
             self.repository, on_progress=on_progress
         )

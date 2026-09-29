@@ -87,9 +87,52 @@ class ConflictWindow(QMainWindow):
         self.setWindowTitle("Resolve conflicts")
         self.resize(900, 700)
 
+        from tortoisepy.core.rebase import rebase_state
+
+        self.rebase = rebase_state(repository)
+        self._apply_labels()
+
         self.refresh()
 
+    def _apply_labels(self) -> None:
+        """Nomme les deux camps selon l'opération en cours.
+
+        En **rebase**, `ours` désigne la branche cible et `theirs` le
+        commit rejoué — l'inverse du merge (vérifié). Garder « Keep
+        mine » ferait perdre son travail à qui croit le garder.
+
+        « Continue » plutôt que « Resolve » : résoudre un conflit de
+        rebase ne termine pas l'opération, il reste des commits à rejouer.
+        """
+        if not self.rebase.in_progress:
+            self.mine_button.setText("Keep mine")
+            self.theirs_button.setText("Take theirs")
+            self.resolve_button.setText("Resolve")
+            self.setWindowTitle("Resolve conflicts")
+            return
+
+        # Sans nom de cible — métadonnées illisibles — mieux vaut décrire
+        # le camp que le nommer à tort : « Keep target » ne dit rien du
+        # choix qu'on demande, alors que « the branch I am rebasing onto »
+        # reste vrai même quand le nom manque.
+        cible = self.rebase.onto_label
+        self.mine_button.setText(
+            f"Keep {cible}" if cible else "Keep the branch I rebase onto"
+        )
+        self.theirs_button.setText("Keep my commit")
+        self.resolve_button.setText("Continue")
+        branche = self.rebase.branch
+        if branche and cible:
+            self.setWindowTitle(f"Rebase {branche} onto {cible}")
+        else:
+            self.setWindowTitle("Rebase in progress")
+
     def refresh(self) -> None:
+        from tortoisepy.core.rebase import rebase_state
+
+        self.rebase = rebase_state(self.repository)
+        self._apply_labels()
+
         self._files.clear()
         self.diff_view.clear()
 
@@ -127,8 +170,14 @@ class ConflictWindow(QMainWindow):
         self._resolve_current(Side.THEIRS)
 
     def resolve(self) -> None:
-        """Conclut la fusion une fois tout résolu."""
-        result = conclude_merge(self.repository)
+        """Conclut la fusion, ou poursuit le rebase."""
+        if self.rebase.in_progress:
+            from tortoisepy.core.rebase import continue_rebase
+
+            result = continue_rebase(self.repository)
+        else:
+            result = conclude_merge(self.repository)
+
         self.finished.emit(result)
         if not result.success:
             show_error(self, result)
@@ -137,12 +186,20 @@ class ConflictWindow(QMainWindow):
         self.close()
 
     def abort(self) -> None:
-        """Rend la main : restaure l'état d'avant la fusion.
+        """Rend la main : restaure l'état d'avant l'opération.
 
-        La sortie de secours, toujours disponible — c'est elle qui garantit
-        qu'un conflit n'est jamais une impasse.
+        Pour un rebase, **`abort_rebase` et non `abort_operation`** :
+        celui-ci fait `state_cleanup()` + `reset(HARD)`, ce qui sur la
+        HEAD détachée d'un rebase la remet sur elle-même sans rattacher
+        la branche (défaut trouvé en phase 8).
         """
-        result = operations.abort_operation(self.repository)
+        if self.rebase.in_progress:
+            from tortoisepy.core.rebase import abort_rebase
+
+            result = abort_rebase(self.repository)
+        else:
+            result = operations.abort_operation(self.repository)
+
         self.finished.emit(result)
         if not result.success:
             show_error(self, result)

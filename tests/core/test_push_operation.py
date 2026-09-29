@@ -238,6 +238,183 @@ def test_push_prefers_origin_when_no_upstream_is_configured(pair, tmp_path):
     assert "à pousser vers origin aussi" not in server_log(other_bare)
 
 
+def _serveur_et_clone(tmp_path, nom="moi"):
+    """Un dépôt nu et un clone qui a poussé « main »."""
+    bare = tmp_path / "serveur.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], capture_output=True)
+    work = tmp_path / nom
+    subprocess.run(["git", "clone", "-q", str(bare), str(work)], capture_output=True)
+    (work / "f.txt").write_text("a\n")
+    run_git(work, "add", ".")
+    run_git(work, "commit", "-q", "-m", "base")
+    run_git(work, "push", "-q", "origin", "HEAD")
+    return bare, work
+
+
+def test_a_forced_push_lands_when_the_server_is_untouched(tmp_path):
+    """Le bail tient : on remplace son propre historique."""
+    bare, work = _serveur_et_clone(tmp_path)
+    run_git(work, "commit", "-q", "--amend", "-m", "base reecrit")
+
+    result = push_branch(pygit2.Repository(str(work)), force_with_lease=True)
+    assert result.success is True, result.git_error
+
+    serveur = pygit2.Repository(str(bare))
+    assert [c.message.strip() for c in serveur.walk(
+        serveur.references["refs/heads/main"].target
+    )] == ["base reecrit"]
+
+
+def test_a_forced_push_loses_the_race_to_nobody(tmp_path):
+    """Le défaut Critical de la revue : la course détruisait un commit.
+
+    L'ancienne conception vérifiait le bail **côté client**, puis poussait
+    un refspec « + » qui force sans condition. Un collègue poussant dans
+    cet intervalle voyait son travail détruit *alors que le bail venait
+    d'être jugé valide*. Reproduit à l'époque : le serveur ne gardait plus
+    que `['base reecrit']`.
+
+    Le bail est désormais arbitré par le serveur, donc pousser pendant
+    l'opération ne peut plus rien écraser silencieusement.
+    """
+    bare, work = _serveur_et_clone(tmp_path)
+    autre = tmp_path / "collegue"
+    subprocess.run(
+        ["git", "clone", "-q", str(bare), str(autre)], capture_output=True
+    )
+
+    # Le collègue pousse pendant que nous préparons notre réécriture.
+    (autre / "g.txt").write_text("collegue\n")
+    run_git(autre, "add", ".")
+    run_git(autre, "commit", "-q", "-m", "travail du collegue")
+    run_git(autre, "push", "-q", "origin", "HEAD")
+    attendu = str(pygit2.Repository(str(autre)).head.target)
+
+    run_git(work, "commit", "-q", "--amend", "-m", "base reecrit")
+    result = push_branch(pygit2.Repository(str(work)), force_with_lease=True)
+
+    assert result.success is False
+    serveur = pygit2.Repository(str(bare))
+    assert str(serveur.references["refs/heads/main"].target) == attendu, (
+        "le commit du collègue a été écrasé"
+    )
+
+
+def test_the_refusal_says_to_fetch_first(tmp_path):
+    """« stale info » ne dit pas quoi faire ; notre message le dit."""
+    bare, work = _serveur_et_clone(tmp_path)
+    autre = tmp_path / "collegue"
+    subprocess.run(
+        ["git", "clone", "-q", str(bare), str(autre)], capture_output=True
+    )
+    (autre / "g.txt").write_text("c\n")
+    run_git(autre, "add", ".")
+    run_git(autre, "commit", "-q", "-m", "collegue")
+    run_git(autre, "push", "-q", "origin", "HEAD")
+
+    run_git(work, "commit", "-q", "--amend", "-m", "reecrit")
+    result = push_branch(pygit2.Repository(str(work)), force_with_lease=True)
+    detail = (result.git_error or "").lower()
+    assert "fetch" in detail, detail
+    assert "stale info" not in detail, "message brut de git non traduit"
+
+
+def test_a_forced_push_of_a_brand_new_branch(tmp_path):
+    """Review Focus 1 : une première publication n'écrase rien."""
+    _, work = _serveur_et_clone(tmp_path)
+    run_git(work, "checkout", "-q", "-b", "toute-neuve")
+    (work / "n.txt").write_text("neuf\n")
+    run_git(work, "add", ".")
+    run_git(work, "commit", "-q", "-m", "neuf")
+
+    result = push_branch(pygit2.Repository(str(work)), force_with_lease=True)
+    assert result.success is True, result.git_error
+
+
+def test_a_normal_push_is_still_not_forced(tmp_path):
+    """Garde-fou D15 : aucun chemin ne force sans qu'on le demande."""
+    from tortoisepy.core.operations import push_branch
+
+    _, work = _serveur_et_clone(tmp_path)
+    repo = pygit2.Repository(str(work))
+    envoyes = []
+    vrai_push = pygit2.Remote.push
+
+    def espion(self, specs, **kwargs):
+        envoyes.extend(specs)
+        return vrai_push(self, specs, **kwargs)
+
+    pygit2.Remote.push = espion
+    try:
+        push_branch(repo)
+    finally:
+        pygit2.Remote.push = vrai_push
+
+    assert envoyes, "aucun refspec envoyé"
+    assert not any(s.startswith("+") for s in envoyes), envoyes
+
+
+def test_a_forced_push_lands_after_a_rebase(tmp_path):
+    """La raison d'être de la phase : le push normal échouait ici."""
+    from tortoisepy.core.operations import push_branch
+    from tortoisepy.core.rebase import start_rebase
+
+    bare, work = _serveur_et_clone(tmp_path)
+    run_git(work, "checkout", "-q", "-b", "feature")
+    (work / "g.txt").write_text("mon travail\n")
+    run_git(work, "add", ".")
+    run_git(work, "commit", "-q", "-m", "mon travail")
+    run_git(work, "push", "-q", "origin", "feature")
+
+    run_git(work, "checkout", "-q", "main")
+    (work / "h.txt").write_text("avance\n")
+    run_git(work, "add", ".")
+    run_git(work, "commit", "-q", "-m", "avance main")
+    run_git(work, "push", "-q", "origin", "main")
+    run_git(work, "checkout", "-q", "feature")
+
+    start_rebase(pygit2.Repository(str(work)), "main")
+
+    refuse = push_branch(pygit2.Repository(str(work)))
+    assert refuse.success is False, "le push normal devrait être rejeté"
+
+    force = push_branch(pygit2.Repository(str(work)), force_with_lease=True)
+    assert force.success is True, force.git_error
+
+    serveur = pygit2.Repository(str(bare))
+    local = pygit2.Repository(str(work))
+    assert str(serveur.references["refs/heads/feature"].target) == str(
+        local.references["refs/heads/feature"].target
+    )
+
+
+def test_a_forced_push_refuses_to_erase_a_colleague(tmp_path):
+    """L'assertion qui compte : son commit est toujours là."""
+    from tortoisepy.core.operations import push_branch
+
+    bare, work = _serveur_et_clone(tmp_path)
+    autre = tmp_path / "collegue"
+    subprocess.run(["git", "clone", "-q", str(bare), str(autre)], capture_output=True)
+    (autre / "g.txt").write_text("collegue\n")
+    run_git(autre, "add", ".")
+    run_git(autre, "commit", "-q", "-m", "travail du collegue")
+    run_git(autre, "push", "-q", "origin", "HEAD")
+    attendu = str(pygit2.Repository(str(autre)).head.target)
+
+    (work / "f.txt").write_text("reecrit\n")
+    run_git(work, "add", ".")
+    run_git(work, "commit", "-q", "--amend", "-m", "base reecrit")
+
+    result = push_branch(pygit2.Repository(str(work)), force_with_lease=True)
+    assert result.success is False
+    assert "fetch" in (result.git_error or "").lower()
+
+    serveur = pygit2.Repository(str(bare))
+    assert str(serveur.references["refs/heads/main"].target) == attendu, (
+        "le commit du collègue a été écrasé"
+    )
+
+
 def test_push_with_pushurl_only_remote_does_not_raise_attributeerror(pair):
     """Review Finding 2 : un remote sans `url` (seulement `pushurl`) ne doit
     pas faire planter `_credentials` avec un `AttributeError` brut.
@@ -267,3 +444,47 @@ def test_push_with_pushurl_only_remote_does_not_raise_attributeerror(pair):
     assert result.success is False
     assert "AttributeError" not in (result.git_error or "")
     assert "origin" in (result.git_error or "")
+
+
+def test_a_forced_push_works_on_a_pushurl_only_remote(tmp_path):
+    """Revue finale, Minor : refus à tort, avec un motif hors sujet.
+
+    Les garde-fous de `push_branch` protègent d'un segfault de libgit2 sur
+    un remote `pushurl`-only. Le push forcé passe par `git`, qui n'a pas
+    ce défaut — invoquer « pygit2 crashes » dans un chemin sans pygit2
+    refusait une opération parfaitement valide.
+    """
+    bare, work = _serveur_et_clone(tmp_path)
+    run_git(work, "config", "--unset", "remote.origin.url")
+    run_git(work, "config", "remote.origin.pushurl", str(bare))
+    run_git(work, "commit", "-q", "--amend", "-m", "base reecrit")
+
+    result = push_branch(pygit2.Repository(str(work)), force_with_lease=True)
+    assert result.success is True, result.git_error
+
+    serveur = pygit2.Repository(str(bare))
+    assert [c.message.strip() for c in serveur.walk(
+        serveur.references["refs/heads/main"].target
+    )] == ["base reecrit"]
+
+
+def test_a_timed_out_forced_push_says_so(tmp_path, monkeypatch):
+    """Un délai dépassé doit se dire, pas se déguiser en autre chose.
+
+    `repository_changed=True` : un `git push` interrompu peut avoir déjà
+    mis à jour le serveur et la ref de suivi. Prétendre le contraire
+    supprimerait le rafraîchissement qui le montrerait.
+    """
+    from tortoisepy.core import operations
+
+    _, work = _serveur_et_clone(tmp_path)
+
+    def trop_long(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="git push", timeout=1)
+
+    monkeypatch.setattr(operations.subprocess, "run", trop_long)
+    result = push_branch(pygit2.Repository(str(work)), force_with_lease=True)
+
+    assert result.success is False
+    assert "timed out" in (result.git_error or "")
+    assert result.repository_changed is True

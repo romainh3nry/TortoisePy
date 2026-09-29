@@ -288,3 +288,93 @@ def test_a_single_branch_keeps_a_plain_entry():
 
     assert checkout.children == ()
     assert checkout.branch == "solo"
+
+
+def test_rebase_is_in_the_menu():
+    from tortoisepy.ui.context_menu import build_menu_model
+
+    entries = build_menu_model((_multi_branch_node(),), _on_main())
+
+    def actions(es):
+        for e in es:
+            if e.action:
+                yield e.action
+            yield from actions(e.children)
+
+    assert "rebase_branch" in set(actions(entries))
+
+
+def test_rebase_is_offered_on_the_current_branch():
+    """C'est la branche courante qu'on rebase ; ailleurs, il faut un checkout."""
+    from tortoisepy.ui.context_menu import build_menu_model
+
+    entries = build_menu_model((_multi_branch_node(),), _on_main())
+    rebase = _find(entries, "Rebase…")
+    assert rebase is not None
+    assert rebase.enabled is True
+
+
+def _mid_rebase_with_conflicts():
+    """Un rebase en cours, avec un conflit non résolu."""
+    return RepositoryState(
+        head_oid="a" * 40, head_branch=None, detached=True,
+        has_unstaged_changes=False, has_staged_changes=False,
+        has_conflicts=True, operation_in_progress="rebase",
+        conflicted_paths=("f.txt",),
+    )
+
+
+def test_conflicts_can_be_reopened_from_the_menu():
+    """Revue finale, Important 3 : sinon fermer la fenêtre ferme la sortie.
+
+    Les deux seuls appels à `open_conflict_window` sont des gestionnaires
+    d'échec, sur le moment. Sans entrée de menu, qui referme la fenêtre
+    n'a plus aucun chemin vers ses propres conflits — alors que §6 promet
+    qu'elle se rouvre.
+    """
+    entries = build_menu_model((_multi_branch_node(),), _mid_rebase_with_conflicts())
+    entree = _find(entries, "Resolve conflicts…")
+    assert entree is not None, "aucun retour vers les conflits"
+    assert entree.action == "open_conflicts"
+    assert entree.enabled is True
+
+
+def test_no_conflict_entry_when_there_is_nothing_to_resolve():
+    """Ne pas proposer de résoudre ce qui ne conflicte pas."""
+    entries = build_menu_model((_multi_branch_node(),), _on_main())
+    assert _find(entries, "Resolve conflicts…") is None
+
+
+def test_force_push_is_offered_on_the_current_branch():
+    entries = build_menu_model((_multi_branch_node(),), _on_main())
+    entree = _find(entries, "Push (force with lease)…")
+    assert entree is not None
+    assert entree.action == "force_push_branch"
+    assert entree.enabled is True
+
+
+def test_force_push_is_greyed_out_elsewhere():
+    """Comme Push : forcer une autre branche demanderait un checkout.
+
+    Le nœud ne porte **pas** de ref `HEAD` : `_is_current` court-circuite
+    à vrai dès qu'il en voit une, et un nœud portant HEAD alors que la
+    branche courante est ailleurs ne peut pas exister dans un vrai dépôt.
+    """
+    oid = "b" * 40
+    ailleurs = DisplayNode(
+        oid=oid,
+        kind=NodeKind.REF,
+        refs=(Ref("pas-la-courante", RefType.LOCAL_BRANCH, oid),),
+    )
+    state = RepositoryState(
+        head_oid="a" * 40, head_branch="autre", detached=False,
+        has_unstaged_changes=False, has_staged_changes=False,
+        has_conflicts=False, operation_in_progress=None, conflicted_paths=(),
+    )
+    entries = build_menu_model((ailleurs,), state)
+    entree = _find(entries, "Push (force with lease)…")
+    assert entree is not None
+    assert entree.enabled is False
+
+    # Le garde-fou qui manquait : « Push » doit se comporter pareil.
+    assert _find(entries, "Push").enabled is False

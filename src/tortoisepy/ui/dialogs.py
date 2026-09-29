@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -125,6 +127,56 @@ def ask_name(parent, title: str, label: str, default: str = "") -> str | None:
         return None
     name = name.strip()
     return name or None
+
+
+def _branch_completer(choices) -> QCompleter:
+    """Complète sur n'importe quelle partie du nom.
+
+    `MatchContains` plutôt que le préfixe : saisir « main » doit proposer
+    `origin/main` autant que `main`, sinon les branches distantes sont
+    introuvables sans taper « origin/ » d'abord.
+    """
+    completer = QCompleter(list(choices))
+    completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+    completer.setFilterMode(Qt.MatchFlag.MatchContains)
+    completer.setCompletionMode(
+        QCompleter.CompletionMode.PopupCompletion
+    )
+    return completer
+
+
+def ask_branch(
+    parent, title: str, label: str, choices, default: str = ""
+) -> str | None:
+    """Demande une branche, avec autocomplétion. `None` si annulé.
+
+    Refuse une saisie qui ne correspond à aucune branche connue : laisser
+    passer un nom libre produirait une erreur de libgit2 que l'utilisateur
+    ne saurait pas interpréter.
+    """
+    # Figé une fois : `choices` peut être un générateur, et il est lu
+    # deux fois — pour l'autocomplétion puis pour la vérification. Épuisé
+    # par la première lecture, il ferait rejeter jusqu'aux branches
+    # valides, silencieusement, comme si l'utilisateur avait annulé.
+    connues = list(choices)
+
+    dialogue = QInputDialog(parent)
+    dialogue.setWindowTitle(title)
+    dialogue.setLabelText(label)
+    dialogue.setTextValue(default)
+    dialogue.setInputMode(QInputDialog.InputMode.TextInput)
+
+    champ = dialogue.findChild(QLineEdit)
+    if champ is not None:
+        champ.setCompleter(_branch_completer(connues))
+
+    if dialogue.exec() != QInputDialog.DialogCode.Accepted:
+        return None
+
+    saisie = dialogue.textValue().strip()
+    if saisie not in set(connues):
+        return None
+    return saisie
 
 
 def ask_reset_mode(parent) -> str | None:
