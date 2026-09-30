@@ -147,6 +147,16 @@ class GraphView(QGraphicsView):
     def current_zoom(self) -> float:
         return self._zoom
 
+    def set_zoom(self, value: float) -> None:
+        """Applique un zoom restauré depuis les préférences.
+
+        Une valeur nulle ou négative est ignorée : elle rendrait le graphe
+        invisible, et aucune commande de l'UI ne permettrait d'en sortir.
+        """
+        if value <= 0:
+            return
+        self._set_zoom(value)
+
     def zoom_in(self) -> None:
         self._set_zoom(self._zoom * self.ZOOM_STEP)
 

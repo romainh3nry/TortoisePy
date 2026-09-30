@@ -41,10 +41,12 @@ from tortoisepy.core.push_state import divergence, push_state, unpushed_oids
 from tortoisepy.core.rebase import rebase_targets, start_rebase
 from tortoisepy.core.results import failed, succeeded
 from tortoisepy.core.search import search_commits
+from tortoisepy.core.shortcuts import CATALOGUE
 from tortoisepy.core.state import read_state
 from tortoisepy.layout.engine import layout_graph
 from tortoisepy.ui import actions
 from tortoisepy.ui.actions import ActionContext
+from tortoisepy.ui.settings_store import SettingsStore
 from tortoisepy.ui.commit_detail_window import CommitDetailWindow
 from tortoisepy.ui.commit_panel import CommitPanel
 from tortoisepy.ui.commit_window import CommitWindow
@@ -118,9 +120,11 @@ def _still_alive(widget) -> bool:
 class MainWindow(QMainWindow):
     """Fenêtre du Revision Graph."""
 
-    def __init__(self, repository: pygit2.Repository, parent=None):
+    def __init__(self, repository: pygit2.Repository, parent=None,
+                 settings: SettingsStore | None = None):
         super().__init__(parent)
         self.repository = repository
+        self.settings = settings or SettingsStore()
         self.measurer = QtMeasurer()
         self.graph = None
         self.state = None
@@ -401,34 +405,47 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             )
 
     def _build_actions(self) -> None:
-        """Actions de navigation (§7.1). Qt traduit ⌘ depuis Ctrl sur macOS."""
-        specs = [
-            ("Zoom avant", QKeySequence.StandardKey.ZoomIn, self.view.zoom_in),
-            ("Zoom arrière", QKeySequence.StandardKey.ZoomOut, self.view.zoom_out),
-            ("Zoom 100 %", QKeySequence("Ctrl+0"), self.view.reset_zoom),
-            ("Ajuster à la fenêtre", QKeySequence("Ctrl+9"), self.view.fit_to_window),
-            ("Rafraîchir", QKeySequence.StandardKey.Refresh, self.refresh),
-            ("Commit…", QKeySequence("Ctrl+K"), self.open_commit_window),
-            ("Rechercher", QKeySequence("Ctrl+F"), self.focus_search),
-            ("Push", QKeySequence("Ctrl+P"), self._start_push),
-            ("Pull", QKeySequence("Ctrl+L"), self._start_pull),
-            # À côté de Pull : c'est la même famille de gestes, et Fetch
-            # n'était atteignable que par le clic droit.
-            ("Fetch", QKeySequence("Ctrl+Shift+F"), self._start_fetch),
-        ]
+        """Actions de navigation (§7.1), raccourcis lus du catalogue.
 
-        for label, shortcut, slot in specs:
-            action = QAction(label, self)
-            action.setShortcut(shortcut)
-            action.triggered.connect(slot)
+        Les séquences vivaient ici dans un littéral ; elles sont désormais
+        dans `core/shortcuts.py`, ce qui permet de les surcharger depuis
+        les préférences. Qt traduit « Ctrl » en ⌘ sur macOS.
+        """
+        slots = {
+            "zoom_in": self.view.zoom_in,
+            "zoom_out": self.view.zoom_out,
+            "zoom_reset": self.view.reset_zoom,
+            "fit_to_window": self.view.fit_to_window,
+            "refresh": self.refresh,
+            "commit": self.open_commit_window,
+            "search": self.focus_search,
+            "push": self._start_push,
+            "pull": self._start_pull,
+            "fetch": self._start_fetch,
+        }
+
+        self.actions_by_id: dict[str, QAction] = {}
+        for spec in CATALOGUE:
+            action = QAction(spec.label, self)
+            action.triggered.connect(slots[spec.action_id])
             self.addAction(action)
             self.toolbar.addAction(action)
-            if label == "Push":
-                self.push_action = action
-            if label == "Pull":
-                self.pull_action = action
-            if label == "Fetch":
-                self.fetch_action = action
+            self.actions_by_id[spec.action_id] = action
+
+        # Ces trois-là sont manipulées ailleurs (activation/désactivation
+        # pendant une opération réseau) : on garde les attributs nommés.
+        self.push_action = self.actions_by_id["push"]
+        self.pull_action = self.actions_by_id["pull"]
+        self.fetch_action = self.actions_by_id["fetch"]
+
+        self.apply_shortcuts(self.settings.resolved_shortcuts())
+
+    def apply_shortcuts(self, resolved: dict[str, str]) -> None:
+        """Applique les séquences aux actions, sans relancer l'app."""
+        for action_id, sequence in resolved.items():
+            action = self.actions_by_id.get(action_id)
+            if action is not None:
+                action.setShortcut(QKeySequence(sequence))
 
     def _update_status(self) -> None:
         if self.state is None:
