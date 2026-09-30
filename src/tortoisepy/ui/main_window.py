@@ -52,6 +52,7 @@ from tortoisepy.ui.conflict_window import ConflictWindow
 from tortoisepy.ui.context_menu import MenuEntry, build_menu_model
 from tortoisepy.ui.dialogs import (
     ConfirmationRequest,
+    RebaseDialog,
     ask_branch,
     ask_credentials,
     ask_name,
@@ -571,16 +572,31 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             return
 
         courante = self.state.head_branch if self.state else None
-        cible = ask_branch(
+
+        # Deux champs plutôt qu'un : cliquer droit sur une branche puis
+        # « Rebase… » rejouait la **courante**, pas celle qu'on avait
+        # cliquée, et rien ne le laissait deviner (signalé par
+        # l'utilisateur).
+        dialogue = RebaseDialog(
             self,
-            "Rebase",
-            f"Replay {courante} on top of:",
-            cibles,
+            current_branch=courante,
+            local_branches=sorted(self.repository.branches.local),
+            targets=cibles,
         )
-        if cible is None:
+        if dialogue.exec() != RebaseDialog.DialogCode.Accepted:
             return
 
-        result = start_rebase(self.repository, cible)
+        rejouee, cible = dialogue.replayed(), dialogue.target()
+        if rejouee is None or cible is None:
+            return
+
+        result = start_rebase(
+            self.repository,
+            cible,
+            # `None` quand c'est déjà la courante : on garde alors le
+            # chemin éprouvé depuis la phase 9.
+            branch=rejouee if rejouee != courante else None,
+        )
         self.refresh()
         # En échec, `summary` vaut « Rebase » tout court — le décorateur
         # `guarded` y met l'étiquette de l'opération et réserve le détail

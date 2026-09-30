@@ -173,6 +173,122 @@ def _branch_completer(choices) -> QCompleter:
     return completer
 
 
+class RebaseDialog(QDialog):
+    """Deux champs : la branche rejouée, et celle par-dessus laquelle.
+
+    Le besoin vient d'un piège d'interface signalé par l'utilisateur :
+    cliquer droit sur une branche puis « Rebase… » rejouait la branche
+    **courante**, pas celle qu'on avait cliquée. Rien dans le geste ne le
+    laissait deviner.
+    """
+
+    def __init__(
+        self,
+        parent,
+        current_branch: str | None,
+        local_branches,
+        targets,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Rebase")
+
+        self._current = current_branch
+        # Rejouer une branche distante n'a pas de sens : elle n'est pas à
+        # nous. La cible, elle, peut en être une (D14, phase 9).
+        self._locales = list(local_branches)
+        self._cibles = list(targets)
+
+        self._replay = QLineEdit(current_branch or "")
+        self._replay.setCompleter(_branch_completer(self._locales))
+        self._replay.textChanged.connect(self._on_change)
+
+        self._target = QLineEdit()
+        self._target.setCompleter(_branch_completer(self._cibles))
+        self._target.textChanged.connect(self._on_change)
+
+        # N'apparaît que si la branche rejouée n'est pas la courante :
+        # toujours visible, il deviendrait invisible.
+        self._warning = QLabel()
+        self._warning.setWordWrap(True)
+        self._warning.setVisible(False)
+
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        self._buttons.button(
+            QDialogButtonBox.StandardButton.Ok
+        ).setText("Rebase")
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+
+        form = QFormLayout(self)
+        form.addRow("Replay:", self._replay)
+        form.addRow("Onto:", self._target)
+        form.addRow(self._warning)
+        form.addRow(self._buttons)
+
+        self._on_change()
+
+    # --- lecture -------------------------------------------------------
+
+    def replayed(self) -> str | None:
+        """Branche à rejouer, ou `None` si la saisie n'en désigne aucune."""
+        saisie = self._replay.text().strip()
+        return saisie if saisie in set(self._locales) else None
+
+    def target(self) -> str | None:
+        saisie = self._target.text().strip()
+        return saisie if saisie in set(self._cibles) else None
+
+    def replay_choices(self) -> tuple[str, ...]:
+        return tuple(self._locales)
+
+    def target_choices(self) -> tuple[str, ...]:
+        return tuple(self._cibles)
+
+    def switch_warning(self) -> str:
+        """Avertissement affiché, ou chaîne vide s'il n'y a pas lieu.
+
+        Lu sur le texte et non sur `isVisible()` : un widget d'une
+        fenêtre jamais affichée n'est pas « visible » pour Qt, ce qui
+        rendrait la méthode intestable — et masquerait un vrai défaut
+        derrière une limite de l'environnement.
+        """
+        return self._warning.text()
+
+    def is_valid(self) -> bool:
+        rejouee, cible = self.replayed(), self.target()
+        return bool(rejouee) and bool(cible) and rejouee != cible
+
+    # --- écriture ------------------------------------------------------
+
+    def set_replayed(self, name: str) -> None:
+        self._replay.setText(name)
+
+    def set_target(self, name: str) -> None:
+        self._target.setText(name)
+
+    # --- interne -------------------------------------------------------
+
+    def _on_change(self) -> None:
+        rejouee = self.replayed()
+
+        montrer = rejouee is not None and rejouee != self._current
+        # Vérifié : `git rebase main feature` bascule aussi sur
+        # `feature`. On le dit à l'avance plutôt que de surprendre.
+        self._warning.setText(
+            f"⚠ You will end up on « {rejouee} » after the rebase."
+            if montrer
+            else ""
+        )
+        self._warning.setVisible(montrer)
+
+        self._buttons.button(
+            QDialogButtonBox.StandardButton.Ok
+        ).setEnabled(self.is_valid())
+
+
 def ask_branch(
     parent, title: str, label: str, choices, default: str = ""
 ) -> str | None:

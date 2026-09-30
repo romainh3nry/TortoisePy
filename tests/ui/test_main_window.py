@@ -953,28 +953,104 @@ def test_the_selection_follows_a_checkout(qtbot, tmp_path):
     assert fenetre.commit_panel.count() > 0
 
 
-def test_rebase_asks_for_a_target(window, monkeypatch):
+def _dialogue_rebase(monkeypatch, module, rejouee, cible, accepte=True):
+    """Remplace la fenêtre de rebase par un double qui répond tout de suite.
+
+    Sans cela, le test ouvrirait une vraie fenêtre modale que personne ne
+    ferme — vérifié : la suite restait bloquée plusieurs minutes.
+    """
+    from PySide6.QtWidgets import QDialog
+
+    vues = []
+
+    class Double:
+        DialogCode = QDialog.DialogCode
+
+        def __init__(self, parent, current_branch, local_branches, targets):
+            vues.append(
+                {
+                    "courante": current_branch,
+                    "locales": list(local_branches),
+                    "cibles": list(targets),
+                }
+            )
+
+        def exec(self):
+            return (
+                QDialog.DialogCode.Accepted
+                if accepte
+                else QDialog.DialogCode.Rejected
+            )
+
+        def replayed(self):
+            return rejouee
+
+        def target(self):
+            return cible
+
+    monkeypatch.setattr(module, "RebaseDialog", Double)
+    return vues
+
+
+def test_rebase_offers_both_fields(window, monkeypatch):
+    """Demandé par l'utilisateur : la branche rejouée ET la cible."""
     from tortoisepy.ui import main_window as module
 
-    demandes = []
-    monkeypatch.setattr(
-        module, "ask_branch",
-        lambda parent, titre, label, choix, default="": demandes.append(choix),
-    )
+    vues = _dialogue_rebase(monkeypatch, module, None, None, accepte=False)
     window.start_rebase_onto()
-    assert demandes, "la cible doit être demandée"
+
+    assert vues, "la fenêtre doit être proposée"
+    assert vues[0]["courante"] == window.state.head_branch
+    assert vues[0]["locales"], "les branches locales doivent être proposées"
+    assert vues[0]["cibles"], "les cibles doivent être proposées"
 
 
-def test_cancelling_the_target_does_nothing(window, monkeypatch):
+def test_cancelling_the_dialog_does_nothing(window, monkeypatch):
     """§7.0 : annuler n'écrit rien."""
     from tortoisepy.ui import main_window as module
 
-    monkeypatch.setattr(
-        module, "ask_branch", lambda *a, **k: None
-    )
+    _dialogue_rebase(monkeypatch, module, "feature", "master", accepte=False)
     avant = window.repository.head.target
     window.start_rebase_onto()
+
     assert window.repository.head.target == avant
+
+
+def test_the_chosen_branch_reaches_the_core(window, monkeypatch):
+    """Le cœur du besoin : rejouer une AUTRE branche que la courante."""
+    from tortoisepy.core.results import succeeded
+    from tortoisepy.ui import main_window as module
+
+    recus = []
+    _dialogue_rebase(monkeypatch, module, "feature", "master")
+    monkeypatch.setattr(
+        module, "start_rebase",
+        lambda repo, onto, branch=None: recus.append((onto, branch))
+        or succeeded("Rebased"),
+    )
+
+    window.start_rebase_onto()
+
+    assert recus == [("master", "feature")], recus
+
+
+def test_the_current_branch_passes_none(window, monkeypatch):
+    """Quand c'est déjà la courante, on garde le chemin de la phase 9."""
+    from tortoisepy.core.results import succeeded
+    from tortoisepy.ui import main_window as module
+
+    courante = window.state.head_branch
+    recus = []
+    _dialogue_rebase(monkeypatch, module, courante, "master")
+    monkeypatch.setattr(
+        module, "start_rebase",
+        lambda repo, onto, branch=None: recus.append((onto, branch))
+        or succeeded("Rebased"),
+    )
+
+    window.start_rebase_onto()
+
+    assert recus == [("master", None)], recus
 
 
 def test_a_rebase_conflict_opens_the_window(window, monkeypatch):
@@ -987,10 +1063,10 @@ def test_a_rebase_conflict_opens_the_window(window, monkeypatch):
         lambda self: ouvertes.append(True),
     )
     monkeypatch.setattr(module, "show_error", lambda *a, **k: None)
-    monkeypatch.setattr(module, "ask_branch", lambda *a, **k: "main")
+    _dialogue_rebase(monkeypatch, module, "feature", "master")
     monkeypatch.setattr(
         module, "start_rebase",
-        lambda repo, onto: failed("Rebase", "conflicts in: f.txt"),
+        lambda repo, onto, branch=None: failed("Rebase", "conflicts in: f.txt"),
     )
 
     window.start_rebase_onto()
