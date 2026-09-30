@@ -190,3 +190,68 @@ def test_ask_branch_accepts_a_one_shot_iterator(qtbot, monkeypatch):
     """`choices` est lu deux fois : un générateur ne doit pas tout rejeter."""
     branches = (n for n in ["main", "develop"])
     assert _ask_branch(monkeypatch, "develop", choices=branches) == "develop"
+
+
+# --- Phase 19 : la fenêtre de rebase à deux champs -------------------------
+
+
+def _fenetre(qtbot, courante="feature", locales=None, cibles=None):
+    from tortoisepy.ui.dialogs import RebaseDialog
+
+    f = RebaseDialog(
+        None,
+        current_branch=courante,
+        local_branches=locales or ["feature", "main", "develop"],
+        targets=cibles or ["main", "develop", "origin/main"],
+    )
+    qtbot.addWidget(f)
+    return f
+
+
+def test_the_dialog_preselects_the_current_branch(qtbot):
+    """Demandé par l'utilisateur : la courante par défaut, modifiable."""
+    f = _fenetre(qtbot)
+    assert f.replayed() == "feature"
+
+
+def test_the_replayed_branch_can_be_changed(qtbot):
+    """D45 : c'est la moitié du besoin — pouvoir viser une autre branche."""
+    f = _fenetre(qtbot)
+    f.set_replayed("develop")
+    assert f.replayed() == "develop"
+
+
+def test_only_local_branches_can_be_replayed(qtbot):
+    """Rebaser une branche distante n'a pas de sens : elle n'est pas à nous."""
+    f = _fenetre(qtbot, cibles=["main", "origin/main"])
+    assert "origin/main" not in f.replay_choices()
+    assert "origin/main" in f.target_choices()
+
+
+def test_the_warning_appears_for_another_branch(qtbot):
+    """D46 : vérifié, le rebase bascule sur la branche rejouée."""
+    f = _fenetre(qtbot)
+    f.set_replayed("develop")
+    assert f.switch_warning(), "l'utilisateur doit savoir qu'il changera de branche"
+    assert "develop" in f.switch_warning()
+
+
+def test_no_warning_for_the_current_branch(qtbot):
+    """Toujours affiché, l'avertissement deviendrait invisible."""
+    f = _fenetre(qtbot)
+    f.set_replayed("feature")
+    assert f.switch_warning() == ""
+
+
+def test_an_unknown_name_is_refused(qtbot):
+    """Le laisser passer donnerait une erreur libgit2 incompréhensible."""
+    f = _fenetre(qtbot)
+    f.set_replayed("nexiste-pas")
+    assert f.replayed() is None
+
+
+def test_rebasing_a_branch_onto_itself_is_refused(qtbot):
+    f = _fenetre(qtbot)
+    f.set_replayed("main")
+    f.set_target("main")
+    assert f.is_valid() is False

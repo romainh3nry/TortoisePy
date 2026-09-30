@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPalette
 from PySide6.QtWidgets import QApplication
 
-from tortoisepy.core.model import DisplayNode, NodeKind, RefType
+from tortoisepy.core.model import DisplayNode, NodeKind, Ref, RefType
 from tortoisepy.layout.metrics import Size
 
 NODE_FONT_FAMILY = "Menlo"
@@ -34,10 +34,10 @@ PADDING_Y = 6.0
 class Palette:
     """Couleurs des nœuds, reconstituées de la capture TortoiseGit (§4.3)."""
 
-    current_branch: QColor = field(default_factory=lambda: QColor(120, 200, 120))   # vert
-    local_branch: QColor = field(default_factory=lambda: QColor(250, 240, 130))     # jaune
+    current_branch: QColor = field(default_factory=lambda: QColor(190, 50, 40))     # rouge
+    local_branch: QColor = field(default_factory=lambda: QColor(120, 200, 120))     # vert
     remote_branch: QColor = field(default_factory=lambda: QColor(250, 222, 180))    # beige / pêche
-    tag: QColor = field(default_factory=lambda: QColor(250, 240, 130))              # jaune, comme les locales
+    tag: QColor = field(default_factory=lambda: QColor(250, 240, 130))              # jaune
     stash: QColor = field(default_factory=lambda: QColor(150, 150, 150))            # gris
     junction: QColor = field(default_factory=lambda: QColor(245, 245, 245))         # blanc cassé, discret
     selected: QColor = field(default_factory=lambda: QColor(160, 30, 30))           # rouge foncé
@@ -170,6 +170,74 @@ def node_color(node: DisplayNode, selected: bool) -> QColor:
     return PALETTE.junction
 
 
+@dataclass(frozen=True)
+class RefRow:
+    """Une ligne d'un nœud : son texte et la couleur de sa bande."""
+
+    label: str
+    colour: QColor
+
+
+def ref_rows(node: DisplayNode, current_branch: str | None = None) -> tuple[RefRow, ...]:
+    """Les lignes d'un nœud, chacune colorée selon le type de sa ref.
+
+    Vert pour une branche locale, **rouge** pour la branche courante,
+    beige pour une distante, jaune pour un tag — demandé par
+    l'utilisateur, capture de TortoiseGit à l'appui.
+
+    `current_branch` est le nom de la branche courante, ou `None` si HEAD
+    est détachée. Sans lui, les deux cas seraient **indiscernables** :
+    vérifié sur de vrais dépôts, un nœud attaché porte
+    `['develop', 'HEAD']` et un nœud détaché `['main', 'HEAD']` — même
+    forme, sens opposé.
+    """
+    if not node.refs:
+        return (RefRow(label=node.oid[:8], colour=_kind_colour(node)),)
+
+    attachee = current_branch is not None and any(
+        ref.type is RefType.LOCAL_BRANCH and ref.name == current_branch
+        for ref in node.refs
+    )
+
+    rows: list[RefRow] = []
+    for ref in node.refs:
+        if ref.type is RefType.HEAD:
+            # Masquée quand une branche locale porte déjà l'information.
+            # En détaché, elle est le **seul** repère du nœud courant :
+            # sans elle, `main` s'afficherait en vert comme une branche
+            # ordinaire alors qu'on n'est pas dessus (vérifié).
+            if attachee:
+                continue
+            rows.append(RefRow(label=ref.name, colour=PALETTE.current_branch))
+            continue
+
+        rows.append(RefRow(label=ref.name, colour=_ref_colour(ref, current_branch)))
+
+    return tuple(rows)
+
+
+def _ref_colour(ref: Ref, current_branch: str | None) -> QColor:
+    """Couleur d'une ref selon son type, et selon qu'elle est courante."""
+    if ref.type is RefType.LOCAL_BRANCH:
+        if current_branch is not None and ref.name == current_branch:
+            return PALETTE.current_branch
+        return PALETTE.local_branch
+    if ref.type is RefType.REMOTE_BRANCH:
+        return PALETTE.remote_branch
+    if ref.type is RefType.TAG:
+        return PALETTE.tag
+    if ref.type is RefType.STASH:
+        return PALETTE.stash
+    return PALETTE.junction
+
+
+def _kind_colour(node: DisplayNode) -> QColor:
+    """Couleur d'un nœud sans ref : jonction ou stash."""
+    if node.kind is NodeKind.STASH:
+        return PALETTE.stash
+    return PALETTE.junction
+
+
 def text_color(selected: bool) -> QColor:
     return PALETTE.selected_text if selected else PALETTE.text
 
@@ -192,11 +260,18 @@ class QtMeasurer:
     des dimensions exactes sans jamais importer Qt.
     """
 
-    def __init__(self, font: QFont | None = None):
+    def __init__(
+        self, font: QFont | None = None, current_branch: str | None = None
+    ):
         self._metrics = QFontMetricsF(font or node_font())
+        # Même information que le dessin : sans elle, le nœud courant
+        # réservait la place de sa ligne `HEAD` alors qu'elle est masquée
+        # — 86 px pour 3 bandes, donc des bandes étirées (signalé par
+        # l'utilisateur sur le nœud `develop` de vti).
+        self._current_branch = current_branch
 
     def measure(self, node: DisplayNode) -> Size:
-        labels = node_labels(node)
+        labels = [row.label for row in ref_rows(node, self._current_branch)]
         widest = max(self._metrics.horizontalAdvance(label) for label in labels)
         line_height = self._metrics.height()
         return Size(

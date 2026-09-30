@@ -394,3 +394,102 @@ def test_truly_damaged_metadata_is_still_reported_as_damaged(tmp_path):
     resultat = abort_rebase(pygit2.Repository(str(path)))
     assert resultat.success is False
     assert "damaged" in (resultat.git_error or "")
+
+
+def test_rebasing_another_branch_than_the_current_one(tmp_path):
+    """Demandé par l'utilisateur : la phase 9 ne rejouait que la courante.
+
+    Cliquer droit sur une branche et choisir « Rebase… » laissait croire
+    qu'on rebasait celle-là, alors que c'était la courante — le piège que
+    cette phase corrige.
+    """
+    # `meme_fichier=False` : sans conflit, le rebase doit aboutir.
+    path = diverged(tmp_path, meme_fichier=False)
+    run_git(path, "checkout", "-q", "main")
+
+    repo = pygit2.Repository(str(path))
+    assert repo.head.shorthand == "main"
+
+    resultat = start_rebase(repo, "main", branch="feature")
+    assert resultat.success is True, resultat.git_error
+
+    fresh = pygit2.Repository(str(path))
+    messages = [c.message.strip() for c in fresh.walk(fresh.branches["feature"].target)]
+    assert "cote main" in messages, "feature doit être rejouée par-dessus main"
+
+
+def test_rebasing_another_branch_switches_onto_it(tmp_path):
+    """D46 : vérifié, `git rebase main feature` bascule aussi sur feature.
+
+    La fenêtre le dit à l'avance plutôt que de le contredire : revenir
+    sur la branche de départ s'écarterait de git et ajouterait une
+    écriture dans le dépôt.
+    """
+    # `meme_fichier=False` : sans conflit, le rebase doit aboutir.
+    path = diverged(tmp_path, meme_fichier=False)
+    run_git(path, "checkout", "-q", "main")
+
+    start_rebase(pygit2.Repository(str(path)), "main", branch="feature")
+
+    fresh = pygit2.Repository(str(path))
+    assert fresh.head_is_detached is False
+    assert fresh.head.shorthand == "feature"
+
+
+def test_without_a_branch_the_current_one_is_replayed(tmp_path):
+    """Le comportement de la phase 9 reste le défaut."""
+    # `meme_fichier=False` : sans conflit, le rebase doit aboutir.
+    path = diverged(tmp_path, meme_fichier=False)
+    repo = pygit2.Repository(str(path))
+    courante = repo.head.shorthand
+
+    assert start_rebase(repo, "main").success is True
+
+    fresh = pygit2.Repository(str(path))
+    assert fresh.head.shorthand == courante
+
+
+def test_rebasing_a_branch_onto_itself_is_refused(tmp_path):
+    # `meme_fichier=False` : sans conflit, le rebase doit aboutir.
+    path = diverged(tmp_path, meme_fichier=False)
+    run_git(path, "checkout", "-q", "main")
+
+    resultat = start_rebase(
+        pygit2.Repository(str(path)), "feature", branch="feature"
+    )
+    assert resultat.success is False
+    assert "feature" in (resultat.git_error or "")
+
+
+def test_rebasing_an_unknown_branch_is_refused(tmp_path):
+    # `meme_fichier=False` : sans conflit, le rebase doit aboutir.
+    path = diverged(tmp_path, meme_fichier=False)
+    resultat = start_rebase(
+        pygit2.Repository(str(path)), "main", branch="nexiste-pas"
+    )
+    assert resultat.success is False
+    assert "nexiste-pas" in (resultat.git_error or "")
+
+
+def test_a_dirty_tree_blocks_rebasing_another_branch(tmp_path):
+    """Vérifié : libgit2 refuse déjà (« unstaged changes exist in workdir »).
+
+    L'assertion qui compte n'est pas le refus mais que **rien n'a
+    changé** — la branche visée doit rester intacte.
+    """
+    # `meme_fichier=False` : sans conflit, le rebase doit aboutir.
+    path = diverged(tmp_path, meme_fichier=False)
+    run_git(path, "checkout", "-q", "main")
+    (path / "f.txt").write_text("modification non commitée\n")
+
+    avant = str(pygit2.Repository(str(path)).branches["feature"].target)
+    resultat = start_rebase(
+        pygit2.Repository(str(path)), "main", branch="feature"
+    )
+
+    assert resultat.success is False
+    fresh = pygit2.Repository(str(path))
+    assert str(fresh.branches["feature"].target) == avant, (
+        "la branche visée ne doit pas bouger"
+    )
+    assert fresh.head.shorthand == "main", "on ne doit pas avoir basculé"

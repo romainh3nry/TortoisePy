@@ -59,10 +59,14 @@ class NodeItem(QGraphicsRectItem):
         placement: Placement,
         scene_y: float,
         unpushed: bool = False,
+        current_branch: str | None = None,
     ):
         super().__init__(0.0, 0.0, placement.size.width, placement.size.height)
         self.node = node
         self.unpushed = unpushed
+        # Nécessaire pour colorer la ligne de la branche courante en rouge
+        # (§4.1) et pour savoir si HEAD est détachée (§4.2).
+        self.current_branch = current_branch
         self.setPos(placement.x, scene_y)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
@@ -73,15 +77,36 @@ class NodeItem(QGraphicsRectItem):
         return self.unpushed
 
     def _paint_labels(self) -> None:
+        """Une ligne par ref, centrée dans sa bande.
+
+        Centré plutôt qu'aligné à gauche : c'est ce que montre la capture
+        de référence de TortoiseGit, et les bandes colorées rendent le
+        décalage à gauche d'autant plus visible.
+
+        Le pas vertical est celui des bandes — `rect().height()` divisée
+        par le nombre de lignes — et non la zone réduite du padding :
+        sans cela, texte et couleurs ne coïncideraient pas.
+        """
         font = theme.node_font()
-        labels = theme.node_labels(self.node)
-        line = self.rect().height() - 2 * theme.PADDING_Y
-        line = line / max(len(labels), 1)
+        # **La même source que les bandes de couleur.** Lire
+        # `node_labels` ici en donnait quatre alors que `ref_rows` n'en
+        # colorait que trois : le nœud `develop` de vti affichait une
+        # ligne `HEAD` sans bande (signalé par l'utilisateur). Deux
+        # sources de vérité pour un même nœud finissent toujours par
+        # diverger.
+        rows = theme.ref_rows(self.node, self.current_branch)
+        labels = [row.label for row in rows]
+        rect = self.rect()
+        bande = rect.height() / max(len(labels), 1)
 
         for index, label in enumerate(labels):
             item = QGraphicsSimpleTextItem(label, self)
             item.setFont(font)
-            item.setPos(theme.PADDING_X, theme.PADDING_Y + index * line)
+
+            mesure = item.boundingRect()
+            x = rect.left() + (rect.width() - mesure.width()) / 2.0
+            y = rect.top() + index * bande + (bande - mesure.height()) / 2.0
+            item.setPos(x, y)
 
     def refresh_colors(self) -> None:
         """Applique la couleur correspondant à l'état de sélection (§4.3)."""
@@ -94,6 +119,37 @@ class NodeItem(QGraphicsRectItem):
             if isinstance(child, QGraphicsSimpleTextItem):
                 child.setBrush(QBrush(colour))
 
+    def _paint_bands(self, painter, rows) -> None:
+        """Une bande par ref, empilées, arrondies en haut et en bas.
+
+        Le contour du nœud est redessiné par-dessus pour que les coins
+        restent nets : les bandes intermédiaires sont des rectangles
+        droits, et seul l'ensemble est arrondi.
+        """
+        rect = self.rect()
+        hauteur = rect.height() / len(rows)
+
+        painter.save()
+        chemin = QPainterPath()
+        chemin.addRoundedRect(rect, theme.NODE_RADIUS, theme.NODE_RADIUS)
+        # Découper au contour arrondi : sans cela, les bandes du haut et
+        # du bas déborderaient des coins.
+        painter.setClipPath(chemin)
+        painter.setPen(Qt.PenStyle.NoPen)
+        for index, row in enumerate(rows):
+            bande = QRectF(
+                rect.left(), rect.top() + index * hauteur,
+                rect.width(), hauteur,
+            )
+            painter.setBrush(QBrush(row.colour))
+            painter.drawRect(bande)
+        painter.restore()
+
+        # Le contour, par-dessus les bandes.
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(self.pen())
+        painter.drawRoundedRect(rect, theme.NODE_RADIUS, theme.NODE_RADIUS)
+
     def paint(self, painter, option, widget=None) -> None:
         """Dessine un rectangle arrondi plutôt que l'angle droit par défaut.
 
@@ -101,9 +157,19 @@ class NodeItem(QGraphicsRectItem):
         de sélection en pointillés, qui jure avec le style TortoiseGit.
         """
         self.refresh_colors()
-        painter.setBrush(self.brush())
+
+        rows = theme.ref_rows(self.node, self.current_branch)
         painter.setPen(self.pen())
-        painter.drawRoundedRect(self.rect(), theme.NODE_RADIUS, theme.NODE_RADIUS)
+
+        if self.isSelected() or len(rows) <= 1:
+            # Un nœud sélectionné garde sa couleur unique (§4.3), et une
+            # seule ligne n'a pas besoin d'être découpée.
+            painter.setBrush(self.brush())
+            painter.drawRoundedRect(
+                self.rect(), theme.NODE_RADIUS, theme.NODE_RADIUS
+            )
+        else:
+            self._paint_bands(painter, rows)
 
         if self.unpushed:
             # Dessinée par-dessus, après coup : le rectangle, sa couleur et
@@ -253,6 +319,7 @@ def build_scene(
     graph: DisplayGraph,
     layout: LayoutResult,
     unpushed: frozenset[str] = frozenset(),
+    current_branch: str | None = None,
 ) -> QGraphicsScene:
     """Construit la scène complète à partir du graphe et de son placement."""
     scene = QGraphicsScene()
@@ -272,6 +339,7 @@ def build_scene(
             placement,
             _to_scene_y(placement, layout.height),
             unpushed=_node_has_unpushed(node, unpushed),
+            current_branch=current_branch,
         )
         # Qt ne garde pas la scène en vie via ses enfants ; côté Python,
         # rien ne référence plus la scène une fois `build_scene` retourné

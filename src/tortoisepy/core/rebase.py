@@ -100,8 +100,15 @@ def rebase_state(repo: pygit2.Repository) -> RebaseState:
 
 
 @guarded("Rebase", changed_on_error=True)
-def start_rebase(repo: pygit2.Repository, onto: str) -> OperationResult:
-    """Rejoue la branche courante par-dessus `onto`.
+def start_rebase(
+    repo: pygit2.Repository, onto: str, branch: str | None = None
+) -> OperationResult:
+    """Rejoue `branch` par-dessus `onto`. Par défaut, la branche courante.
+
+    **Rejouer une autre branche bascule dessus** — vérifié, et
+    `git rebase main feature` fait exactement pareil. L'interface le dit
+    à l'avance (D46) plutôt que de le contredire : revenir sur la branche
+    de départ s'écarterait de git et ajouterait une écriture au dépôt.
 
     Un conflit n'est **pas** annulé (D13, qui révise la phase 8) : le
     rebase reste en cours pour être résolu, et `abort_rebase` offre la
@@ -118,14 +125,21 @@ def start_rebase(repo: pygit2.Repository, onto: str) -> OperationResult:
         )
 
     courante = _current_branch_name(repo)
-    if courante is None:
+    rejouee = branch or courante
+    if rejouee is None:
         return failed(
             "Rebase", "no branch checked out", repository_changed=False
         )
-    if onto == courante:
+    if onto == rejouee:
         return failed(
-            "Rebase", f"'{onto}' is the current branch",
+            "Rebase", f"'{onto}' is the branch being rebased",
             repository_changed=False,
+        )
+
+    a_rejouer = repo.branches.local.get(rejouee) if branch else None
+    if branch and a_rejouer is None:
+        return failed(
+            "Rebase", f"branch '{branch}' not found", repository_changed=False
         )
 
     reference = _reference_for(repo, onto)
@@ -144,7 +158,9 @@ def start_rebase(repo: pygit2.Repository, onto: str) -> OperationResult:
         )
 
     rebase = repo.rebase_init(
-        branch=repo.lookup_reference(repo.head.name),
+        # `a_rejouer` quand l'utilisateur a désigné une autre branche ;
+        # la ref de HEAD sinon, comme depuis la phase 9.
+        branch=a_rejouer if a_rejouer is not None else repo.lookup_reference(repo.head.name),
         upstream=None,
         onto=reference,
     )
