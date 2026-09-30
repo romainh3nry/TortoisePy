@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QLabel,
     QMainWindow,
+    QMenu,
     QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from tortoisepy.core.changes import FileDiff, changes_in_commit, diff_in_commit
 from tortoisepy.core.commits import read_commit
+from tortoisepy.ui.blame_window import BlameWindow
 from tortoisepy.ui.diff_view import DiffView
 
 PATH_ROLE = Qt.ItemDataRole.UserRole
@@ -48,8 +50,17 @@ class CommitDetailWindow(QMainWindow):
             QAbstractItemView.SelectionMode.SingleSelection
         )
         self._files.itemSelectionChanged.connect(self._on_file_selected)
+        self._files.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._files.customContextMenuRequested.connect(self._show_context_menu)
 
         self.diff_view = DiffView()
+
+        # Fenêtres ouvertes depuis ce détail — un blâme, ou le détail d'un
+        # commit atteint depuis un blâme (D28). Une liste, sinon le
+        # ramasse-miettes détruirait la fenêtre aussitôt ouverte, faute de
+        # toute autre référence (piège vécu en phase 6 avec
+        # `main_window._detail_windows`).
+        self.blame_windows: list[BlameWindow | "CommitDetailWindow"] = []
 
         top = QWidget()
         layout = QVBoxLayout(top)
@@ -131,3 +142,57 @@ class CommitDetailWindow(QMainWindow):
         self.diff_view.show_diff(
             diff_in_commit(self.repository, self.oid, item.data(0, PATH_ROLE))
         )
+
+    def context_actions_for_row(self, index: int) -> tuple[str, ...]:
+        """Entrées du menu contextuel pour la ligne `index` de `self._files`.
+
+        Séparé du `QMenu` lui-même, pour qu'un test lise les entrées sans
+        ouvrir un vrai menu (même principe que `build_menu_model` pour le
+        graphe).
+        """
+        item = self._files.topLevelItem(index)
+        if item is None:
+            return ()
+        return ("Blame",)
+
+    def _show_context_menu(self, position) -> None:
+        item = self._files.itemAt(position)
+        if item is None:
+            return
+        index = self._files.indexOfTopLevelItem(item)
+        entries = self.context_actions_for_row(index)
+        if not entries:
+            return
+
+        menu = QMenu(self)
+        for entry in entries:
+            action = menu.addAction(entry)
+            if entry == "Blame":
+                action.triggered.connect(
+                    lambda checked=False, i=index: self.blame_row(i)
+                )
+        menu.exec(self._files.viewport().mapToGlobal(position))
+
+    def blame_row(self, index: int) -> None:
+        """Ouvre le blâme du fichier de la ligne `index`.
+
+        Plusieurs fenêtres sont permises, comme pour `CommitDetailWindow`
+        elle-même : elles sont en lecture seule, et comparer deux blâmes
+        côte à côte est légitime. `self.blame_windows` retient chacune,
+        sans quoi le ramasse-miettes la détruirait aussitôt ouverte.
+        """
+        item = self._files.topLevelItem(index)
+        if item is None:
+            return
+
+        path = item.data(0, PATH_ROLE)
+        window = BlameWindow(self.repository, path, self.oid, self)
+        window.commit_activated.connect(self._open_commit_from_blame)
+        self.blame_windows.append(window)
+        window.show()
+
+    def _open_commit_from_blame(self, oid: str) -> None:
+        """Un clic dans le blâme mène au commit qui a écrit la ligne (D28)."""
+        window = CommitDetailWindow(self.repository, oid, self)
+        self.blame_windows.append(window)
+        window.show()

@@ -104,6 +104,27 @@ def test_empty_commit_shows_an_explanation_instead_of_a_blank_pane(qtbot, repo):
     assert w.diff_view.text()
 
 
+def test_blame_is_offered_on_a_file(qtbot, window):
+    """L'entrée n'a de sens que sur un fichier du commit."""
+    entrees = window.context_actions_for_row(0)
+    assert "Blame" in entrees
+
+
+def test_blaming_opens_a_window_that_stays_alive(qtbot, window):
+    """Review Focus 5 : une fenêtre non retenue est ramassée aussitôt.
+
+    Le défaut a déjà été vécu en phase 6 — `main_window` garde
+    `_detail_windows` pour cette raison.
+    """
+    import gc
+
+    window.blame_row(0)
+    gc.collect()
+
+    assert window.blame_windows
+    assert window.blame_windows[-1].isVisible()
+
+
 def test_opening_writes_nothing(window, repo):
     """§7.0 : consulter un commit ne modifie pas le dépôt."""
     before = subprocess.run(
