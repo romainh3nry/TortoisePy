@@ -104,3 +104,38 @@ def test_the_readme_version_matches_the_package():
     readme = (RACINE / "README.md").read_text()
     tags = set(re.findall(r"TortoisePy/v([\d.]+)/scripts/", readme))
     assert tags == {version}, f"README annonce {tags}, le paquet est en {version}"
+
+
+def test_the_reported_version_follows_the_package():
+    """Trouvé en testant une mise à jour : `topy --version` mentait.
+
+    `cli.py` portait `__version__ = "0.1.0"` en dur. Avec un
+    `pyproject.toml` passé en 0.2.0, le paquet installé était bien en
+    0.2.0 mais la commande annonçait 0.1.0 — et rien ne le signalait.
+    """
+    import tomllib
+
+    from tortoisepy.cli import __version__
+
+    config = tomllib.loads((RACINE / "pyproject.toml").read_text())
+    declaree = config["project"]["version"]
+
+    assert __version__ == declaree, (
+        f"`topy --version` dit {__version__}, le paquet est en {declaree}"
+    )
+
+
+def test_the_readme_does_not_promise_uv_tool_upgrade():
+    """Vérifié : sur une install épinglée, uv répond « Nothing to upgrade ».
+
+    C'est le comportement correct d'un tag figé — mais le README le
+    documentait comme chemin de mise à jour, ce qui était faux.
+    """
+    readme = (RACINE / "README.md").read_text()
+    section = readme[readme.index("### Updating"):readme.index("## Usage")]
+
+    assert "install.sh" in section, "le chemin réel est de relancer l'installeur"
+    if "uv tool upgrade" in section:
+        assert "will not work" in section, (
+            "si la commande est citée, il faut dire qu'elle ne s'applique pas"
+        )

@@ -7,10 +7,28 @@
 from __future__ import annotations
 
 import sys
+from importlib.metadata import PackageNotFoundError, version as _version
 
 import pygit2
 
-__version__ = "0.1.0"
+
+def _lire_version() -> str:
+    """Version du paquet installé, et non une copie codée en dur.
+
+    Vérifié : `pyproject.toml` en 0.2.0 et cette constante restée à
+    0.1.0 donnaient un `topy --version` qui mentait après une mise à
+    jour. Une seule source de vérité — les métadonnées du paquet.
+
+    Le repli sert au dépôt cloné sans installation (`uv run topy`), où
+    aucune métadonnée n'existe.
+    """
+    try:
+        return _version("tortoisepy")
+    except PackageNotFoundError:
+        return "0.0.0+dev"
+
+
+__version__ = _lire_version()
 
 
 def find_repository(start: str) -> pygit2.Repository | None:

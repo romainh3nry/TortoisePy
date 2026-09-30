@@ -52,13 +52,13 @@ It is built on [pygit2](https://www.pygit2.org/) (libgit2) and
 **macOS and Linux**
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.1.0/scripts/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.2.0/scripts/install.sh | sh
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.1.0/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.2.0/scripts/install.ps1 | iex
 ```
 
 The script installs [uv](https://docs.astral.sh/uv/) if you don't have it,
@@ -75,7 +75,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh          # macOS / Linux
 winget install astral-sh.uv                              # Windows
 
 # 2. Install tortoisePy
-uv tool install git+https://github.com/romainh3nry/TortoisePy@v0.1.0
+uv tool install git+https://github.com/romainh3nry/TortoisePy@v0.2.0
 ```
 
 ### Why uv rather than pip
@@ -88,11 +88,26 @@ Python 3.13, and you very likely don't have it.
 If you prefer `pipx`, it works the same way, but you will need Python 3.13
 already installed.
 
-### Updating and uninstalling
+### Updating
+
+Re-run the install command — it always points at the latest released tag:
 
 ```bash
-uv tool upgrade tortoisepy      # update
-uv tool uninstall tortoisepy    # remove
+# macOS / Linux
+curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.2.0/scripts/install.sh | sh
+
+# Windows
+irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.2.0/scripts/install.ps1 | iex
+```
+
+> **`uv tool upgrade tortoisepy` will not work here.** The install pins an
+> exact tag, so uv correctly reports *"Nothing to upgrade"* — it is doing what
+> a pinned version is for. Re-running the installer is the update path.
+
+### Uninstalling
+
+```bash
+uv tool uninstall tortoisepy
 ```
 
 ## Usage
