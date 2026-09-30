@@ -141,6 +141,10 @@ class MainWindow(QMainWindow):
         # égale `build_graph` rend le même graphe.
         self._panel_cache: dict[str, tuple] = {}
         self._panel_cache_key: tuple | None = None
+        # Largeur de panneau mémorisée, appliquée au premier `showEvent`
+        # (voir `restore_settings`/`showEvent` : le splitter n'a pas de
+        # vraie taille avant le premier affichage).
+        self._largeur_panneau_en_attente: int | None = None
 
         self.view = GraphView(self)
         self.view.setContextMenuPolicy(
@@ -219,7 +223,17 @@ class MainWindow(QMainWindow):
         return False
 
     def restore_settings(self) -> None:
-        """Réapplique les réglages mémorisés, en se méfiant de chacun."""
+        """Réapplique les réglages mémorisés, en se méfiant de chacun.
+
+        La largeur du panneau n'est PAS appliquée ici : à cet instant
+        (appelé depuis `__init__`), la fenêtre n'a jamais été affichée et
+        le splitter n'a donc pas encore été mis en page — `sizes()` y
+        rend `[0, 0]` et toute largeur posée maintenant serait de toute
+        façon écrasée par la mise en page que Qt effectue au premier
+        `show()` (mesuré : une largeur de 300 enregistrée revenait à 524
+        après `show()`). Elle est donc mémorisée et appliquée une seule
+        fois depuis `showEvent`, quand le splitter a une vraie largeur.
+        """
         brut = self.settings.value("window/geometry")
         if isinstance(brut, (bytes, QByteArray)):
             sauvegarde = self.saveGeometry()
@@ -233,12 +247,23 @@ class MainWindow(QMainWindow):
 
         largeur = self.settings.value("view/panel_width")
         if isinstance(largeur, int) and largeur > 0:
-            # Avant le premier affichage, le splitter n'a pas encore été
-            # mis en page : `sizes()` rend alors `[0, 0]` (vérifié). La
-            # largeur de la fenêtre, elle, est fiable dès `resize()` — on
-            # s'y replie pour que la restauration marche aussi à ce
-            # moment-là (c'est le cas dans `MainWindow.__init__`).
-            total = sum(self.splitter.sizes()) or self.width()
+            self._largeur_panneau_en_attente = largeur
+
+    def showEvent(self, event) -> None:
+        """Applique la largeur de panneau différée, une seule fois.
+
+        Le premier `show()` remet en page le splitter (Qt lui donne alors
+        sa vraie taille) : c'est le premier moment où `setSizes` a un
+        total fiable sur lequel s'appuyer. `_largeur_panneau_en_attente`
+        est remis à `None` juste après pour ne jamais écraser un
+        redimensionnement fait ensuite par l'utilisateur, y compris lors
+        d'un `show()` ultérieur (ex. après une minimisation).
+        """
+        super().showEvent(event)
+        largeur = self._largeur_panneau_en_attente
+        if largeur is not None:
+            self._largeur_panneau_en_attente = None
+            total = sum(self.splitter.sizes())
             if total > largeur:
                 self.splitter.setSizes([total - largeur, largeur])
 

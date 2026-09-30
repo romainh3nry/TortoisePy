@@ -25,14 +25,66 @@ def test_zoom_survives_a_close_and_reopen(qtbot, repo_linear, store):
 
 
 def test_panel_width_survives(qtbot, repo_linear, store):
+    """La largeur exacte, pas seulement « non nulle ».
+
+    Une assertion `> 0` passait alors que la largeur enregistrée revenait
+    à une tout autre valeur : le splitter n'a pas de vraie taille avant le
+    premier `show()`, qui a lieu après `__init__` — la mise en page qui en
+    résulte écrasait toute largeur posée trop tôt (vérifié : 524 au lieu
+    de 300 demandés).
+
+    Les tailles demandées ici respectent le minimum de `CommitPanel`
+    (420 px, `commit_panel.py`) : y descendre en dessous fait
+    silencieusement clamper `setSizes` par Qt lui-même, ce qui n'a rien à
+    voir avec la restauration et fausserait ce test (vérifié).
+    """
     first = MainWindow(repo_linear.repo, settings=store)
     qtbot.addWidget(first)
-    first.splitter.setSizes([700, 300])
+    first.resize(1400, 850)
+    first.show()
+    first.splitter.setSizes([900, 500])
+    first.save_settings()
+    largeur_enregistree = store.value("view/panel_width")
+
+    second = MainWindow(repo_linear.repo, settings=store)
+    qtbot.addWidget(second)
+    second.resize(1400, 850)
+    second.show()
+    assert abs(second.splitter.sizes()[1] - largeur_enregistree) <= 20, (
+        f"largeur du panneau non restaurée : {second.splitter.sizes()[1]} "
+        f"(attendu ~{largeur_enregistree})"
+    )
+
+
+def test_a_later_resize_is_not_overwritten(qtbot, repo_linear, store):
+    """La largeur restaurée n'écrase pas un redimensionnement ultérieur.
+
+    `_largeur_panneau_en_attente` est consommée une seule fois au premier
+    `showEvent` : un second `show()` (minimiser/restaurer, changer
+    d'écran…) ne doit pas revenir en arrière sur un geste de
+    l'utilisateur fait entre-temps.
+    """
+    first = MainWindow(repo_linear.repo, settings=store)
+    qtbot.addWidget(first)
+    first.resize(1400, 850)
+    first.show()
+    first.splitter.setSizes([900, 500])
     first.save_settings()
 
     second = MainWindow(repo_linear.repo, settings=store)
     qtbot.addWidget(second)
-    assert second.splitter.sizes()[1] > 0
+    second.resize(1400, 850)
+    second.show()
+
+    # L'utilisateur élargit le panneau après l'ouverture.
+    second.splitter.setSizes([1000, 400])
+    tailles_apres_geste = second.splitter.sizes()
+
+    # Un second affichage (ex. minimiser puis restaurer) ne doit rien
+    # réappliquer : la largeur en attente a déjà été consommée.
+    second.hide()
+    second.show()
+    assert second.splitter.sizes() == tailles_apres_geste
 
 
 def test_an_offscreen_geometry_is_ignored(qtbot, repo_linear, store):
