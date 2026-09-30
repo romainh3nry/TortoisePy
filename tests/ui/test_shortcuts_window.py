@@ -72,3 +72,73 @@ def test_a_successful_assignment_emits_the_signal(qtbot, window):
 def test_a_refused_assignment_emits_nothing(qtbot, window):
     with qtbot.assertNotEmitted(window.shortcuts_changed):
         window.try_assign("commit", "Ctrl+Q")
+
+
+def test_double_clicking_a_row_captures_the_right_action(window, monkeypatch):
+    """Le double-clic doit viser la ligne cliquée, pas toujours la première."""
+    demandes = []
+
+    def _fausse_demande(action_id):
+        demandes.append(action_id)
+        return None
+
+    monkeypatch.setattr(window, "_demander_sequence", _fausse_demande)
+
+    ids = [ligne[0] for ligne in window.rows()]
+    index_push = ids.index("push")
+    window._on_row_double_clicked(index_push, 1)
+
+    assert demandes == ["push"]
+
+
+def test_cancelling_the_capture_writes_and_emits_nothing(
+    window, qtbot, monkeypatch
+):
+    monkeypatch.setattr(window, "_demander_sequence", lambda action_id: None)
+    avant = window._store.resolved_shortcuts()["commit"]
+
+    with qtbot.assertNotEmitted(window.shortcuts_changed):
+        window._on_row_double_clicked(
+            [ligne[0] for ligne in window.rows()].index("commit"), 1
+        )
+
+    assert window._store.resolved_shortcuts()["commit"] == avant
+
+
+def test_a_refused_capture_shows_the_reason_and_writes_nothing(
+    window, monkeypatch
+):
+    monkeypatch.setattr(
+        window, "_demander_sequence", lambda action_id: "Ctrl+Q"
+    )
+
+    boites = []
+
+    def _fausse_boite(parent, titre, texte):
+        boites.append(texte)
+
+    monkeypatch.setattr(
+        "tortoisepy.ui.shortcuts_window.QMessageBox.warning", _fausse_boite
+    )
+
+    avant = window._store.resolved_shortcuts()["commit"]
+    window._on_row_double_clicked(
+        [ligne[0] for ligne in window.rows()].index("commit"), 1
+    )
+
+    assert len(boites) == 1
+    assert window._store.resolved_shortcuts()["commit"] == avant
+
+
+def test_an_accepted_capture_stores_and_emits(window, qtbot, monkeypatch):
+    monkeypatch.setattr(
+        window, "_demander_sequence", lambda action_id: "Ctrl+J"
+    )
+
+    with qtbot.waitSignal(window.shortcuts_changed, timeout=1000) as bloqueur:
+        window._on_row_double_clicked(
+            [ligne[0] for ligne in window.rows()].index("commit"), 1
+        )
+
+    assert bloqueur.args[0]["commit"] == "Ctrl+J"
+    assert window._store.resolved_shortcuts()["commit"] == "Ctrl+J"
