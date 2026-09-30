@@ -576,6 +576,14 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             result.summary or (result.git_error or ""), 15000
         )
 
+    def open_shortcuts_window(self) -> None:
+        """Fenêtre « Keyboard Shortcuts » (§6.2)."""
+        from tortoisepy.ui.shortcuts_window import ShortcutsWindow
+
+        fenetre = ShortcutsWindow(self.settings, self)
+        fenetre.shortcuts_changed.connect(self.apply_shortcuts)
+        fenetre.exec()
+
     def start_rebase_onto(self) -> None:
         """Demande la cible, puis rebase la branche courante dessus.
 
