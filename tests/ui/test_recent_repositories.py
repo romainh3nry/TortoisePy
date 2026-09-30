@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,34 @@ def test_reopening_moves_it_up_without_duplicating(store, tmp_path):
     recents = store.recent_repositories()
     assert recents[0] == str(premier)
     assert recents.count(str(premier)) == 1
+
+
+def test_a_trailing_slash_does_not_duplicate_the_entry(store, tmp_path):
+    """Le défaut trouvé en test manuel : deux formes, un seul dépôt."""
+    depot = tmp_path / "projet"
+    depot.mkdir()
+
+    store.remember_repository(str(depot))
+    store.remember_repository(str(depot) + os.sep)
+
+    recents = store.recent_repositories()
+    assert len(recents) == 1
+
+
+def test_a_path_with_dotdot_segments_does_not_duplicate_the_entry(
+    store, tmp_path
+):
+    depot = tmp_path / "projet"
+    depot.mkdir()
+    (tmp_path / "sous").mkdir()
+
+    detour = tmp_path / "sous" / ".." / "projet"
+
+    store.remember_repository(str(depot))
+    store.remember_repository(str(detour))
+
+    recents = store.recent_repositories()
+    assert len(recents) == 1
 
 
 def test_a_vanished_repository_is_purged(store, tmp_path):

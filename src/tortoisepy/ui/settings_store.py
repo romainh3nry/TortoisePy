@@ -101,19 +101,38 @@ class SettingsStore:
         être déplacé entre deux lancements, et proposer une entrée qui
         échoue à l'ouverture sans moyen de la retirer serait pire que de
         l'oublier.
+
+        Chaque chemin est normalisé (`realpath`) : des entrées écrites
+        par une version antérieure — avant que `remember_repository` ne
+        normalise à l'écriture — peuvent encore porter un slash final ou
+        un segment `..`. Sans cette normalisation ici aussi, elles
+        resteraient mal comparées indéfiniment.
         """
         bruts = self.value("recent/repositories") or ()
         return tuple(
-            chemin for chemin in bruts if os.path.isdir(chemin)
+            os.path.realpath(chemin)
+            for chemin in bruts
+            if os.path.isdir(chemin)
         )
 
     def remember_repository(self, path: str) -> None:
-        """Place `path` en tête, sans doublon, liste plafonnée."""
+        """Place `path` en tête, sans doublon, liste plafonnée.
+
+        `path` est normalisé avec `realpath` avant comparaison ET avant
+        stockage : deux chemins désignant le même dépôt (avec ou sans
+        slash final, avec ou sans `..`, à travers un lien symbolique)
+        doivent produire une seule entrée. Comparer les chaînes brutes
+        laissait passer des doublons — un dépôt mémorisé deux fois sous
+        deux formes différentes (constaté : `MainWindow.__init__` et
+        `open_recent_repository` ne construisent pas forcément le chemin
+        de la même façon).
+        """
+        chemin = os.path.realpath(path)
         restants = [
-            chemin
-            for chemin in self.recent_repositories()
-            if chemin != path
+            candidat
+            for candidat in self.recent_repositories()
+            if candidat != chemin
         ]
         self.set_value(
-            "recent/repositories", [path, *restants][:MAX_RECENT]
+            "recent/repositories", [chemin, *restants][:MAX_RECENT]
         )
