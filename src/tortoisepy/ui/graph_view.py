@@ -42,9 +42,10 @@ class GraphView(QGraphicsView):
         graph: DisplayGraph,
         layout: LayoutResult,
         unpushed: frozenset[str] = frozenset(),
+        current_branch: str | None = None,
     ) -> None:
         """Remplace le contenu par un nouveau graphe."""
-        scene = build_scene(graph, layout, unpushed)
+        scene = build_scene(graph, layout, unpushed, current_branch)
         scene.selectionChanged.connect(self.selection_changed.emit)
 
         previous = self.scene()

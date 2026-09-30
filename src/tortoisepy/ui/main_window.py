@@ -205,8 +205,20 @@ class MainWindow(QMainWindow):
         self.graph = self._graph_cache.get(self.repository, build_graph)
         self.state = read_state(self.repository)
         unpushed = unpushed_oids(self.repository)
+        # Le mesureur est refait à chaque rafraîchissement : la branche
+        # courante change au gré des checkouts, et elle décide si la
+        # ligne `HEAD` occupe de la place (sinon le nœud courant réserve
+        # une ligne qu'il ne dessine pas).
+        courante = self.state.head_branch if self.state else None
+        self.measurer = QtMeasurer(current_branch=courante)
+
         self.view.show_graph(
-            self.graph, layout_graph(self.graph, self.measurer), unpushed
+            self.graph,
+            layout_graph(self.graph, self.measurer),
+            unpushed,
+            # `None` si HEAD est détachée : la ligne HEAD devient alors le
+            # seul repère du nœud courant (§4.2 de la spec).
+            current_branch=courante,
         )
         self.commit_panel.clear()
         self._center_on_head()

@@ -366,3 +366,156 @@ def test_marker_is_actually_painted(qtbot):
     avec = build_scene(graph, layout, unpushed=frozenset({cible}))
 
     assert _render(sans) != _render(avec)
+
+
+def test_labels_are_horizontally_centred(qtbot):
+    """Demandé par l'utilisateur : centré, pas aligné à gauche.
+
+    Les bandes colorées rendent le décalage à gauche d'autant plus
+    visible, et la capture de référence montre un texte centré.
+    """
+    from PySide6.QtWidgets import QGraphicsSimpleTextItem
+
+    from tortoisepy.core.model import DisplayNode, NodeKind, Ref, RefType
+
+    oid = "a" * 40
+    node = DisplayNode(
+        oid=oid,
+        kind=NodeKind.REF,
+        refs=(
+            Ref("court", RefType.LOCAL_BRANCH, oid),
+            Ref("origin/beaucoup-plus-long", RefType.REMOTE_BRANCH, oid),
+        ),
+    )
+    item = _node_item(node)
+
+    rect = item.rect()
+    for enfant in item.childItems():
+        if not isinstance(enfant, QGraphicsSimpleTextItem):
+            continue
+        largeur = enfant.boundingRect().width()
+        gauche = enfant.x() - rect.left()
+        droite = rect.right() - (enfant.x() + largeur)
+        assert abs(gauche - droite) < 1.0, (
+            f"« {enfant.text()} » : {gauche:.1f} à gauche, {droite:.1f} à droite"
+        )
+
+
+def test_each_label_sits_in_its_own_colour_band(qtbot):
+    """Le texte doit coïncider avec la bande qu'il nomme.
+
+    Le pas vertical des textes est celui des bandes, et non la zone
+    réduite par le padding : sinon les deux dériveraient l'un de l'autre.
+    """
+    from PySide6.QtWidgets import QGraphicsSimpleTextItem
+
+    from tortoisepy.core.model import DisplayNode, NodeKind, Ref, RefType
+
+    oid = "a" * 40
+    node = DisplayNode(
+        oid=oid,
+        kind=NodeKind.REF,
+        refs=(
+            Ref("locale", RefType.LOCAL_BRANCH, oid),
+            Ref("origin/locale", RefType.REMOTE_BRANCH, oid),
+            Ref("v1.0", RefType.TAG, oid),
+        ),
+    )
+    item = _node_item(node)
+
+    rect = item.rect()
+    bande = rect.height() / 3
+    textes = sorted(
+        (e for e in item.childItems() if isinstance(e, QGraphicsSimpleTextItem)),
+        key=lambda e: e.y(),
+    )
+    assert len(textes) == 3
+
+    for index, texte in enumerate(textes):
+        milieu_bande = rect.top() + (index + 0.5) * bande
+        centre = texte.y() + texte.boundingRect().height() / 2
+        # Au milieu de sa bande, pas seulement « dedans » : une simple
+        # appartenance laissait passer un texte dérivant vers le haut
+        # (vérifié par mutation — le pas calculé sur la zone réduite par
+        # le padding décale progressivement les lignes).
+        assert abs(centre - milieu_bande) < 1.5, (
+            f"« {texte.text()} » à {centre:.1f}, milieu attendu "
+            f"{milieu_bande:.1f}"
+        )
+
+
+def _node_item(node, current_branch=None):
+    """Un `NodeItem` mesuré comme l'application le ferait."""
+    from tortoisepy.layout.metrics import Placement
+    from tortoisepy.ui.graph_items import NodeItem
+    from tortoisepy.ui.theme import QtMeasurer
+
+    taille = QtMeasurer(current_branch=current_branch).measure(node)
+    return NodeItem(
+        node,
+        Placement(oid=node.oid, x=0.0, y=0.0, size=taille),
+        0.0,
+        current_branch=current_branch,
+    )
+
+
+def test_the_node_draws_exactly_as_many_labels_as_bands(qtbot):
+    """Signalé par l'utilisateur sur le nœud `develop` de vti.
+
+    `node_labels` en rendait quatre — dont `HEAD` — alors que `ref_rows`
+    n'en colorait que trois : le nœud affichait une ligne sans bande, et
+    sa hauteur réservait la place d'une ligne qu'il ne dessinait pas
+    (86 px pour 3 bandes). Deux sources de vérité pour un même nœud
+    finissent toujours par diverger.
+    """
+    from PySide6.QtWidgets import QGraphicsSimpleTextItem
+
+    from tortoisepy.core.model import DisplayNode, NodeKind, Ref, RefType
+    from tortoisepy.ui.theme import ref_rows
+
+    oid = "a" * 40
+    node = DisplayNode(
+        oid=oid,
+        kind=NodeKind.REF,
+        refs=(
+            Ref("develop", RefType.LOCAL_BRANCH, oid),
+            Ref("origin/develop", RefType.REMOTE_BRANCH, oid),
+            Ref("HEAD", RefType.HEAD, oid),
+        ),
+    )
+    item = _node_item(node, current_branch="develop")
+
+    rows = ref_rows(node, "develop")
+    textes = [
+        e for e in item.childItems() if isinstance(e, QGraphicsSimpleTextItem)
+    ]
+
+    assert len(rows) == 2, "la ligne HEAD est masquée"
+    assert len(textes) == len(rows), (
+        f"{len(textes)} textes pour {len(rows)} bandes"
+    )
+
+
+def test_the_node_is_not_taller_than_its_bands(qtbot):
+    """La hauteur doit suivre les bandes réellement dessinées."""
+    from tortoisepy.core.model import DisplayNode, NodeKind, Ref, RefType
+    from tortoisepy.ui.theme import QtMeasurer, ref_rows
+
+    oid = "a" * 40
+    node = DisplayNode(
+        oid=oid,
+        kind=NodeKind.REF,
+        refs=(
+            Ref("develop", RefType.LOCAL_BRANCH, oid),
+            Ref("origin/develop", RefType.REMOTE_BRANCH, oid),
+            Ref("HEAD", RefType.HEAD, oid),
+        ),
+    )
+
+    avec = QtMeasurer(current_branch="develop").measure(node)
+    sans = QtMeasurer(current_branch=None).measure(node)
+
+    assert avec.height < sans.height, (
+        "le nœud courant ne doit pas réserver la place de sa ligne HEAD"
+    )
+    assert len(ref_rows(node, "develop")) == 2
