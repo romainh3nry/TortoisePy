@@ -432,6 +432,54 @@ def fetch_remote(
 # --- Commit d'une sélection (§5, §6.1) ----------------------------------
 
 
+def _build_tree(
+    repo: pygit2.Repository,
+    paths: tuple[str, ...],
+    base: pygit2.Tree | None,
+    etiquette: str = "Commit",
+) -> pygit2.Oid | OperationResult:
+    """Bâtit un arbre à partir d'un index **temporaire en mémoire**.
+
+    `base` est l'arbre de départ (`None` pour un dépôt sans commit) : tout
+    ce qui n'est pas dans `paths` reste tel quel, au lieu de disparaître du
+    nouvel arbre. Rend un `Oid` d'arbre en cas de succès, ou un
+    `etiquette` nomme l'opération dans un échec : un amend qui échoue
+    affichait « Commit », ce qui désigne le mauvais geste.
+
+    `OperationResult` d'échec — à l'appelant de le reconnaître et de le
+    propager tel quel.
+    """
+    index = pygit2.Index()
+    if base is not None:
+        index.read_tree(base)
+
+    workdir = repo.workdir or ""
+    for path in paths:
+        full = os.path.join(workdir, path)
+        # lexists (pas exists) : un symlink cassé doit rester committable
+        # comme symlink, pas être pris pour un fichier supprimé.
+        if os.path.lexists(full):
+            # Un index détaché ne lit pas le disque : le blob doit être
+            # créé explicitement (vérifié).
+            blob = repo.create_blob_fromworkdir(path)
+            # lstat (pas stat) : ne pas suivre le lien, sinon un symlink
+            # serait vu comme sa cible et perdrait son mode LINK.
+            info = os.lstat(full)
+            if stat.S_ISLNK(info.st_mode):
+                mode = FileMode.LINK
+            elif info.st_mode & stat.S_IXUSR:
+                mode = FileMode.BLOB_EXECUTABLE
+            else:
+                mode = FileMode.BLOB
+            index.add(pygit2.IndexEntry(path, blob, mode))
+        elif base is not None and path in [e.path for e in index]:
+            index.remove(path)  # fichier supprimé
+        else:
+            return failed(etiquette, f"file not found: {path}")
+
+    return index.write_tree(repo)
+
+
 @guarded("Commit")
 def commit_selection(
     repo: pygit2.Repository, paths: tuple[str, ...], message: str
@@ -451,38 +499,12 @@ def commit_selection(
         return failed("Commit", "nothing selected")
 
     unborn = repo.head_is_unborn
-    index = pygit2.Index()
+    base = None if unborn else repo.revparse_single("HEAD").tree
 
-    if not unborn:
-        # Partir du dernier commit : tout ce qui n'est pas coché reste tel
-        # quel, au lieu de disparaître du nouvel arbre.
-        index.read_tree(repo.revparse_single("HEAD").tree)
+    tree = _build_tree(repo, selected, base)
+    if isinstance(tree, OperationResult):
+        return tree
 
-    workdir = repo.workdir or ""
-    for path in selected:
-        full = os.path.join(workdir, path)
-        # lexists (pas exists) : un symlink cassé doit rester committable
-        # comme symlink, pas être pris pour un fichier supprimé.
-        if os.path.lexists(full):
-            # Un index détaché ne lit pas le disque : le blob doit être
-            # créé explicitement (vérifié).
-            blob = repo.create_blob_fromworkdir(path)
-            # lstat (pas stat) : ne pas suivre le lien, sinon un symlink
-            # serait vu comme sa cible et perdrait son mode LINK.
-            info = os.lstat(full)
-            if stat.S_ISLNK(info.st_mode):
-                mode = FileMode.LINK
-            elif info.st_mode & stat.S_IXUSR:
-                mode = FileMode.BLOB_EXECUTABLE
-            else:
-                mode = FileMode.BLOB
-            index.add(pygit2.IndexEntry(path, blob, mode))
-        elif not unborn and path in [e.path for e in index]:
-            index.remove(path)  # fichier supprimé
-        else:
-            return failed("Commit", f"file not found: {path}")
-
-    tree = index.write_tree(repo)
     signature = _signature(repo)
     parents = [] if unborn else [repo.head.target]
 

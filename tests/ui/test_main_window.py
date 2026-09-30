@@ -1098,3 +1098,45 @@ def test_closing_during_a_background_task_waits_for_it(qtbot, repo):
     assert fenetre._task.is_running() is False, (
         "la tâche doit être terminée quand `closeEvent` rend la main"
     )
+
+
+# --- indicateur de divergence (tâche 3) ----------------------------------
+
+
+def test_the_status_bar_shows_the_divergence(window, monkeypatch):
+    from tortoisepy.ui import main_window as module
+
+    monkeypatch.setattr(module, "divergence", lambda repo: (2, 1))
+    window.refresh()
+    assert "↑2" in window.branch_label.text()
+    assert "↓1" in window.branch_label.text()
+
+
+def test_an_up_to_date_branch_shows_no_arrows(window, monkeypatch):
+    """Une branche à jour n'a pas besoin d'être commentée."""
+    from tortoisepy.ui import main_window as module
+
+    monkeypatch.setattr(module, "divergence", lambda repo: (0, 0))
+    window.refresh()
+    assert "↑" not in window.branch_label.text()
+    assert "↓" not in window.branch_label.text()
+
+
+def test_the_tooltip_says_the_figure_may_be_stale(window, monkeypatch):
+    """Review Focus 2 : un indicateur muet sur sa fraîcheur mentirait."""
+    from tortoisepy.ui import main_window as module
+
+    monkeypatch.setattr(module, "divergence", lambda repo: (1, 1))
+    window.refresh()
+    assert "fetch" in window.branch_label.toolTip().lower()
+
+
+def test_no_divergence_keeps_the_existing_tooltip(window, monkeypatch):
+    """Piège du brief : le chemin sans écart doit garder l'infobulle
+    existante (le nom de la branche), pas la laisser vide ou dupliquée.
+    """
+    from tortoisepy.ui import main_window as module
+
+    monkeypatch.setattr(module, "divergence", lambda repo: None)
+    window.refresh()
+    assert window.branch_label.toolTip() == window.state.head_branch

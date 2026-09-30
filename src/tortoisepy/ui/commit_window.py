@@ -11,6 +11,7 @@ import pygit2
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -24,7 +25,9 @@ from PySide6.QtWidgets import (
 )
 
 from tortoisepy.core import operations
+from tortoisepy.core.amend import amend_commit, can_amend, last_commit_message
 from tortoisepy.core.changes import diff_for, list_changes
+from tortoisepy.core.push_state import unpushed_oids
 from tortoisepy.ui.diff_view import DiffView
 from tortoisepy.ui.dialogs import confirm, show_error, show_message
 from tortoisepy.ui.dialogs import ConfirmationRequest
@@ -76,6 +79,32 @@ class CommitWindow(QMainWindow):
         self._message.setMaximumHeight(120)
         self._message.textChanged.connect(self._update_buttons)
 
+        self._emprunte = ""
+        """Message tapé avant de cocher « Amender », rendu si on décoche."""
+        self.amend_box = QCheckBox("Amender le dernier commit")
+        raison = can_amend(repository)
+        self.amend_box.setEnabled(raison is None)
+        if raison is not None:
+            # Grisé sans explication n'apprend rien : dire pourquoi.
+            self.amend_box.setToolTip(raison)
+        self.amend_box.toggled.connect(self._on_amend_toggled)
+
+        # §3.4 : amender un commit déjà publié fait diverger la branche.
+        # Le dire ici, et nommer la suite, évite le « non-fastforwardable »
+        # de git, que l'utilisateur ne sait pas interpréter.
+        self.amend_warning = QLabel(
+            "⚠ Ce commit est déjà sur le serveur : après l'avoir amendé, "
+            "il faudra « Push (force with lease) »."
+        )
+        self.amend_warning.setWordWrap(True)
+        self.amend_warning.setVisible(False)
+
+        # Message emprunté au dernier commit, et sa valeur au moment où on
+        # l'a posé : sans ce repère, décocher écraserait ce que
+        # l'utilisateur vient d'écrire par-dessus.
+        self._emprunte = ""
+        self._emprunt_pose = ""
+
         self.commit_button = QPushButton("Commit")
         self.commit_button.clicked.connect(self.commit)
         self.push_button = QPushButton("Commit && Push")
@@ -92,6 +121,8 @@ class CommitWindow(QMainWindow):
         bottom = QWidget()
         layout = QVBoxLayout(bottom)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.amend_box)
+        layout.addWidget(self.amend_warning)
         layout.addWidget(QLabel("Message :"))
         layout.addWidget(self._message)
         layout.addLayout(buttons)
@@ -197,11 +228,24 @@ class CommitWindow(QMainWindow):
 
     # --- actions -------------------------------------------------------
 
-    def commit(self) -> None:
-        paths = self.checked_paths()
-        result = operations.commit_selection(
+    def _write_commit(self, paths: tuple[str, ...]):
+        """Écrit le commit : amend ou création, selon la case.
+
+        Le seul endroit qui tranche. « Commit » le faisait, pas
+        « Commit && Push » : avec la case cochée, ce dernier créait un
+        **second** commit puis le poussait — l'intention de l'utilisateur
+        silencieusement inversée, et un mauvais commit sur le serveur
+        (trouvé en revue finale).
+        """
+        if self.amend_box.isChecked():
+            return amend_commit(self.repository, paths, self.message())
+        return operations.commit_selection(
             self.repository, paths, self.message()
         )
+
+    def commit(self) -> None:
+        paths = self.checked_paths()
+        result = self._write_commit(paths)
         if result.success:
             self._try_sync_index_after_commit(paths)
         self._after_commit(result, None)
@@ -226,9 +270,7 @@ class CommitWindow(QMainWindow):
             return
 
         paths = self.checked_paths()
-        result = operations.commit_selection(
-            self.repository, paths, self.message()
-        )
+        result = self._write_commit(paths)
         if not result.success:
             self._after_commit(result, None)
             return
@@ -326,8 +368,62 @@ class CommitWindow(QMainWindow):
             diff_for(self.repository, item.data(0, PATH_ROLE))
         )
 
+    def _on_amend_toggled(self, coche: bool) -> None:
+        """Emprunte le message du dernier commit, ou le rend.
+
+        Corriger une faute suppose de voir ce qu'on corrige. Et décocher
+        doit rendre le message emprunté : le laisser le ferait passer
+        pour le message d'un commit neuf.
+        """
+        if coche:
+            self._emprunte = self._message.toPlainText()
+            self._message.setPlainText(last_commit_message(self.repository))
+        else:
+            # Ne rendre le message emprunté que si l'utilisateur ne l'a
+            # pas remplacé : sinon décocher effacerait ce qu'il vient
+            # d'écrire, sans rien demander (trouvé en revue finale).
+            if self._message.toPlainText() == self._emprunt_pose:
+                self._message.setPlainText(self._emprunte)
+        self.commit_button.setText("Amender" if coche else "Commit")
+        self._emprunt_pose = self._message.toPlainText() if coche else ""
+        self._update_amend_warning(coche)
+        self._update_buttons()
+
+    def _update_amend_warning(self, coche: bool) -> None:
+        """Prévient si l'on réécrit un commit déjà publié (§3.4).
+
+        Amender change l'identifiant du commit : si l'ancien est sur le
+        serveur, la branche diverge et le push normal sera rejeté par un
+        « non-fastforwardable » que l'utilisateur ne sait pas
+        interpréter. Mieux vaut le dire avant, et nommer la suite.
+        """
+        self.amend_warning.setVisible(coche and self._last_commit_is_pushed())
+
+    def _last_commit_is_pushed(self) -> bool:
+        """Le dernier commit est-il déjà sur un serveur ?
+
+        Exiger qu'un remote existe : sur un dépôt purement local,
+        `unpushed_oids` rend un ensemble vide et tout commit y paraîtrait
+        « déjà poussé » (vérifié) — l'avertissement s'afficherait à tort.
+        """
+        try:
+            if not list(self.repository.remotes.names()):
+                return False
+            if self.repository.head_is_unborn:
+                return False
+            return self.repository.head.target not in unpushed_oids(
+                self.repository
+            )
+        except (pygit2.GitError, KeyError, ValueError):
+            return False
+
     def _update_buttons(self) -> None:
-        ready = bool(self.message().strip()) and bool(self.checked_paths())
+        # En amend, le message seul suffit : corriger une faute ne touche
+        # aucun fichier. Exiger un fichier coché laisserait le bouton
+        # inactif dans le cas le plus courant.
+        ready = bool(self.message().strip()) and (
+            self.amend_box.isChecked() or bool(self.checked_paths())
+        )
         self.commit_button.setEnabled(ready)
         self.push_button.setEnabled(ready)
 

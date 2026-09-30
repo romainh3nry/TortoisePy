@@ -164,3 +164,34 @@ def _current_branch(repo: pygit2.Repository):
         return repo.branches[repo.head.shorthand]
     except (KeyError, pygit2.GitError):
         return None
+
+
+def divergence(repo: pygit2.Repository) -> tuple[int, int] | None:
+    """Commits d'avance et de retard sur la branche de suivi.
+
+    `None` quand il n'y a rien à comparer : HEAD détachée, dépôt sans
+    commit, ou branche sans upstream — une branche purement locale n'est
+    ni en avance ni en retard, elle est ailleurs.
+
+    **La valeur reflète le dernier fetch, pas le serveur** (D22).
+    Vérifié : sans nouveau fetch, on annonçait 1 commit de retard là où
+    le serveur en avait 2. Interroger le réseau à chaque rafraîchissement
+    serait lent et bavard ; l'infobulle dit donc « as of your last
+    fetch ».
+    """
+    if repo.head_is_unborn or repo.head_is_detached:
+        return None
+
+    try:
+        branch = repo.branches[repo.head.shorthand]
+        upstream = branch.upstream
+    except (KeyError, pygit2.GitError):
+        return None
+
+    if upstream is None:
+        return None
+
+    try:
+        return repo.ahead_behind(repo.head.target, upstream.target)
+    except (pygit2.GitError, KeyError, ValueError):
+        return None

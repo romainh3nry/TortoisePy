@@ -327,3 +327,194 @@ def test_committed_signal_has_no_push_result_for_a_plain_commit(window, repo):
     commit_result, push_result = recus[0]
     assert commit_result.success is True
     assert push_result is None
+
+
+# --- amend (tâche 3) ----------------------------------------------------
+
+
+def _repo_with_one_commit(tmp_path):
+    """Un dépôt local à un seul commit — HEAD y est amendable."""
+    path = tmp_path / "amend"
+    path.mkdir()
+    run_git(path, "init", "-q", "-b", "main")
+    (path / "f.txt").write_text("base\n")
+    run_git(path, "add", ".")
+    run_git(path, "commit", "-q", "-m", "message initial")
+    return pygit2.Repository(str(path))
+
+
+def test_ticking_amend_fills_in_the_last_message(window, repo):
+    """Corriger une faute suppose de voir le message à corriger.
+
+    Le fixture `repo` de ce fichier commite avec le message "base".
+    """
+    window.amend_box.setChecked(True)
+    assert window.message().strip() == "base"
+
+
+def test_unticking_amend_clears_the_borrowed_message(window, repo):
+    """Le message emprunté ne doit pas se retrouver sur un commit neuf."""
+    window.amend_box.setChecked(True)
+    window.amend_box.setChecked(False)
+    assert window.message().strip() == ""
+
+
+def test_the_button_says_amend(window, repo):
+    window.amend_box.setChecked(True)
+    assert "Amender" in window.commit_button.text()
+    window.amend_box.setChecked(False)
+    assert window.commit_button.text() == "Commit"
+
+
+def test_amend_is_disabled_on_a_detached_head(qtbot, tmp_path):
+    """Et l'infobulle dit pourquoi, plutôt que de laisser deviner."""
+    repo = _repo_with_one_commit(tmp_path)
+    run_git(repo.workdir, "checkout", "-q", "--detach")
+
+    fenetre = CommitWindow(pygit2.Repository(repo.path))
+    qtbot.addWidget(fenetre)
+    assert fenetre.amend_box.isEnabled() is False
+    assert "detached" in fenetre.amend_box.toolTip().lower()
+
+
+def test_amend_checkbox_alone_enables_the_button(window, repo):
+    """Attention (brief) : en amend, le message seul suffit — corriger une
+    faute ne touche aucun fichier. `_update_buttons` ne doit plus exiger un
+    fichier coché quand `amend_box` est cochée.
+    """
+    window.amend_box.setChecked(True)
+    for path in ("suivi.txt", "nouveau.txt"):
+        window.set_checked(path, False)
+    window._update_buttons()
+    assert window.commit_button.isEnabled() is True
+
+
+def test_ordinary_commit_still_requires_a_checked_file(window, repo):
+    """Le cas ordinaire ne doit pas régresser : sans amend, un fichier coché
+    reste obligatoire même avec un message.
+    """
+    window.set_message("un message")
+    window.set_checked("suivi.txt", False)
+    window.set_checked("nouveau.txt", False)
+    assert window.commit_button.isEnabled() is False
+
+
+def test_amending_commits_through_the_core(window, repo, monkeypatch):
+    from tortoisepy.ui import commit_window as module
+    from tortoisepy.core.results import succeeded
+
+    vus = []
+    monkeypatch.setattr(
+        module, "amend_commit",
+        lambda repo, paths, message: vus.append((paths, message))
+        or succeeded("Amended abc12345"),
+    )
+    window.amend_box.setChecked(True)
+    window.set_message("corrige")
+    window.commit()
+
+    assert vus, "le cœur doit être appelé"
+    assert vus[0][1] == "corrige"
+
+
+def _clone_with_pushed_commit(tmp_path):
+    """Un dépôt nu servant de serveur, et un clone dont HEAD est poussé."""
+    bare = tmp_path / "serveur.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(bare)], capture_output=True
+    )
+    work = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", str(bare), str(work)], capture_output=True
+    )
+    (work / "f.txt").write_text("a\n")
+    run_git(work, "add", ".")
+    run_git(work, "commit", "-q", "-m", "deja pousse")
+    run_git(work, "push", "-q", "origin", "HEAD")
+    return pygit2.Repository(str(work))
+
+
+def test_commit_and_push_honours_the_amend_box(qtbot, tmp_path, monkeypatch):
+    """Revue finale, Critical : il créait un SECOND commit, puis le poussait.
+
+    Seul `commit()` consultait la case ; `commit_and_push()` appelait
+    `commit_selection` sans condition. Reproduit : avec la case cochée,
+    l'historique passait à deux commits — l'intention de l'utilisateur
+    silencieusement inversée, et un mauvais commit envoyé au serveur.
+    """
+    from tortoisepy.core.results import failed
+    from tortoisepy.ui import commit_window as module
+
+    repo = _clone_with_pushed_commit(tmp_path)
+    open(os.path.join(repo.workdir, "oublie.txt"), "w").write("o\n")
+
+    monkeypatch.setattr(module, "confirm", lambda *a, **k: True)
+    monkeypatch.setattr(module, "show_error", lambda *a, **k: None)
+    monkeypatch.setattr(
+        module.operations, "push_branch",
+        lambda *a, **k: failed("Push", "hors ligne (test)"),
+    )
+
+    fenetre = CommitWindow(repo)
+    qtbot.addWidget(fenetre)
+    fenetre.amend_box.setChecked(True)
+    fenetre.set_checked("oublie.txt", True)
+    fenetre.set_message("faute corrigee")
+    fenetre.commit_and_push()
+
+    fresh = pygit2.Repository(repo.path)
+    messages = [c.message.strip() for c in fresh.walk(fresh.head.target)]
+    assert messages == ["faute corrigee"], messages
+
+
+def test_amending_a_pushed_commit_warns_about_force_push(qtbot, tmp_path):
+    """Spec §3.4 : dire avant, plutôt que de laisser git dire après.
+
+    Sans cet avertissement, l'utilisateur découvrait la divergence par un
+    « non-fastforwardable » qu'il ne sait pas interpréter.
+    """
+    fenetre = CommitWindow(_clone_with_pushed_commit(tmp_path))
+    qtbot.addWidget(fenetre)
+
+    assert fenetre._last_commit_is_pushed() is True
+    fenetre.amend_box.setChecked(True)
+    assert "force with lease" in fenetre.amend_warning.text().lower()
+    assert not fenetre.amend_warning.isHidden()
+
+    fenetre.amend_box.setChecked(False)
+    assert fenetre.amend_warning.isHidden()
+
+
+def test_no_warning_on_a_repository_without_a_remote(qtbot, tmp_path):
+    """Sans remote, `unpushed_oids` est vide et tout paraîtrait poussé."""
+    fenetre = CommitWindow(_repo_with_one_commit(tmp_path))
+    qtbot.addWidget(fenetre)
+
+    assert fenetre._last_commit_is_pushed() is False
+    fenetre.amend_box.setChecked(True)
+    assert fenetre.amend_warning.isHidden()
+
+
+def test_text_typed_in_amend_mode_survives_unticking(qtbot, tmp_path):
+    """Revue finale, Minor : décocher effaçait ce qu'on venait d'écrire."""
+    fenetre = CommitWindow(_repo_with_one_commit(tmp_path))
+    qtbot.addWidget(fenetre)
+
+    fenetre.set_message("mon brouillon precieux")
+    fenetre.amend_box.setChecked(True)
+    fenetre.set_message("je tape par dessus")
+    fenetre.amend_box.setChecked(False)
+
+    assert fenetre.message().strip() == "je tape par dessus"
+
+
+def test_an_untouched_borrowed_message_is_still_given_back(qtbot, tmp_path):
+    """L'inverse : ne pas garder un message emprunté sur un commit neuf."""
+    fenetre = CommitWindow(_repo_with_one_commit(tmp_path))
+    qtbot.addWidget(fenetre)
+
+    fenetre.set_message("mon brouillon")
+    fenetre.amend_box.setChecked(True)
+    fenetre.amend_box.setChecked(False)
+
+    assert fenetre.message().strip() == "mon brouillon"

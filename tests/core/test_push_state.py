@@ -335,3 +335,94 @@ def test_a_genuinely_local_commit_is_still_detected(tmp_path):
     assert len(unpushed) == 1
     assert repo.get(next(iter(unpushed))).message.strip() == "vraiment local"
     assert push_state(repo).can_push is True
+
+
+def _serveur_et_deux_clones(tmp_path):
+    """Un serveur, mon clone, et celui d'un autre."""
+    bare = tmp_path / "serveur.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], capture_output=True)
+    moi = tmp_path / "moi"
+    subprocess.run(["git", "clone", "-q", str(bare), str(moi)], capture_output=True)
+    (moi / "f.txt").write_text("a\n")
+    run_git(moi, "add", ".")
+    run_git(moi, "commit", "-q", "-m", "base")
+    run_git(moi, "push", "-q", "origin", "HEAD")
+    autre = tmp_path / "autre"
+    subprocess.run(["git", "clone", "-q", str(bare), str(autre)], capture_output=True)
+    return bare, moi, autre
+
+
+def test_an_up_to_date_branch_has_no_divergence(tmp_path):
+    from tortoisepy.core.push_state import divergence
+
+    _, moi, _ = _serveur_et_deux_clones(tmp_path)
+    assert divergence(pygit2.Repository(str(moi))) == (0, 0)
+
+
+def test_local_commits_count_as_ahead(tmp_path):
+    from tortoisepy.core.push_state import divergence
+
+    _, moi, _ = _serveur_et_deux_clones(tmp_path)
+    (moi / "g.txt").write_text("g\n")
+    run_git(moi, "add", ".")
+    run_git(moi, "commit", "-q", "-m", "local")
+
+    assert divergence(pygit2.Repository(str(moi))) == (1, 0)
+
+
+def test_remote_commits_count_as_behind_after_a_fetch(tmp_path):
+    from tortoisepy.core.push_state import divergence
+
+    _, moi, autre = _serveur_et_deux_clones(tmp_path)
+    (autre / "h.txt").write_text("h\n")
+    run_git(autre, "add", ".")
+    run_git(autre, "commit", "-q", "-m", "ailleurs")
+    run_git(autre, "push", "-q", "origin", "HEAD")
+    run_git(moi, "fetch", "-q", "origin")
+
+    assert divergence(pygit2.Repository(str(moi))) == (0, 1)
+
+
+def test_the_divergence_reflects_the_last_fetch_not_the_server(tmp_path):
+    """Review Focus 2 : poser ce comportement, pour qu'on ne le « corrige » pas.
+
+    Vérifié : sans nouveau fetch, l'indicateur annonçait 1 commit de
+    retard alors que le serveur en avait 2. Interroger le réseau à chaque
+    rafraîchissement serait lent et bavard (D22) : la limite est assumée,
+    et l'infobulle la dit.
+    """
+    from tortoisepy.core.push_state import divergence
+
+    _, moi, autre = _serveur_et_deux_clones(tmp_path)
+    (autre / "h.txt").write_text("h\n")
+    run_git(autre, "add", ".")
+    run_git(autre, "commit", "-q", "-m", "un")
+    run_git(autre, "push", "-q", "origin", "HEAD")
+    run_git(moi, "fetch", "-q", "origin")
+
+    # Le serveur avance ENCORE, sans que nous le sachions.
+    (autre / "i.txt").write_text("i\n")
+    run_git(autre, "add", ".")
+    run_git(autre, "commit", "-q", "-m", "deux")
+    run_git(autre, "push", "-q", "origin", "HEAD")
+
+    assert divergence(pygit2.Repository(str(moi))) == (0, 1), (
+        "la valeur reflète la ref de suivi, pas le serveur"
+    )
+
+
+def test_a_branch_without_upstream_has_no_divergence(tmp_path):
+    """Review Focus 4 : rien à comparer, donc rien à afficher."""
+    from tortoisepy.core.push_state import divergence
+
+    _, moi, _ = _serveur_et_deux_clones(tmp_path)
+    run_git(moi, "checkout", "-q", "-b", "orpheline")
+    assert divergence(pygit2.Repository(str(moi))) is None
+
+
+def test_divergence_on_a_detached_head_is_none(tmp_path):
+    from tortoisepy.core.push_state import divergence
+
+    _, moi, _ = _serveur_et_deux_clones(tmp_path)
+    run_git(moi, "checkout", "-q", "--detach")
+    assert divergence(pygit2.Repository(str(moi))) is None

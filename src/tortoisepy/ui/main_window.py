@@ -33,7 +33,7 @@ from tortoisepy.core.pull import (
     pull_merge,
     pull_rebase,
 )
-from tortoisepy.core.push_state import push_state, unpushed_oids
+from tortoisepy.core.push_state import divergence, push_state, unpushed_oids
 from tortoisepy.core.rebase import rebase_targets, start_rebase
 from tortoisepy.core.results import failed, succeeded
 from tortoisepy.core.state import read_state
@@ -351,6 +351,21 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             texte = f"⎇ HEAD détaché ({(self.state.head_oid or '')[:8]})"
         else:
             texte = "⎇ sans commit"
+
+        ecart = divergence(self.repository)
+        if ecart is not None and any(ecart):
+            avance, retard = ecart
+            morceaux = []
+            if avance:
+                morceaux.append(f"↑{avance}")
+            if retard:
+                morceaux.append(f"↓{retard}")
+            texte += "  " + " ".join(morceaux)
+            self.branch_label.setToolTip(
+                f"{avance} ahead, {retard} behind — as of your last fetch"
+            )
+            self.branch_label.setText(texte)
+            return
 
         self.branch_label.setText(texte)
         self.branch_label.setToolTip(texte.removeprefix("⎇ "))
