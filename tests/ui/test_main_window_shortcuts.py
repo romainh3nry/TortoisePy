@@ -47,20 +47,32 @@ def test_applying_shortcuts_updates_live(window):
 
 
 def test_shortcuts_are_displayed_natively(window):
-    """§6.2 : ⌘F à l'écran, « Ctrl+F » dans le fichier.
+    """§6.2 : l'action porte la séquence du catalogue, en portable.
 
-    Le test compare au rendu natif de Qt sur la plateforme courante, ce
-    qui le rend valide aussi bien sur macOS que sur Windows.
+    Ce test ne prouve PAS que l'affichage est natif, et il ne le peut
+    pas : vérifié, `QKeySequence("⌘F")` et `QKeySequence("Ctrl+F")`
+    construisent le MÊME objet — Qt relit le texte natif sans broncher.
+    Une implémentation qui appliquerait du natif produirait donc une
+    action identique, indétectable ici (prouvé par mutation).
+
+    La garantie portable se joue là où du texte est réellement écrit sur
+    disque, et elle y est testée :
+
+    - `test_a_shortcut_is_stored_portable_not_native` pour le magasin ;
+    - `test_capture_dialog_reports_portable_text_not_native` pour la
+      capture au clavier.
+
+    Ici on vérifie seulement ce qui est vérifiable : l'action porte bien
+    la séquence attendue, et Qt sait en donner un rendu natif à afficher.
     """
     action = window.actions_by_id["search"]
-    natif = action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
     portable = action.shortcut().toString(
         QKeySequence.SequenceFormat.PortableText
     )
     assert portable == spec_for("search").default
-    assert natif == QKeySequence(
-        spec_for("search").default
-    ).toString(QKeySequence.SequenceFormat.NativeText)
+
+    natif = action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+    assert natif, "Qt doit pouvoir rendre la séquence pour l'affichage"
 
 
 def test_set_zoom_is_exposed(window):

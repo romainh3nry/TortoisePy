@@ -142,3 +142,22 @@ def test_an_accepted_capture_stores_and_emits(window, qtbot, monkeypatch):
 
     assert bloqueur.args[0]["commit"] == "Ctrl+J"
     assert window._store.resolved_shortcuts()["commit"] == "Ctrl+J"
+
+
+def test_capture_dialog_reports_portable_text_not_native(qtbot):
+    """§D47 : « Ctrl+J » vers le magasin, jamais « ⌘J ».
+
+    Seul endroit où la conversion portable/natif peut casser sans qu'aucun
+    test ne le voie : les autres tests contournent le dialogue.
+    """
+    from tortoisepy.ui.shortcuts_window import _CaptureDialog
+
+    dialogue = _CaptureDialog("commit")
+    qtbot.addWidget(dialogue)
+    dialogue.editeur.setKeySequence(QKeySequence("Ctrl+J"))
+
+    assert dialogue.sequence_portable() == "Ctrl+J"
+    natif = QKeySequence("Ctrl+J").toString(QKeySequence.SequenceFormat.NativeText)
+    assert dialogue.sequence_portable() != natif, (
+        "le dialogue rend du texte natif : illisible sur une autre plateforme"
+    )
