@@ -210,6 +210,9 @@ class MainWindow(QMainWindow):
         self.resize(1400, 850)
         self.refresh()
         self.restore_settings()
+        self.settings.remember_repository(
+            str(Path(repository.path).parent)
+        )
 
     def geometry_is_visible(self, geometry) -> bool:
         """La géométrie recoupe-t-elle un écran réellement présent ?

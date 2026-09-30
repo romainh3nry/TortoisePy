@@ -9,6 +9,8 @@ vérifie plutôt que de s'y fier.
 
 from __future__ import annotations
 
+import os
+
 from PySide6.QtCore import QSettings
 
 from tortoisepy.core.settings import (
@@ -24,6 +26,8 @@ APPLICATION = "tortoisePy"
 
 _PREFIXE_RACCOURCI = "shortcuts/"
 _CLE_VERSION = "settings/version"
+
+MAX_RECENT = 10
 
 
 class SettingsStore:
@@ -89,3 +93,27 @@ class SettingsStore:
         for spec in CATALOGUE:
             self._settings.remove(_PREFIXE_RACCOURCI + spec.action_id)
         self._settings.sync()
+
+    def recent_repositories(self) -> tuple[str, ...]:
+        """Les derniers dépôts ouverts, les disparus exclus.
+
+        La purge se fait à la LECTURE et non à l'écriture : un dépôt peut
+        être déplacé entre deux lancements, et proposer une entrée qui
+        échoue à l'ouverture sans moyen de la retirer serait pire que de
+        l'oublier.
+        """
+        bruts = self.value("recent/repositories") or ()
+        return tuple(
+            chemin for chemin in bruts if os.path.isdir(chemin)
+        )
+
+    def remember_repository(self, path: str) -> None:
+        """Place `path` en tête, sans doublon, liste plafonnée."""
+        restants = [
+            chemin
+            for chemin in self.recent_repositories()
+            if chemin != path
+        ]
+        self.set_value(
+            "recent/repositories", [path, *restants][:MAX_RECENT]
+        )
