@@ -22,9 +22,11 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QToolBar,
+    QToolButton,
     QWidget,
 )
 
+from tortoisepy.cli import find_repository
 from tortoisepy.core import operations
 from tortoisepy.core.commits import commits_for_node
 from tortoisepy.core.graph import build_graph
@@ -170,6 +172,10 @@ class MainWindow(QMainWindow):
         # 3 000 commits (mesuré), ce qui rendrait la saisie inutilisable.
         self.search_field.returnPressed.connect(self.run_search)
         self._detail_windows: list[CommitDetailWindow] = []
+        # Chaque dépôt récent ouvert crée une nouvelle fenêtre : sans
+        # garder une référence, le ramasse-miettes la détruirait aussitôt
+        # (même piège que `_detail_windows`).
+        self._recent_windows: list[MainWindow] = []
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.splitter.addWidget(self.view)
         self.splitter.addWidget(self.commit_panel)
@@ -462,7 +468,78 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         self.show_tags_action.toggled.connect(self._on_tags_toggled)
         toolbar.addAction(self.show_tags_action)
 
+        # Bouton à menu déroulant plutôt qu'une barre de menus : ce projet
+        # n'a pas de `QMenuBar`, tout vit dans la barre d'outils.
+        self.recent_button = QToolButton(self)
+        self.recent_button.setText("Open Recent")
+        self.recent_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        recent_menu = QMenu(self.recent_button)
+        # Peuplé à l'ouverture, pas à la construction : la liste change
+        # quand d'autres fenêtres s'ouvrent, et `recent_repositories()`
+        # purge les dépôts disparus à la lecture — un menu construit une
+        # fois pourrait montrer un dépôt qui n'existe déjà plus.
+        recent_menu.aboutToShow.connect(self._populate_recent_menu)
+        self.recent_button.setMenu(recent_menu)
+        toolbar.addWidget(self.recent_button)
+
         return toolbar
+
+    def _populate_recent_menu(self) -> None:
+        """Reconstruit le menu des dépôts récents à chaque ouverture."""
+        menu = self.recent_button.menu()
+        menu.clear()
+
+        recents = self.settings.recent_repositories()
+        if not recents:
+            vide = menu.addAction("No recent repositories")
+            vide.setEnabled(False)
+            return
+
+        for path in recents:
+            action = menu.addAction(path)
+            # `path=path` fige la valeur : sans ça, toutes les actions
+            # partageraient la dernière valeur de la boucle (piège
+            # classique des fermetures dans une boucle Python/Qt).
+            action.triggered.connect(
+                lambda checked=False, path=path: self.open_recent_repository(
+                    path
+                )
+            )
+
+    def open_recent_repository(self, path: str) -> None:
+        """Ouvre `path` dans une NOUVELLE fenêtre, sans toucher la courante.
+
+        La référence est gardée dans `_recent_windows` : sans elle, le
+        ramasse-miettes détruirait la fenêtre aussitôt (même piège que
+        `_detail_windows`, cf. `open_commit_detail`).
+        """
+        repository = find_repository(path)
+        if repository is None:
+            self.statusBar().showMessage(
+                f"Could not open {path}", 15000
+            )
+            return
+
+        window = MainWindow(repository, settings=self.settings)
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        window.destroyed.connect(self._forget_recent_window)
+        self._recent_windows.append(window)
+        window.show()
+
+    def _forget_recent_window(self, window=None) -> None:
+        """Retire de la liste les fenêtres de dépôts récents déjà détruites.
+
+        Même précaution que `_forget_detail_window` : on filtre sur la
+        validité plutôt que de comparer `window` directement, car son
+        wrapper Python peut survivre à l'objet C++ détruit.
+        """
+        self._recent_windows = [
+            candidate
+            for candidate in self._recent_windows
+            if candidate is not window and _still_alive(candidate)
+        ]
 
     def focus_search(self) -> None:
         """Place le curseur dans le champ de recherche.
