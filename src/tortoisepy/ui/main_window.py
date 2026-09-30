@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pygit2
 import shiboken6
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QByteArray, Qt
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QLabel,
@@ -204,6 +204,57 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(self._title())
         self.resize(1400, 850)
         self.refresh()
+        self.restore_settings()
+
+    def geometry_is_visible(self, geometry) -> bool:
+        """La géométrie recoupe-t-elle un écran réellement présent ?
+
+        Sans ce contrôle, une fenêtre mémorisée sur un moniteur débranché
+        rouvrirait hors de tout écran : invisible, et impossible à
+        rattraper autrement qu'en supprimant les préférences (§D51).
+        """
+        for ecran in QGuiApplication.screens():
+            if ecran.availableGeometry().intersects(geometry):
+                return True
+        return False
+
+    def restore_settings(self) -> None:
+        """Réapplique les réglages mémorisés, en se méfiant de chacun."""
+        brut = self.settings.value("window/geometry")
+        if isinstance(brut, (bytes, QByteArray)):
+            sauvegarde = self.saveGeometry()
+            if self.restoreGeometry(QByteArray(brut)):
+                if not self.geometry_is_visible(self.geometry()):
+                    self.restoreGeometry(sauvegarde)
+
+        zoom = self.settings.value("view/zoom")
+        if isinstance(zoom, (int, float)) and zoom > 0:
+            self.view.set_zoom(float(zoom))
+
+        largeur = self.settings.value("view/panel_width")
+        if isinstance(largeur, int) and largeur > 0:
+            # Avant le premier affichage, le splitter n'a pas encore été
+            # mis en page : `sizes()` rend alors `[0, 0]` (vérifié). La
+            # largeur de la fenêtre, elle, est fiable dès `resize()` — on
+            # s'y replie pour que la restauration marche aussi à ce
+            # moment-là (c'est le cas dans `MainWindow.__init__`).
+            total = sum(self.splitter.sizes()) or self.width()
+            if total > largeur:
+                self.splitter.setSizes([total - largeur, largeur])
+
+    def save_settings(self) -> None:
+        """Mémorise l'état courant. Appelé à la fermeture."""
+        self.settings.set_value(
+            "window/geometry", bytes(self.saveGeometry())
+        )
+        self.settings.set_value("view/zoom", self.view.current_zoom())
+        tailles = self.splitter.sizes()
+        if len(tailles) > 1:
+            self.settings.set_value("view/panel_width", tailles[1])
+
+    def closeEvent(self, event) -> None:
+        self.save_settings()
+        super().closeEvent(event)
 
     def refresh(self) -> None:
         """Reconstruit le graphe et relit l'état (§7.6, §7.9)."""
@@ -346,6 +397,14 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         toolbar = QToolBar("Navigation", self)
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
+
+        # Accès à la fenêtre des raccourcis. Volontairement sans raccourci
+        # clavier : elle ne fait pas partie des dix actions du catalogue,
+        # et lui en donner un serait incohérent (un raccourci non
+        # modifiable dans la fenêtre qui sert justement à les modifier).
+        self.shortcuts_action = QAction("Keyboard Shortcuts…", self)
+        self.shortcuts_action.triggered.connect(self.open_shortcuts_window)
+        toolbar.addAction(self.shortcuts_action)
 
         return toolbar
 
