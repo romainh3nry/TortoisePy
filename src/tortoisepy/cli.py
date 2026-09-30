@@ -70,9 +70,30 @@ def application_icon():
     return icon
 
 
+_USAGE = """topy — TortoiseGit Revision Graph
+
+Usage:
+  topy [CHEMIN]        Ouvre le dépôt (défaut : le répertoire courant)
+  topy --version       Affiche la version
+  topy --install-icon  Installe l'icône système (macOS)
+  topy --help          Affiche ce message
+
+Exemples:
+  topy .                     depuis un projet
+  topy ~/code/mon-projet     un dépôt ailleurs
+
+Comme git, topy remonte l'arborescence : lancé depuis projet/src/, il
+ouvre projet/.
+"""
+
+
 def main(argv: list[str] | None = None) -> int:
     """Ouvre la fenêtre sur le dépôt demandé."""
     arguments = list(sys.argv[1:] if argv is None else argv)
+
+    if arguments and arguments[0] in ("--help", "-h"):
+        print(_USAGE)
+        return 0
 
     if arguments and arguments[0] in ("--version", "-V"):
         print(f"tortoisePy {__version__}")
@@ -91,6 +112,16 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"Icône installée : {bundle}")
         return 0
+
+    # Une option inconnue n'est pas un chemin. Sans ce refus,
+    # `topy --verison` cherchait un dépôt nommé « --verison » et
+    # répondait « Pas de dépôt Git trouvé dans --verison » (vérifié) —
+    # un message qui n'aide pas à corriger la faute de frappe.
+    if arguments and arguments[0].startswith("-"):
+        print(
+            f"Option inconnue : {arguments[0]}\n\n{_USAGE}", file=sys.stderr
+        )
+        return 1
 
     target = arguments[0] if arguments else "."
 

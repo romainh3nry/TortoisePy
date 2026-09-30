@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Lanceur de développement — équivalent de la commande `tgraph`.
+"""Lanceur de développement — équivalent de la commande `topy`.
 
-Utile avant `pip install -e .`, qui installe `tgraph` dans le PATH.
+Utile avant `pip install -e .`, qui installe `topy` dans le PATH.
 """
 
 import sys

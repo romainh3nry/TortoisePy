@@ -1,0 +1,179 @@
+<div align="center">
+
+<img src="docs/images/logo.png" alt="tortoisePy" width="380">
+
+**TortoiseGit's Revision Graph, for macOS and Windows.**
+
+See your repository's history as a graph — and act on it.
+
+</div>
+
+---
+
+## What it is
+
+TortoiseGit's Revision Graph is the clearest view of a Git repository most
+developers have ever used. It only runs on Windows, inside Windows Explorer.
+
+tortoisePy is that view, rebuilt as a standalone desktop application that runs
+on macOS and Windows — and it does not stop at looking. Right-click a node and
+you can checkout, merge, rebase, stash, push, pull, revert, cherry-pick.
+
+It is built on [pygit2](https://www.pygit2.org/) (libgit2) and
+[PySide6](https://doc.qt.io/qtforpython-6/) (Qt 6).
+
+## Why you might want it
+
+- **The graph is readable.** Long chains of commits are collapsed into single
+  edges labelled with how many commits they hide — so a 3,000-commit history
+  renders as a handful of nodes you can actually take in.
+- **It is a tool, not a viewer.** Every common Git operation is one right-click
+  away, with the destructive ones confirmed by name.
+- **It refuses to guess.** Nothing is written to your repository unless you
+  activate a command yourself.
+
+## Requirements
+
+- macOS 11+ or Windows 10+
+- Git installed and on your `PATH`
+- Nothing else — the installer brings its own Python
+
+> **Heads up:** the install downloads about **1.2 GB**. Almost all of it is
+> Qt (PySide6), which the graph rendering depends on. This is expected, not a
+> problem with your connection.
+
+## Installation
+
+### One command
+
+**macOS and Linux**
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.1.0/scripts/install.sh | sh
+```
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.1.0/scripts/install.ps1 | iex
+```
+
+The script installs [uv](https://docs.astral.sh/uv/) if you don't have it,
+then tortoisePy, then checks that the `topy` command actually answers — and
+tells you what to do if your `PATH` needs a line added.
+
+### If you'd rather not pipe a script into your shell
+
+That is a reasonable thing to refuse. Two steps instead:
+
+```bash
+# 1. Install uv — see https://docs.astral.sh/uv/getting-started/installation/
+curl -LsSf https://astral.sh/uv/install.sh | sh          # macOS / Linux
+winget install astral-sh.uv                              # Windows
+
+# 2. Install tortoisePy
+uv tool install git+https://github.com/romainh3nry/TortoisePy@v0.1.0
+```
+
+### Why uv rather than pip
+
+`uv tool install` puts tortoisePy in its own isolated environment, so it
+cannot break — or be broken by — anything else you have installed. It also
+downloads a suitable Python for you, which matters here: tortoisePy needs
+Python 3.13, and you very likely don't have it.
+
+If you prefer `pipx`, it works the same way, but you will need Python 3.13
+already installed.
+
+### Updating and uninstalling
+
+```bash
+uv tool upgrade tortoisepy      # update
+uv tool uninstall tortoisepy    # remove
+```
+
+## Usage
+
+```bash
+topy .                 # the repository in the current directory
+topy ~/code/my-project # a repository somewhere else
+topy                   # same as "topy ."
+```
+
+Like `git` itself, `topy` walks up the directory tree — running it from
+`my-project/src/utils/` opens `my-project`.
+
+```bash
+topy --help            # usage
+topy --version         # version
+topy --install-icon    # install the Dock icon (macOS)
+```
+
+## What you can do from the graph
+
+Right-click any node:
+
+| | |
+|---|---|
+| **Move around** | Checkout a branch, create a branch or tag, rename, delete |
+| **Integrate** | Merge, rebase, cherry-pick |
+| **Undo** | Revert a commit, reset (soft / mixed / hard) |
+| **Remote** | Fetch, pull, push, push with `--force-with-lease`, delete a remote branch |
+| **Set aside** | Stash changes, apply, pop, drop |
+| **Inspect** | Show a commit's files and diff, blame a file, compare two revisions, copy the SHA |
+
+Plus, outside the graph:
+
+- **Commit** — pick files, write a message, optionally amend the last commit
+- **Search** — by message, author or SHA; matching nodes are highlighted and
+  the commit list filters down
+- **Resolve conflicts** — after a merge, pull or rebase, choose a side per file
+- **Ahead / behind** — the status bar shows how far you have diverged from the
+  server, as of your last fetch
+
+### On destructive operations
+
+Anything that can lose work asks first, and says what it is about to do:
+`reset --hard`, deleting a branch, dropping a stash, deleting a remote branch.
+
+Force-pushing uses `--force-with-lease` and never plain `--force` — it will
+refuse rather than overwrite a colleague's commit that arrived since your last
+fetch. `main`, `master` and `develop` cannot be deleted from the remote at all.
+
+## What it does not do
+
+Stated up front so you don't go looking:
+
+- **Interactive rebase** (`rebase -i`) — reordering and squashing commits is an
+  application of its own
+- **Staging by hunk** — you commit whole files; this is the biggest gap and it
+  is on the list
+- **Line-by-line conflict resolution** — you pick one side per file
+- **File history** (`git log -- file`) — blame is there, this is not
+- **Submodules, worktrees, LFS**
+
+## Building from source
+
+```bash
+git clone https://github.com/romainh3nry/TortoisePy
+cd TortoisePy
+uv venv && uv pip install -e ".[dev]"
+uv run pytest                    # 985 tests
+uv run topy .
+```
+
+## Contributing
+
+Issues and pull requests are welcome. Two things worth knowing before you
+start:
+
+- **The graph rendering is settled.** Curves, arrows, spacing and colours were
+  tuned by eye and are not up for casual revision.
+- **Tests come first.** Every behaviour in this project was specified, tested,
+  and then verified against a real repository — including the ones that look
+  obvious.
+
+## Licence
+
+[MIT](LICENSE) — do what you like with it, keep the copyright notice, and
+don't hold me liable.

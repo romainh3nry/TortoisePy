@@ -240,3 +240,52 @@ def test_the_icon_has_no_white_box(qtbot):
         f"{part:.0%} de blanc opaque : le fond du logo est-il revenu ? "
         "(38 % avant correction, 4 % après)"
     )
+
+
+def test_help_does_not_look_for_a_repository(capsys):
+    """Vérifié avant correction : `--help` était pris pour un chemin.
+
+    « Pas de dépôt Git trouvé dans --help » — c'est pourtant la première
+    chose que tape quelqu'un qui découvre l'outil.
+    """
+    from tortoisepy.cli import main
+
+    assert main(["--help"]) == 0
+    sortie = capsys.readouterr().out
+    assert "topy" in sortie
+    assert "Pas de dépôt" not in sortie
+
+
+def test_an_unknown_option_is_refused(capsys):
+    """`topy --verison` ne doit pas chercher un dépôt nommé « --verison »."""
+    from tortoisepy.cli import main
+
+    assert main(["--verison"]) == 1
+    erreur = capsys.readouterr().err
+    assert "--verison" in erreur
+    # Sans cette assertion, le test passait déjà — mais parce que l'outil
+    # cherchait un *dépôt* nommé « --verison », pas parce qu'il refusait
+    # l'option. Le message doit dire de quoi il s'agit.
+    assert "Pas de dépôt" not in erreur
+    assert "ption" in erreur, "le message doit parler d'une option"
+
+
+def test_version_still_works(capsys):
+    """Le refus des options inconnues ne doit pas manger les options vraies."""
+    from tortoisepy.cli import main
+
+    assert main(["--version"]) == 0
+    assert "tortoisePy" in capsys.readouterr().out
+
+
+def test_the_entry_point_is_named_topy():
+    """Le renommage ne doit pas se perdre dans une fusion."""
+    import tomllib
+
+    racine = Path(__file__).resolve().parent.parent
+    config = tomllib.loads((racine / "pyproject.toml").read_text())
+    scripts = config["project"]["scripts"]
+
+    assert "topy" in scripts
+    assert scripts["topy"] == "tortoisepy.cli:main"
+    assert "tgraph" not in scripts, "l'ancien nom ne doit pas subsister"
