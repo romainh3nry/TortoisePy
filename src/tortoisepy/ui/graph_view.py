@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPainter
-from PySide6.QtWidgets import QGraphicsScene, QGraphicsView
+from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtWidgets import QGraphicsRectItem, QGraphicsScene, QGraphicsView
 
 from tortoisepy.core.model import DisplayGraph, Oid
 from tortoisepy.layout.metrics import LayoutResult
@@ -24,6 +24,9 @@ class GraphView(QGraphicsView):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._zoom = 1.0
+        # Cadres de surlignage (recherche) : superposés à la scène, jamais
+        # une sélection — cf. `highlight`.
+        self._highlights: list = []
 
         self.setScene(QGraphicsScene(self))
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -48,6 +51,9 @@ class GraphView(QGraphicsView):
         self.setScene(scene)
         if previous is not None:
             previous.deleteLater()
+        # La scène précédente est détruite, et les cadres avec elle : garder
+        # des références mortes ferait compter des surlignages inexistants.
+        self._highlights = []
 
         self._apply_zoom()
 
@@ -102,6 +108,40 @@ class GraphView(QGraphicsView):
                 if isinstance(item, NodeItem)
             )
         )
+
+    def highlight(self, oids) -> None:
+        """Encadre les nœuds portant ces commits.
+
+        **Pas `setSelected`** : le menu contextuel bascule selon le
+        nombre de nœuds sélectionnés, donc une recherche à plusieurs
+        résultats le transformerait en menu de comparaison (vérifié).
+        On superpose des cadres, qui ne touchent à rien d'autre — et
+        `graph_items.py`, dont le rendu est validé, n'est pas modifié.
+        """
+        for cadre in self._highlights:
+            scene = cadre.scene()
+            if scene is not None:
+                scene.removeItem(cadre)
+        self._highlights = []
+
+        scene = self.scene()
+        if scene is None or not oids:
+            return
+
+        cibles = set(oids)
+        for item in scene.items():
+            if isinstance(item, NodeItem) and item.node.oid in cibles:
+                cadre = QGraphicsRectItem(
+                    item.sceneBoundingRect().adjusted(-4, -4, 4, 4)
+                )
+                cadre.setPen(QPen(QColor(255, 170, 0), 3))
+                cadre.setBrush(Qt.BrushStyle.NoBrush)
+                cadre.setZValue(100)
+                scene.addItem(cadre)
+                self._highlights.append(cadre)
+
+    def highlighted_count(self) -> int:
+        return len(self._highlights)
 
     def current_zoom(self) -> float:
         return self._zoom

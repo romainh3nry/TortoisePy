@@ -122,3 +122,34 @@ def test_zoom_preserves_selection(view):
     before = view.selected_oids()
     view.zoom_in()
     assert view.selected_oids() == before
+
+
+def test_highlighting_does_not_change_the_selection(view, graph):
+    """Review Focus 1 : sinon le menu contextuel bascule.
+
+    Le menu propose des comparaisons dès que deux nœuds sont
+    sélectionnés : surligner par `setSelected` transformerait une
+    recherche à deux résultats en menu de comparaison.
+    """
+    oids = tuple(n.oid for n in graph.nodes)
+    view.select_node(oids[0])
+    avant = view.selected_oids()
+
+    view.highlight(oids)
+
+    assert view.selected_oids() == avant
+
+
+def test_highlighting_then_clearing(view, graph):
+    oids = tuple(n.oid for n in graph.nodes)
+
+    view.highlight(oids[:1])
+    assert view.highlighted_count() == 1
+
+    view.highlight(())
+    assert view.highlighted_count() == 0
+
+
+def test_highlighting_an_absent_oid_is_harmless(view):
+    view.highlight(("f" * 40,))
+    assert view.highlighted_count() == 0

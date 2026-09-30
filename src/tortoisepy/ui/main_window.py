@@ -15,16 +15,20 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QProgressBar,
+    QSizePolicy,
     QSplitter,
     QToolBar,
+    QWidget,
 )
 
 from tortoisepy.core import operations
 from tortoisepy.core.commits import commits_for_node
 from tortoisepy.core.graph import build_graph
+from tortoisepy.core.graph_cache import GraphCache
 from tortoisepy.core.credentials import is_https, remember
 from tortoisepy.core.pull import (
     PullKind,
@@ -36,6 +40,7 @@ from tortoisepy.core.pull import (
 from tortoisepy.core.push_state import divergence, push_state, unpushed_oids
 from tortoisepy.core.rebase import rebase_targets, start_rebase
 from tortoisepy.core.results import failed, succeeded
+from tortoisepy.core.search import search_commits
 from tortoisepy.core.state import read_state
 from tortoisepy.layout.engine import layout_graph
 from tortoisepy.ui import actions
@@ -118,6 +123,9 @@ class MainWindow(QMainWindow):
         self.measurer = QtMeasurer()
         self.graph = None
         self.state = None
+        # Évite de reconstruire un graphe inchangé : mesuré, 792 ms le
+        # premier appel contre 2 ms au second sur le même dépôt (phase 13).
+        self._graph_cache = GraphCache()
 
         self.view = GraphView(self)
         self.view.setContextMenuPolicy(
@@ -135,6 +143,12 @@ class MainWindow(QMainWindow):
         # dépend de la longueur des noms de branches.
         self.commit_panel = CommitPanel(self)
         self.commit_panel.commit_activated.connect(self.open_commit_detail)
+        # Le champ appartient au panneau (il en épouse la largeur) ; la
+        # fenêtre s'y branche sans le posséder.
+        self.search_field = self.commit_panel.search_field
+        # Sur validation, pas à la frappe : chercher coûte ~325 ms sur
+        # 3 000 commits (mesuré), ce qui rendrait la saisie inutilisable.
+        self.search_field.returnPressed.connect(self.run_search)
         self._detail_windows: list[CommitDetailWindow] = []
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.splitter.addWidget(self.view)
@@ -178,7 +192,7 @@ class MainWindow(QMainWindow):
 
     def refresh(self) -> None:
         """Reconstruit le graphe et relit l'état (§7.6, §7.9)."""
-        self.graph = build_graph(self.repository)
+        self.graph = self._graph_cache.get(self.repository, build_graph)
         self.state = read_state(self.repository)
         unpushed = unpushed_oids(self.repository)
         self.view.show_graph(
@@ -288,7 +302,54 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         toolbar = QToolBar("Navigation", self)
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
+
         return toolbar
+
+    def run_search(self) -> None:
+        """Surligne les commits correspondants, et dit combien."""
+        motif = self.search_field.text()
+        if not motif.strip():
+            # Motif vide : on lève le filtre et le surlignage plutôt que
+            # de chercher — c'est le geste « annuler la recherche ».
+            self.view.highlight(())
+            self.commit_panel.filter_to(None)
+            self.statusBar().showMessage("", 1)
+            return
+
+        trouves = search_commits(self.repository, motif)
+        self.view.highlight(trouves)
+        # Le graphe montre 10 nœuds pour 3 000 commits : sans filtrer la
+        # liste, l'utilisateur voit *quels nœuds* contiennent un résultat
+        # mais pas *quels commits* (demandé par l'utilisateur).
+        visibles = self.commit_panel.filter_to(trouves)
+
+        if not trouves:
+            self.statusBar().showMessage("no commit found", 15000)
+            return
+
+        if visibles:
+            self.statusBar().showMessage(
+                f"{len(trouves)} commit(s) found — {visibles} in this list",
+                15000,
+            )
+        elif self.view.highlighted_count():
+            # Trouvés, hors de cette liste, mais sur un nœud visible :
+            # l'utilisateur a où aller.
+            self.statusBar().showMessage(
+                f"{len(trouves)} commit(s) found, none in this list — "
+                "select a highlighted node to see them",
+                15000,
+            )
+        else:
+            # Trouvés, mais ni dans la liste ni sur un nœud : le graphe
+            # compresse les chaînes (3 000 commits -> 10 nœuds) et le
+            # panneau est borné aux plus récents. Promettre un nœud
+            # surligné serait faux — il n'y en a aucun.
+            self.statusBar().showMessage(
+                f"{len(trouves)} commit(s) found, but too deep in history "
+                "to be shown",
+                15000,
+            )
 
     def _build_actions(self) -> None:
         """Actions de navigation (§7.1). Qt traduit ⌘ depuis Ctrl sur macOS."""

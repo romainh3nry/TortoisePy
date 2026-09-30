@@ -1140,3 +1140,159 @@ def test_no_divergence_keeps_the_existing_tooltip(window, monkeypatch):
     monkeypatch.setattr(module, "divergence", lambda repo: None)
     window.refresh()
     assert window.branch_label.toolTip() == window.state.head_branch
+
+
+# --- recherche et cache (tâche 3) ----------------------------------------
+
+
+def test_searching_highlights_the_matching_nodes(window, monkeypatch):
+    from tortoisepy.ui import main_window as module
+
+    cible = window.graph.nodes[0].oid
+    monkeypatch.setattr(module, "search_commits", lambda repo, motif: (cible,))
+
+    window.search_field.setText("quelque chose")
+    window.run_search()
+
+    assert window.view.highlighted_count() == 1
+    assert "1" in window.statusBar().currentMessage()
+
+
+def test_an_empty_search_clears_the_highlight(window, monkeypatch):
+    from tortoisepy.ui import main_window as module
+
+    cible = window.graph.nodes[0].oid
+    monkeypatch.setattr(module, "search_commits", lambda repo, motif: (cible,))
+    window.search_field.setText("x")
+    window.run_search()
+
+    monkeypatch.setattr(module, "search_commits", lambda repo, motif: ())
+    window.search_field.setText("")
+    window.run_search()
+
+    assert window.view.highlighted_count() == 0
+
+
+def test_a_search_without_result_says_so(window, monkeypatch):
+    from tortoisepy.ui import main_window as module
+
+    monkeypatch.setattr(module, "search_commits", lambda repo, motif: ())
+    window.search_field.setText("introuvable")
+    window.run_search()
+
+    assert "no" in window.statusBar().currentMessage().lower()
+
+
+def test_an_unchanged_repository_is_not_rebuilt(window, monkeypatch):
+    """Le cache en action : un refresh sans changement ne reconstruit pas."""
+    from tortoisepy.ui import main_window as module
+
+    appels = []
+    vrai = module.build_graph
+    monkeypatch.setattr(
+        module, "build_graph",
+        lambda repo, *a, **k: appels.append(1) or vrai(repo, *a, **k),
+    )
+    window.refresh()
+    window.refresh()
+
+    assert len(appels) <= 1, f"{len(appels)} constructions pour 2 refresh"
+
+
+def test_the_search_field_spans_the_commit_panel(window):
+    """Demandé par l'utilisateur : même largeur que la liste qu'il filtre.
+
+    Il flottait d'abord dans la barre d'outils, sans rapport visuel avec
+    ce sur quoi il agit. Il vit maintenant dans le panneau, en tête de
+    son layout, donc il en épouse la largeur et suit le splitter.
+    """
+    from PySide6.QtWidgets import QLineEdit
+
+    champ = window.search_field
+    assert champ.parent() is window.commit_panel, (
+        "le champ doit appartenir au panneau, pas à la barre d'outils"
+    )
+
+    layout = window.commit_panel.layout()
+    assert layout.itemAt(0).widget() is champ, "il doit être en tête"
+
+    # Aucun QLineEdit ne doit subsister dans la barre d'outils.
+    assert not [
+        a
+        for a in window.toolbar.actions()
+        if isinstance(window.toolbar.widgetForAction(a), QLineEdit)
+    ]
+
+
+def test_searching_filters_the_commit_list(window, monkeypatch):
+    """Demandé par l'utilisateur : filtrer la liste, pas seulement surligner."""
+    from tortoisepy.ui import main_window as module
+
+    window.commit_panel.show_commits("n", _deux_commits())
+    assert window.commit_panel.visible_count() == 2
+
+    monkeypatch.setattr(
+        module, "search_commits", lambda repo, motif: ("a" * 40,)
+    )
+    window.search_field.setText("premier")
+    window.run_search()
+
+    assert window.commit_panel.visible_count() == 1
+
+
+def test_clearing_the_search_restores_the_whole_list(window, monkeypatch):
+    from tortoisepy.ui import main_window as module
+
+    window.commit_panel.show_commits("n", _deux_commits())
+    monkeypatch.setattr(
+        module, "search_commits", lambda repo, motif: ("a" * 40,)
+    )
+    window.search_field.setText("premier")
+    window.run_search()
+
+    window.search_field.setText("")
+    window.run_search()
+
+    assert window.commit_panel.visible_count() == 2
+
+
+def test_results_outside_the_list_are_announced_honestly(window, monkeypatch):
+    """Trouvés mais invisibles : ne pas laisser croire à un échec.
+
+    Le panneau est borné aux commits les plus récents et le graphe
+    compresse les chaînes : un résultat profond n'apparaît ni dans la
+    liste ni sur un nœud. Promettre « sélectionnez un nœud surligné »
+    serait faux quand il n'y en a aucun.
+    """
+    from tortoisepy.ui import main_window as module
+
+    window.commit_panel.show_commits("n", _deux_commits())
+    monkeypatch.setattr(
+        module, "search_commits", lambda repo, motif: ("f" * 40,)
+    )
+    window.search_field.setText("profond")
+    window.run_search()
+
+    message = window.statusBar().currentMessage()
+    assert "1 commit(s) found" in message
+    assert "too deep" in message
+    assert "highlighted node" not in message
+
+
+def _deux_commits():
+    from datetime import datetime
+
+    from tortoisepy.core.commits import CommitInfo
+
+    return tuple(
+        CommitInfo(
+            oid=lettre * 40,
+            summary=resume,
+            message=resume,
+            author_name="A",
+            author_email="a@a",
+            when=datetime(2026, 1, 1),
+            parent_count=1,
+        )
+        for lettre, resume in (("a", "premier"), ("b", "second"))
+    )

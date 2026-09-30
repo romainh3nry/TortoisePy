@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QTreeWidget,
     QTreeWidgetItem,
+    QLineEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -141,6 +142,9 @@ class CommitPanel(QWidget):
         font.setBold(True)
         self._title.setFont(font)
 
+        # `None` = aucun filtre ; un ensemble = ne montrer que ces OID.
+        self._filtre: set | None = None
+
         self._tree = QTreeWidget()
         self._tree.setColumnCount(len(COLUMNS))
         self._tree.setHeaderLabels(COLUMNS)
@@ -164,10 +168,52 @@ class CommitPanel(QWidget):
 
         self.setMinimumWidth(420)
 
+        # Le champ vit dans le panneau, et non dans la barre d'outils :
+        # il prend ainsi exactement la largeur de la liste qu'il filtre,
+        # et suit le splitter quand on la redimensionne (demandé par
+        # l'utilisateur). Dans la barre, il flottait à droite sans rapport
+        # visuel avec ce sur quoi il agit.
+        self.search_field = QLineEdit()
+        self.search_field.setPlaceholderText("Search message, author or SHA…")
+        self.search_field.setClearButtonEnabled(True)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
+        layout.addWidget(self.search_field)
         layout.addWidget(self._title)
         layout.addWidget(self._tree)
+
+    def filter_to(self, oids) -> int:
+        """Masque les commits absents de `oids`. Rend le nombre affiché.
+
+        Masquer plutôt que recharger : les lignes portent déjà leur OID,
+        leur état « propre à la branche » et leur marque de non-poussé —
+        les reconstruire les perdrait, et coûterait un nouveau parcours
+        de l'historique.
+
+        `oids` vide **n'efface pas** le filtre : c'est « aucun résultat ».
+        Passer `None` le lève.
+        """
+        visibles = 0
+        garde = None if oids is None else set(oids)
+
+        for index in range(self._tree.topLevelItemCount()):
+            item = self._tree.topLevelItem(index)
+            oid = item.data(0, Qt.ItemDataRole.UserRole)
+            montrer = garde is None or oid in garde
+            item.setHidden(not montrer)
+            visibles += int(montrer)
+
+        self._filtre = garde
+        return visibles
+
+    def visible_count(self) -> int:
+        """Lignes actuellement affichées — le filtre étant appliqué."""
+        return sum(
+            1
+            for i in range(self._tree.topLevelItemCount())
+            if not self._tree.topLevelItem(i).isHidden()
+        )
 
     def show_commits(
         self,
@@ -232,6 +278,12 @@ class CommitPanel(QWidget):
                     item.setForeground(column, MERGE_COLOR)
 
             self._tree.addTopLevelItem(item)
+
+        # Le panneau vient d'être reconstruit : sans cela, changer de nœud
+        # pendant une recherche afficherait tout, alors que le champ est
+        # encore rempli et le graphe encore surligné.
+        if self._filtre is not None:
+            self.filter_to(self._filtre)
 
         if commits:
             self._tree.setCurrentItem(self._tree.topLevelItem(0))
