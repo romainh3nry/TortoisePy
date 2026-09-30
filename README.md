@@ -1,6 +1,9 @@
 <div align="center">
 
-<img src="docs/images/logo.png" alt="tortoisePy" width="380">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.png">
+  <img src="docs/images/logo.png" alt="tortoisePy" width="380">
+</picture>
 
 **TortoiseGit's Revision Graph, for macOS and Windows.**
 
