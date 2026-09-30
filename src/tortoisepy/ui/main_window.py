@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 from tortoisepy.core import operations
 from tortoisepy.core.commits import commits_for_node
 from tortoisepy.core.graph import build_graph
-from tortoisepy.core.graph_cache import GraphCache
+from tortoisepy.core.graph_cache import GraphCache, repo_fingerprint
 from tortoisepy.core.credentials import is_https, remember
 from tortoisepy.core.pull import (
     PullKind,
@@ -126,6 +126,16 @@ class MainWindow(QMainWindow):
         # Évite de reconstruire un graphe inchangé : mesuré, 792 ms le
         # premier appel contre 2 ms au second sur le même dépôt (phase 13).
         self._graph_cache = GraphCache()
+        # Historique par nœud. `commits_for_node` coûte **292 ms** sur
+        # 3 000 commits (mesuré), et il rechargeait le même nœud à chaque
+        # rafraîchissement : 4 appels pour un seul OID distinct.
+        #
+        # La clé d'invalidation est l'empreinte du dépôt — celle qui sert
+        # déjà au graphe. Elle couvre les deux dépendances : l'historique
+        # (le dépôt) et le marquage `own` (le graphe), puisqu'à empreinte
+        # égale `build_graph` rend le même graphe.
+        self._panel_cache: dict[str, tuple] = {}
+        self._panel_cache_key: tuple | None = None
 
         self.view = GraphView(self)
         self.view.setContextMenuPolicy(
@@ -274,9 +284,26 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         label = " | ".join(r.name for r in node.refs) or f"[{oid[:8]}]"
         self.commit_panel.show_commits(
             label,
-            commits_for_node(self.repository, self.graph, oid),
+            self._commits_for(oid),
+            # **Hors du cache, à dessein** : les marqueurs de non-poussé
+            # changent après un push alors qu'aucun commit n'a bougé. Les
+            # figer afficherait des flèches fantômes. On met en cache
+            # l'historique, pas sa décoration.
             unpushed=unpushed_oids(self.repository),
         )
+
+    def _commits_for(self, oid: str) -> tuple:
+        """Historique d'un nœud, relu seulement si le dépôt a changé."""
+        empreinte = repo_fingerprint(self.repository)
+        if empreinte != self._panel_cache_key:
+            self._panel_cache.clear()
+            self._panel_cache_key = empreinte
+
+        if oid not in self._panel_cache:
+            self._panel_cache[oid] = commits_for_node(
+                self.repository, self.graph, oid
+            )
+        return self._panel_cache[oid]
 
     def _refresh_state_only(self) -> None:
         """Relit l'état sans reconstruire le graphe — bien moins coûteux."""
@@ -304,6 +331,15 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         self.addToolBar(toolbar)
 
         return toolbar
+
+    def focus_search(self) -> None:
+        """Place le curseur dans le champ de recherche.
+
+        Le contenu est sélectionné : une nouvelle recherche remplace
+        alors la précédente sans avoir à l'effacer d'abord.
+        """
+        self.search_field.setFocus()
+        self.search_field.selectAll()
 
     def run_search(self) -> None:
         """Surligne les commits correspondants, et dit combien."""
@@ -360,6 +396,7 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             ("Ajuster à la fenêtre", QKeySequence("Ctrl+9"), self.view.fit_to_window),
             ("Rafraîchir", QKeySequence.StandardKey.Refresh, self.refresh),
             ("Commit…", QKeySequence("Ctrl+K"), self.open_commit_window),
+            ("Rechercher", QKeySequence("Ctrl+F"), self.focus_search),
             ("Push", QKeySequence("Ctrl+P"), self._start_push),
             ("Pull", QKeySequence("Ctrl+L"), self._start_pull),
             # À côté de Pull : c'est la même famille de gestes, et Fetch

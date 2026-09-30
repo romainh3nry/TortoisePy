@@ -1296,3 +1296,147 @@ def _deux_commits():
         )
         for lettre, resume in (("a", "premier"), ("b", "second"))
     )
+
+
+def test_selecting_the_same_node_twice_reloads_nothing(window, monkeypatch):
+    """La raison d'être de la phase : 292 ms par sélection, mesurés.
+
+    Ouverture + 3 rafraîchissements donnaient 4 appels pour **un seul**
+    OID distinct — toujours le même historique rechargé.
+    """
+    from tortoisepy.ui import main_window as module
+
+    oid = window.graph.nodes[0].oid
+    appels = []
+    vrai = module.commits_for_node
+    monkeypatch.setattr(
+        module, "commits_for_node",
+        lambda r, g, o: appels.append(o) or vrai(r, g, o),
+    )
+    # La fenêtre sélectionne HEAD à l'ouverture, donc une entrée est déjà
+    # en cache : partir d'un cache vide, sinon on mesure l'ouverture.
+    window._panel_cache.clear()
+
+    window._show_commits(oid)
+    window._show_commits(oid)
+    window._show_commits(oid)
+
+    assert len(appels) == 1, f"{len(appels)} chargements au lieu d'un"
+
+
+def test_each_node_is_cached_separately(window, monkeypatch):
+    """Revenir sur un nœud déjà vu ne doit pas le recharger."""
+    from tortoisepy.ui import main_window as module
+
+    oids = [n.oid for n in window.graph.nodes]
+    if len(oids) < 2:
+        import pytest
+
+        pytest.skip("le dépôt de test n'a qu'un nœud")
+
+    appels = []
+    vrai = module.commits_for_node
+    monkeypatch.setattr(
+        module, "commits_for_node",
+        lambda r, g, o: appels.append(o) or vrai(r, g, o),
+    )
+    window._panel_cache.clear()
+
+    window._show_commits(oids[0])
+    window._show_commits(oids[1])
+    window._show_commits(oids[0])
+
+    assert appels == [oids[0], oids[1]], appels
+
+
+def test_a_new_commit_invalidates_the_panel_cache(window, repo):
+    """Un cache qui ne s'invalide pas affiche un historique FAUX.
+
+    C'est pire que lent : l'utilisateur croit voir son dépôt.
+
+    **Le test vise un nœud dont l'OID ne bouge pas** — celui d'une autre
+    branche. Viser HEAD ne prouvait rien : son OID change avec le commit,
+    donc la clé change aussi et le cache est contourné plutôt
+    qu'invalidé. Vérifié par mutation : supprimer l'invalidation laissait
+    ce test passer.
+    """
+    autre = str(repo.branches.local["feature"].target)
+    window._show_commits(autre)
+    avant = list(window._panel_cache[autre])
+    assert avant, "le nœud doit être en cache"
+
+    run_git(repo.workdir, "commit", "-q", "--allow-empty", "-m", "tout nouveau")
+    window.refresh()
+
+    assert autre not in window._panel_cache, (
+        "un commit ailleurs doit vider le cache : le graphe a changé, "
+        "donc les marqueurs « own » aussi"
+    )
+
+
+def test_unpushed_markers_are_not_cached(window, monkeypatch):
+    """§3.3 : on met en cache l'historique, pas sa décoration.
+
+    Les marqueurs de non-poussé changent après un push alors qu'aucun
+    commit n'a bougé — les figer afficherait des flèches fantômes.
+    """
+    from tortoisepy.ui import main_window as module
+
+    oid = window.graph.nodes[0].oid
+    vus = []
+    monkeypatch.setattr(
+        module.CommitPanel, "show_commits",
+        lambda self, label, commits, unpushed=frozenset(): vus.append(unpushed),
+    )
+
+    monkeypatch.setattr(module, "unpushed_oids", lambda repo: frozenset({"a" * 40}))
+    window._show_commits(oid)
+
+    monkeypatch.setattr(module, "unpushed_oids", lambda repo: frozenset())
+    window._show_commits(oid)
+
+    assert vus[0] != vus[1], "les marqueurs doivent être relus à chaque affichage"
+
+
+def test_ctrl_f_is_bound_to_the_search_field(window):
+    """D37 : le champ existait depuis la phase 13, sans raccourci.
+
+    **Le focus n'est pas vérifiable ici** : sous pytest-qt en mode
+    `offscreen`, la fenêtre n'est jamais activée (`isActiveWindow()` est
+    faux) et `focusWidget()` reste `None` — même un `setFocus()` direct
+    n'y change rien. Sondé pour ne pas écrire un test qui échoue pour une
+    raison étrangère au code.
+
+    On éprouve donc ce qui est observable : la touche est bien liée, et
+    déclencher l'action sélectionne le contenu du champ.
+    """
+    actions = {
+        a.shortcut().toString(): a for a in window.actions() if a.shortcut()
+    }
+    assert "Ctrl+F" in actions, sorted(actions)
+
+    window.search_field.setText("ancienne recherche")
+    actions["Ctrl+F"].trigger()
+
+    assert window.search_field.selectedText() == "ancienne recherche", (
+        "le contenu doit être sélectionné, pour qu'une nouvelle recherche "
+        "remplace la précédente sans avoir à l'effacer"
+    )
+
+
+def test_the_search_shortcut_does_not_clash_with_fetch(window):
+    """`Ctrl+Shift+F` est Fetch : les deux doivent rester distincts."""
+    touches = [a.shortcut().toString() for a in window.actions() if a.shortcut()]
+    assert touches.count("Ctrl+F") == 1
+    assert "Ctrl+Shift+F" in touches
+
+
+def test_focus_search_asks_for_the_focus(window, monkeypatch):
+    """Le focus n'étant pas observable en test, on vérifie la demande."""
+    demandes = []
+    monkeypatch.setattr(
+        type(window.search_field), "setFocus",
+        lambda self, *a: demandes.append(True),
+    )
+    window.focus_search()
+    assert demandes, "focus_search doit demander le focus"

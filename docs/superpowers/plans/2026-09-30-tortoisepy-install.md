@@ -53,9 +53,13 @@ ce qui évite d'avoir à publier sur PyPI pour démarrer.
 - **`tortoisepy` est libre sur PyPI ; `topy` est pris** par un correcteur de
   fautes de frappe sans mise à jour depuis 2021. Sans conséquence — le nom du
   paquet et celui de la commande sont indépendants — mais à savoir.
-- **Le dépôt `romainh3nry/TortoisePy` est public**, branche `main`, et GitHub
-  sert ses fichiers en brut sans authentification (vérifié en téléchargeant
+- **Le dépôt `romainh3nry/TortoisePy` est public**, et GitHub sert ses
+  fichiers en brut sans authentification (vérifié en téléchargeant
   `pyproject.toml`). `curl` vers le dépôt fonctionnera donc.
+- **Modèle de branches** (décidé le 2026-09-30) : `develop` porte le
+  développement, `main` **uniquement la production**. Les tags de version se
+  posent donc sur `main`, une fois `develop` fusionnée — et c'est sur ce
+  commit-là que les URL d'installation doivent tomber.
 - `pyproject.toml` n'a **ni readme, ni license, ni authors, ni classifiers, ni
   urls** ; `README.md` et `LICENSE` **n'existent pas**.
 
@@ -73,10 +77,9 @@ ce qui évite d'avoir à publier sur PyPI pour démarrer.
    machine Windows. Le script sera écrit d'après la documentation et relu, sans
    pouvoir être exécuté. À dire à l'utilisateur plutôt qu'à masquer.
 5. **Rien ne doit être publié ni installé durablement** par l'exécution du plan.
-6. **L'URL d'installation : `main` ou un tag ?** Techniquement les deux
-   marchent (vérifié). Pointer vers `main` expose les nouveaux utilisateurs à
-   un commit cassé ; pointer vers un tag demande de le maintenir. **C'est une
-   décision de l'utilisateur** — la lui poser, ne pas trancher à sa place.
+6. **L'URL d'installation pointe vers un tag** (D34, tranché). Elle ne doit
+   **jamais** viser une branche : `develop` porte le travail en cours, et même
+   `main` peut recevoir un commit avant qu'une version soit prête.
 
 ---
 
@@ -510,9 +513,14 @@ L'installation fonctionnerait sans tag (`main` est servi normalement,
 vérifié), mais l'utilisateur a choisi un tag figé : personne n'installera un
 état intermédiaire.
 
+**Sur `main`, pas sur `develop`** : `main` est la branche de production
+(décidé le 2026-09-30), et le tag doit désigner ce que les gens installeront.
+
 ```bash
+git switch main
+git merge develop          # amener le travail en production
 git tag -a v0.1.0 -m "Première version publiable"
-git push origin v0.1.0
+git push origin main v0.1.0
 ```
 
 `-a` pour un tag **annoté** — il porte l'auteur, la date et un message, ce
