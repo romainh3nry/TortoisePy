@@ -58,10 +58,19 @@ class GraphCache:
         self._graphe: Any = None
 
     def get(
-        self, repo: pygit2.Repository, build: Callable[[pygit2.Repository], Any]
+        self,
+        repo: pygit2.Repository,
+        build: Callable[[pygit2.Repository], Any],
+        options_key: tuple | None = None,
     ) -> Any:
-        """Rend le graphe, en le reconstruisant seulement si nécessaire."""
-        empreinte = repo_fingerprint(repo)
+        """Rend le graphe, en le reconstruisant seulement si nécessaire.
+
+        `options_key` couvre ce que l'empreinte du dépôt ignore : les
+        filtres d'affichage. Basculer le filtre de tags ne change aucune
+        ref, donc aucune empreinte — sans cette clé, le cache rendrait le
+        graphe précédent et l'interface ne bougerait pas.
+        """
+        empreinte = (repo_fingerprint(repo), options_key)
         if self._graphe is not None and empreinte == self._empreinte:
             return self._graphe
 

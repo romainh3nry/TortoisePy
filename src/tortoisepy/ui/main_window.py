@@ -30,6 +30,7 @@ from tortoisepy.core.commits import commits_for_node
 from tortoisepy.core.graph import build_graph
 from tortoisepy.core.graph_cache import GraphCache, repo_fingerprint
 from tortoisepy.core.credentials import is_https, remember
+from tortoisepy.core.options import GraphOptions
 from tortoisepy.core.pull import (
     PullKind,
     analyse_pull,
@@ -281,9 +282,26 @@ class MainWindow(QMainWindow):
         self.save_settings()
         super().closeEvent(event)
 
+    def graph_options(self) -> GraphOptions:
+        """Options d'affichage courantes.
+
+        Seul `show_tags` est réglable (§5.3) : les quatre autres gardent
+        les défauts que `options.py` justifie par des mesures.
+        """
+        return GraphOptions(show_tags=self.show_tags_action.isChecked())
+
+    def _on_tags_toggled(self, checked: bool) -> None:
+        self.settings.set_value("view/show_tags", checked)
+        self.refresh()
+
     def refresh(self) -> None:
         """Reconstruit le graphe et relit l'état (§7.6, §7.9)."""
-        self.graph = self._graph_cache.get(self.repository, build_graph)
+        options = self.graph_options()
+        self.graph = self._graph_cache.get(
+            self.repository,
+            lambda repo: build_graph(repo, options),
+            options_key=(options.show_tags,),
+        )
         self.state = read_state(self.repository)
         unpushed = unpushed_oids(self.repository)
         # Le mesureur est refait à chaque rafraîchissement : la branche
@@ -430,6 +448,16 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         self.shortcuts_action = QAction("Keyboard Shortcuts…", self)
         self.shortcuts_action.triggered.connect(self.open_shortcuts_window)
         toolbar.addAction(self.shortcuts_action)
+
+        # Seul filtre exposé (§5.3, D52) : les quatre autres gardent leurs
+        # défauts mesurés (voir `core/options.py`).
+        self.show_tags_action = QAction("Show tags", self)
+        self.show_tags_action.setCheckable(True)
+        self.show_tags_action.setChecked(
+            bool(self.settings.value("view/show_tags"))
+        )
+        self.show_tags_action.toggled.connect(self._on_tags_toggled)
+        toolbar.addAction(self.show_tags_action)
 
         return toolbar
 
