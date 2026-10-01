@@ -176,6 +176,39 @@ class GraphView(QGraphicsView):
         self.fitInView(scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
         self._zoom = self.transform().m11()
 
+    def mousePressEvent(self, event) -> None:
+        """Un clic droit sélectionne le nœud qu'il vise.
+
+        Qt ne le fait pas : seul le clic gauche sélectionne. Le menu
+        contextuel était donc construit pour le bon nœud, mais l'action
+        déclenchée relisait la sélection — restée sur le nœud courant,
+        sélectionné au démarrage par le centrage automatique. Résultat
+        signalé par l'utilisateur : créer un tag depuis le menu d'une
+        autre branche le posait sur la branche courante.
+
+        Une sélection MULTIPLE est préservée si le clic tombe dedans :
+        « Compare revisions » travaille sur deux nœuds, et la réduire à
+        un seul rendrait l'entrée inatteignable.
+        """
+        if event.button() == Qt.MouseButton.RightButton:
+            item = self.itemAt(event.position().toPoint())
+            noeud = item if isinstance(item, NodeItem) else None
+            if noeud is None and item is not None:
+                # Le clic peut tomber sur un enfant (étiquette, bande) :
+                # on remonte au nœud qui le porte.
+                parent = item.parentItem()
+                noeud = parent if isinstance(parent, NodeItem) else None
+
+            if noeud is not None and not noeud.isSelected():
+                scene = self.scene()
+                if scene is not None:
+                    scene.clearSelection()
+                noeud.setSelected(True)
+            event.accept()
+            return
+
+        super().mousePressEvent(event)
+
     def wheelEvent(self, event) -> None:
         """⌘ + molette zoome ; molette seule défile (§7.1)."""
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:

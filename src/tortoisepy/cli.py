@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, version as _version
 
@@ -88,10 +90,68 @@ def application_icon():
     return icon
 
 
+_MARQUEUR_DETACHE = "TORTOISEPY_DETACHE"
+"""Dit à l'enfant qu'il est déjà détaché.
+
+Sans lui, chaque relance en relancerait une autre : une bombe à
+fourche qui remplirait la machine de processus.
+"""
+
+
+def _options_de_detachement() -> dict:
+    """Options `Popen` qui coupent l'enfant du terminal.
+
+    Aucun mécanisme n'est portable : `DETACHED_PROCESS` n'existe que sur
+    Windows, `start_new_session` que sur POSIX. `os.fork` n'est pas une
+    option — il est **absent de Windows** (vérifié).
+    """
+    if sys.platform == "win32":
+        return {
+            "creationflags": (
+                subprocess.DETACHED_PROCESS
+                | subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+        }
+    return {"start_new_session": True}
+
+
+def _relancer_detache(arguments: list[str]) -> bool:
+    """Relance `topy` détaché du terminal. `True` si la relance a eu lieu.
+
+    Mesuré : le shell reprend la main en 0,07 s au lieu d'attendre la
+    fermeture de la fenêtre.
+
+    Les trois flux vont vers le vide — c'est le comportement d'une
+    application de bureau, et écrire dans un terminal qui a disparu
+    lèverait une erreur que plus personne ne lirait.
+
+    En cas d'échec, on rend `False` : l'appelant ouvre alors la fenêtre
+    normalement. Mieux vaut un shell bloqué qu'une application qui refuse
+    de démarrer.
+    """
+    if os.environ.get(_MARQUEUR_DETACHE) == "1":
+        return False
+
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "tortoisepy.cli", *arguments],
+            env={**os.environ, _MARQUEUR_DETACHE: "1"},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **_options_de_detachement(),
+        )
+    except OSError:
+        return False
+
+    return True
+
+
 _USAGE = """topy — TortoiseGit Revision Graph
 
 Usage:
   topy [CHEMIN]        Ouvre le dépôt (défaut : le répertoire courant)
+  topy --wait          Garde le terminal occupé jusqu'à la fermeture
   topy --version       Affiche la version
   topy --install-icon  Installe l'icône système (macOS)
   topy --help          Affiche ce message
@@ -102,12 +162,22 @@ Exemples:
 
 Comme git, topy remonte l'arborescence : lancé depuis projet/src/, il
 ouvre projet/.
+
+topy rend la main au terminal aussitôt la fenêtre ouverte. Utilisez
+`--wait` pour l'enchaîner dans un script.
 """
 
 
 def main(argv: list[str] | None = None) -> int:
     """Ouvre la fenêtre sur le dépôt demandé."""
     arguments = list(sys.argv[1:] if argv is None else argv)
+
+    # `--wait` est retiré AVANT le contrôle des options inconnues, qui
+    # le rejetterait sinon. Il garde le terminal occupé, pour enchaîner
+    # dans un script.
+    attendre = "--wait" in arguments
+    if attendre:
+        arguments = [a for a in arguments if a != "--wait"]
 
     if arguments and arguments[0] in ("--help", "-h"):
         print(_USAGE)
@@ -147,6 +217,12 @@ def main(argv: list[str] | None = None) -> int:
     if repository is None:
         print(f"Pas de dépôt Git trouvé dans {target}", file=sys.stderr)
         return 1
+
+    # Le dépôt est validé AVANT de relancer : sinon l'erreur partirait
+    # dans le processus détaché, dont les sorties vont vers le vide, et
+    # l'utilisateur ne verrait rien du tout.
+    if not attendre and _relancer_detache(arguments):
+        return 0
 
     # Les imports Qt restent ici : `--version` et le message d'erreur
     # ci-dessus ne doivent pas payer le chargement de PySide6.

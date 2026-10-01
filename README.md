@@ -52,13 +52,13 @@ It is built on [pygit2](https://www.pygit2.org/) (libgit2) and
 **macOS and Linux**
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.3.0/scripts/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.4.0/scripts/install.sh | sh
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.3.0/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.4.0/scripts/install.ps1 | iex
 ```
 
 The script installs [uv](https://docs.astral.sh/uv/) if you don't have it,
@@ -75,7 +75,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh          # macOS / Linux
 winget install astral-sh.uv                              # Windows
 
 # 2. Install tortoisePy
-uv tool install git+https://github.com/romainh3nry/TortoisePy@v0.3.0
+uv tool install git+https://github.com/romainh3nry/TortoisePy@v0.4.0
 ```
 
 ### Why uv rather than pip
@@ -94,10 +94,10 @@ Re-run the install command — it always points at the latest released tag:
 
 ```bash
 # macOS / Linux
-curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.3.0/scripts/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.4.0/scripts/install.sh | sh
 
 # Windows
-irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.3.0/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.4.0/scripts/install.ps1 | iex
 ```
 
 > **`uv tool upgrade tortoisepy` will not work here.** The install pins an
@@ -121,11 +121,19 @@ topy                   # same as "topy ."
 Like `git` itself, `topy` walks up the directory tree — running it from
 `my-project/src/utils/` opens `my-project`.
 
+`topy` hands your shell straight back: the window opens in a detached
+process, so the terminal stays yours. Closing the last window ends the
+process — nothing is left running behind it.
+
 ```bash
+topy --wait .          # keep the terminal busy until the window closes
 topy --help            # usage
 topy --version         # version
 topy --install-icon    # install the Dock icon (macOS)
 ```
+
+Use `--wait` when you need the window's exit to gate the next step of a
+script.
 
 ## What you can do from the graph
 
