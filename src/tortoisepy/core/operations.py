@@ -100,13 +100,94 @@ def delete_tag(repo: pygit2.Repository, name: str) -> OperationResult:
 
 
 @guarded("Checkout de la branche")
-def checkout_branch(repo: pygit2.Repository, name: str) -> OperationResult:
+def local_name_for(remote_branch: str) -> str:
+    """Nom local d'une branche distante : « origin/x/y » -> « x/y ».
+
+    On retire le PREMIER segment, jamais le dernier : couper à la dernière
+    barre oblique donnerait « y » et casserait toutes les branches à
+    préfixe (`feature/…`, `release/…`), qui sont la norme en équipe.
+    """
+    _, _, reste = remote_branch.partition("/")
+    return reste or remote_branch
+
+
+def local_commits_ahead(
+    repo: pygit2.Repository, local: str, remote: str
+) -> tuple[tuple[str, str], ...]:
+    """Commits présents sur `local` et absents de `remote`.
+
+    Rend (oid court, première ligne du message), du plus récent au plus
+    ancien — de quoi nommer dans un avertissement ce qu'un écrasement
+    ferait disparaître du graphe.
+
+    Ne lève jamais : c'est une fonction d'affichage, appelée pour décider
+    s'il faut avertir. Une branche inconnue rend un tuple vide.
+    """
+    try:
+        branche_locale = repo.branches.local.get(local)
+        branche_distante = repo.branches.remote.get(remote)
+        if branche_locale is None or branche_distante is None:
+            return ()
+
+        marche = repo.walk(branche_locale.target, pygit2.GIT_SORT_TOPOLOGICAL)
+        marche.hide(branche_distante.target)
+        return tuple(
+            (str(commit.id)[:8], commit.message.splitlines()[0].strip())
+            for commit in marche
+        )
+    except (pygit2.GitError, KeyError, ValueError):
+        return ()
+
+
+@guarded("Checkout")
+def checkout_branch(
+    repo: pygit2.Repository, name: str, *, overwrite: bool = False
+) -> OperationResult:
+    """Bascule sur une branche, locale ou distante.
+
+    Une branche **distante** crée la locale du même nom et configure son
+    suivi — c'est ce que fait `git checkout <branche>`, vérifié :
+
+        Switched to a new branch 'test-branch'
+        branch 'test-branch' set up to track 'origin/test-branch'.
+
+    Sans ce suivi, un `push` ou un `pull` ultérieur ne saurait pas quelle
+    branche distante viser.
+
+    `overwrite` réinitialise une locale existante sur la distante, comme
+    `git checkout -B`. **C'est destructeur** : les commits locaux non
+    poussés disparaissent du graphe (ils ne survivent qu'au reflog). La
+    décision appartient à l'appelant, qui doit avoir fait confirmer —
+    `local_commits_ahead` dit ce qui est en jeu.
+    """
     branch = repo.branches.local.get(name)
-    if branch is None:
+    if branch is not None and not (overwrite and "/" in name):
+        repo.checkout(branch)
+        return succeeded(f"Basculé sur « {name} »")
+
+    distante = repo.branches.remote.get(name)
+    if distante is None:
         return failed(f"Checkout de « {name} »", f"branch '{name}' not found")
 
-    repo.checkout(branch)
-    return succeeded(f"Basculé sur « {name} »")
+    local = local_name_for(name)
+    cible = repo.get(distante.target)
+    existante = repo.branches.local.get(local)
+
+    if existante is not None:
+        if not overwrite:
+            # L'appelant n'a pas confirmé : on ne touche à rien.
+            return failed(
+                f"Checkout de « {name} »",
+                f"local branch '{local}' already exists",
+            )
+        # `force=True` : c'est précisément l'écrasement demandé.
+        branche = repo.branches.local.create(local, cible, True)
+    else:
+        branche = repo.branches.local.create(local, cible)
+
+    branche.upstream = distante
+    repo.checkout(branche)
+    return succeeded(f"Basculé sur « {local} »")
 
 
 @guarded("Checkout du commit")
