@@ -460,6 +460,16 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
 
         # Seul filtre exposé (§5.3, D52) : les quatre autres gardent leurs
         # défauts mesurés (voir `core/options.py`).
+        # Demandé par l'utilisateur : revenir sur la branche courante après
+        # s'être déplacé dans le graphe. Pas de raccourci clavier — elle
+        # n'est pas dans le catalogue des dix actions raccourcissables.
+        self.recenter_action = QAction("Recenter", self)
+        self.recenter_action.setToolTip(
+            "Bring the current branch back into view"
+        )
+        self.recenter_action.triggered.connect(self._center_on_head)
+        toolbar.addAction(self.recenter_action)
+
         self.show_tags_action = QAction("Show tags", self)
         self.show_tags_action.setCheckable(True)
         self.show_tags_action.setChecked(
