@@ -139,3 +139,103 @@ def test_the_readme_does_not_promise_uv_tool_upgrade():
         assert "will not work" in section, (
             "si la commande est citée, il faut dire qu'elle ne s'applique pas"
         )
+
+
+# --- La version se change à un seul endroit ------------------------------
+
+
+def _charger_set_version(racine=None):
+    """Charge `scripts/set-version.py`, dont le tiret interdit l'import."""
+    import importlib.util
+
+    base = racine or RACINE
+    spec = importlib.util.spec_from_file_location(
+        "set_version", base / "scripts" / "set-version.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if racine is not None:
+        module.RACINE = racine
+    return module
+
+
+def test_the_version_script_reports_the_current_version():
+    """`set-version.py` sans argument lit la source unique."""
+    import tomllib
+
+    module = _charger_set_version()
+    config = tomllib.loads((RACINE / "pyproject.toml").read_text())
+    assert module.version_courante() == config["project"]["version"]
+
+
+def test_the_version_script_covers_every_file_that_holds_it(tmp_path):
+    """Le test qui compte : aucun fichier ne doit être oublié.
+
+    Sans lui, ajouter demain une version dans un nouveau fichier sans
+    l'ajouter au script recréerait exactement le problème que le script
+    existe pour supprimer — et personne ne le verrait avant une release
+    incohérente.
+
+    On travaille sur une COPIE : le dépôt réel n'est jamais modifié.
+    """
+    import shutil
+
+    fichiers = ("pyproject.toml", "README.md",
+                "scripts/install.sh", "scripts/install.ps1")
+
+    racine_copie = tmp_path / "depot"
+    (racine_copie / "scripts").mkdir(parents=True)
+    for nom in fichiers:
+        shutil.copy2(RACINE / nom, racine_copie / nom)
+    shutil.copy2(
+        RACINE / "scripts" / "set-version.py",
+        racine_copie / "scripts" / "set-version.py",
+    )
+
+    module = _charger_set_version(racine_copie)
+
+    ancienne = module.version_courante()
+    module.poser("7.8.9")
+
+    for nom in fichiers:
+        contenu = (racine_copie / nom).read_text()
+        assert ancienne not in contenu, (
+            f"{nom} porte encore {ancienne} : le script l'a oublié"
+        )
+        assert "7.8.9" in contenu, f"{nom} n'a pas reçu la nouvelle version"
+
+
+def test_every_version_in_the_repository_is_reachable_by_the_script():
+    """Aucune version codée en dur hors des fichiers que le script couvre.
+
+    Garde-fou contre un futur fichier qui épinglerait la version sans être
+    déclaré dans `set-version.py`.
+    """
+    import tomllib
+
+    config = tomllib.loads((RACINE / "pyproject.toml").read_text())
+    version = config["project"]["version"]
+
+    couverts = {
+        RACINE / "pyproject.toml",
+        RACINE / "README.md",
+        RACINE / "scripts" / "install.sh",
+        RACINE / "scripts" / "install.ps1",
+    }
+
+    oublies = []
+    for chemin in RACINE.rglob("*"):
+        if not chemin.is_file() or chemin in couverts:
+            continue
+        if any(part in {".git", ".venv", ".superpowers", "__pycache__",
+                        "docs"} for part in chemin.parts):
+            continue
+        if chemin.suffix not in {".toml", ".md", ".sh", ".ps1", ".cfg"}:
+            continue
+        if version in chemin.read_text(errors="ignore"):
+            oublies.append(str(chemin.relative_to(RACINE)))
+
+    assert not oublies, (
+        "ces fichiers épinglent la version sans être couverts par "
+        f"scripts/set-version.py : {oublies}"
+    )

@@ -191,6 +191,31 @@ start:
   and then verified against a real repository — including the ones that look
   obvious.
 
+## Releasing
+
+The version lives in **one place**: the `version` field of `pyproject.toml`.
+Everything else — the install URLs in this README, the `VERSION` variable in
+both installers — is a copy, and one script rewrites them all:
+
+```bash
+python scripts/set-version.py X.Y.Z
+```
+
+It prints what it changed, and leaves Git alone. Commit, then tag:
+
+```bash
+git tag vX.Y.Z && git push origin vX.Y.Z
+```
+
+The tag matters: the install commands above point at it, so a release without
+one gives a 404.
+
+Why copies rather than a single value read at runtime: both installers run
+*before* anything is cloned, so `pyproject.toml` does not yet exist on the
+user's machine when `curl … | sh` starts. Their version has to be written in.
+Three tests keep the copies honest — one of them fails if a new file ever
+pins the version without being declared in the script.
+
 ## Licence
 
 [MIT](LICENSE) — do what you like with it, keep the copyright notice, and
