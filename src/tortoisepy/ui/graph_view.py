@@ -50,6 +50,7 @@ class GraphView(QGraphicsView):
 
         previous = self.scene()
         self.setScene(scene)
+        self._elargir_scene()
         if previous is not None:
             previous.deleteLater()
         # La scène précédente est détruite, et les cadres avec elle : garder
@@ -208,6 +209,55 @@ class GraphView(QGraphicsView):
             return
 
         super().mousePressEvent(event)
+
+    def pan_by(self, dx: int, dy: int) -> None:
+        """Déplace la vue de `dx`, `dy` pixels. Sert aux tests du glisser.
+
+        Les événements de souris synthétiques ne déclenchent pas
+        `ScrollHandDrag` (vérifié sur une `QGraphicsView` nue), d'où ce
+        point d'entrée programmatique.
+        """
+        self.horizontalScrollBar().setValue(
+            self.horizontalScrollBar().value() + dx
+        )
+        self.verticalScrollBar().setValue(
+            self.verticalScrollBar().value() + dy
+        )
+
+    def _elargir_scene(self) -> None:
+        """Donne de la marge autour du graphe, pour pouvoir le déplacer.
+
+        Signalé par l'utilisateur : le glisser fonctionnait verticalement
+        mais pas latéralement. Mesuré, la cause n'était pas le glisser
+        mais l'absence de marge — le `sceneRect` collait au contenu :
+
+            sceneRect 391 x 650   viewport 935 x 772
+            marge horizontale : 0      <- rien à faire défiler
+
+        Un graphe étroit et haut, cas courant d'un dépôt réel, n'offrait
+        donc aucune course latérale. On ajoute une marge d'un viewport de
+        chaque côté : le graphe peut être amené n'importe où dans la
+        fenêtre, sans jamais pouvoir être perdu de vue — « Recenter » le
+        ramène.
+        """
+        scene = self.scene()
+        if scene is None:
+            return
+
+        contenu = scene.itemsBoundingRect()
+        if contenu.isEmpty():
+            return
+
+        marge_x = self.viewport().width() * 0.75
+        marge_y = self.viewport().height() * 0.75
+        scene.setSceneRect(
+            contenu.adjusted(-marge_x, -marge_y, marge_x, marge_y)
+        )
+
+    def resizeEvent(self, event) -> None:
+        """La marge dépend de la taille du viewport : elle le suit."""
+        super().resizeEvent(event)
+        self._elargir_scene()
 
     def wheelEvent(self, event) -> None:
         """⌘ + molette zoome ; molette seule défile (§7.1)."""
