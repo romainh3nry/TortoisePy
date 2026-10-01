@@ -7,6 +7,8 @@ nœud lui-même.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPen
 from PySide6.QtWidgets import (
@@ -125,12 +127,28 @@ def _is_own(model, row: int, parent) -> bool:
     return bool(model.index(row, 0, parent).data(OWN_ROLE))
 
 
+@dataclass(frozen=True)
+class PanelEntry:
+    """Une entrée du menu contextuel du panneau.
+
+    `oid` est porté par l'entrée et non relu au déclenchement : le menu
+    du graphe avait ce défaut, et l'action retombait sur la pointe de la
+    branche au lieu du commit visé (signalé par l'utilisateur).
+    """
+
+    label: str
+    action: str
+    oid: str
+
+
 class CommitPanel(QWidget):
     """Liste les commits d'un nœud, dans un volet latéral."""
 
     commit_selected = Signal(str)
 
     commit_activated = Signal(str)
+    context_menu_requested = Signal(str, object)
+    """Clic droit sur une ligne : (oid, position globale)."""
     """Double-clic sur un commit — la fenêtre principale ouvre son détail."""
 
     def __init__(self, parent=None):
@@ -146,6 +164,10 @@ class CommitPanel(QWidget):
         self._filtre: set | None = None
 
         self._tree = QTreeWidget()
+        self._tree.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self._tree.customContextMenuRequested.connect(self._on_context_menu)
         self._tree.setColumnCount(len(COLUMNS))
         self._tree.setHeaderLabels(COLUMNS)
         self._tree.setRootIsDecorated(False)
@@ -321,3 +343,37 @@ class CommitPanel(QWidget):
         oid = item.data(0, Qt.ItemDataRole.UserRole)
         if oid is not None:
             self.commit_activated.emit(oid)
+
+    def menu_for(self, oid: str | None) -> tuple[PanelEntry, ...]:
+        """Entrées du menu contextuel pour `oid`.
+
+        Vide si aucun commit n'est désigné : un clic droit dans le vide ne
+        doit rien proposer plutôt qu'agir sur une sélection d'avant.
+        """
+        if not oid:
+            return ()
+
+        return (
+            PanelEntry("Cherry Pick this commit…", "cherry_pick_commit", oid),
+            PanelEntry("Revert change by this commit…",
+                       "revert_commit_oid", oid),
+            PanelEntry("Show commit details", "show_commit_detail", oid),
+            PanelEntry("Copy SHA-1 to clipboard", "copy_commit_hash", oid),
+        )
+
+    def _on_context_menu(self, position) -> None:
+        """Construit le menu sur la ligne cliquée, pas sur la sélection.
+
+        Un clic droit ne sélectionne pas dans un QTreeWidget : sans cette
+        résolution par position, le menu viserait la ligne précédemment
+        sélectionnée.
+        """
+        item = self._tree.itemAt(position)
+        if item is None:
+            return
+
+        self._tree.setCurrentItem(item)
+        oid = item.data(0, Qt.ItemDataRole.UserRole)
+        self.context_menu_requested.emit(
+            oid or "", self._tree.viewport().mapToGlobal(position)
+        )
