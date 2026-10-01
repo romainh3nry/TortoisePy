@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QGraphicsScene
+from PySide6.QtWidgets import QGraphicsScene, QGraphicsSimpleTextItem
 
 from tortoisepy.core.model import (
     DisplayGraph,
@@ -72,52 +72,8 @@ def test_nodes_are_selectable():
             assert item.flags() & item.GraphicsItemFlag.ItemIsSelectable
 
 
-def test_label_counts_the_destination_commit_too():
-    """L'étiquette annonce ce que la branche a ajouté, commit du nœud inclus.
-
-    `skipped` ne compte que les commits ENTRE les deux nœuds : s'y fier
-    seul annonçait systématiquement un commit de moins que ce que le
-    panneau encadre au clic.
-    """
-    graph = DisplayGraph(
-        nodes=(node("a" * 40, "base"), node("b" * 40, "tip")),
-        edges=(edge("a" * 40, "b" * 40, ("c" * 40, "d" * 40)),),
-    )
-    scene = build_scene(graph, layout_graph(graph, QtMeasurer()))
-    edges = [i for i in scene.items() if isinstance(i, EdgeItem)]
-    # 2 sautés + le commit de « tip » = 3
-    assert edges[0].label == "3 commits"
 
 
-def test_edge_without_skipped_commits_still_counts_one():
-    """Deux nœuds voisins : la branche a quand même ajouté un commit."""
-    graph = DisplayGraph(
-        nodes=(node("a" * 40, "base"), node("b" * 40, "tip")),
-        edges=(edge("a" * 40, "b" * 40),),
-    )
-    scene = build_scene(graph, layout_graph(graph, QtMeasurer()))
-    edges = [i for i in scene.items() if isinstance(i, EdgeItem)]
-    assert edges[0].label == "1 commit"
-
-
-def test_edge_with_skipped_commits_is_labelled():
-    graph = DisplayGraph(
-        nodes=(node("a" * 40, "base"), node("b" * 40, "tip")),
-        edges=(edge("a" * 40, "b" * 40, tuple("c" * 40 for _ in range(12))),),
-    )
-    scene = build_scene(graph, layout_graph(graph, QtMeasurer()))
-    edges = [i for i in scene.items() if isinstance(i, EdgeItem)]
-    assert edges[0].label is not None
-    # 12 sautés + le commit du nœud d'arrivée
-    assert "13" in edges[0].label
-
-
-def test_every_edge_is_labelled():
-    """Même sans commit sauté, la branche a ajouté le commit du nœud."""
-    graph = simple_graph()
-    scene = build_scene(graph, layout_graph(graph, QtMeasurer()))
-    edges = [i for i in scene.items() if isinstance(i, EdgeItem)]
-    assert edges[0].label == "1 commit"
 
 
 def test_edge_carries_its_model():
@@ -159,92 +115,9 @@ def test_build_scene_is_repeatable():
     assert positions(first) == positions(second)
 
 
-def test_one_skipped_commit_counts_two():
-    """« 1 commit », pas « 1 commits »."""
-    graph = DisplayGraph(
-        nodes=(node("a" * 40, "base"), node("b" * 40, "tip")),
-        edges=(edge("a" * 40, "b" * 40, ("c" * 40,)),),
-    )
-    scene = build_scene(graph, layout_graph(graph, QtMeasurer()))
-    edges = [i for i in scene.items() if isinstance(i, EdgeItem)]
-    # 1 sauté + le commit du nœud = 2
-    assert edges[0].label == "2 commits"
 
 
-def test_several_skipped_commits_label_is_plural():
-    graph = DisplayGraph(
-        nodes=(node("a" * 40, "base"), node("b" * 40, "tip")),
-        edges=(edge("a" * 40, "b" * 40, tuple("c" * 40 for _ in range(3))),),
-    )
-    scene = build_scene(graph, layout_graph(graph, QtMeasurer()))
-    edges = [i for i in scene.items() if isinstance(i, EdgeItem)]
-    # 3 sautés + le commit du nœud = 4
-    assert edges[0].label == "4 commits"
 
-
-def test_labels_do_not_overlap_each_other():
-    """Plusieurs arêtes partant d'un même nœud empilaient leurs étiquettes.
-
-    Les ancrer sur leur courbe ne suffit pas là où beaucoup d'arêtes se
-    croisent : une passe de désencombrement les écarte.
-    """
-    base = "a" * 40
-    nodes = [node(base, "base")]
-    edges = []
-    for index in range(6):
-        oid = f"{index}" * 40
-        nodes.append(node(oid, f"branche-{index}"))
-        edges.append(edge(base, oid, tuple("c" * 40 for _ in range(index + 1))))
-
-    graph = DisplayGraph(nodes=tuple(nodes), edges=tuple(edges))
-    scene = build_scene(graph, layout_graph(graph, QtMeasurer()))
-
-    rects = [
-        i.label_rect()
-        for i in scene.items()
-        if isinstance(i, EdgeItem) and i.label_rect() is not None
-    ]
-    assert len(rects) == 6
-
-    overlaps = sum(
-        1
-        for i, a in enumerate(rects)
-        for b in rects[i + 1:]
-        if a.intersects(b)
-    )
-    assert overlaps == 0, f"{overlaps} étiquettes se chevauchent"
-
-
-def test_label_stays_near_its_edge():
-    """Le décalage est borné : au-delà on ne saurait plus à quelle arête
-    l'étiquette appartient."""
-    from tortoisepy.ui.graph_items import LABEL_MAX_SHIFT
-
-    graph = simple_graph()
-    scene = build_scene(graph, layout_graph(graph, QtMeasurer()))
-    item = next(i for i in scene.items() if isinstance(i, EdgeItem))
-
-    label = item.label_rect()
-    path = item.path()
-    middle = path.pointAtPercent(0.5)
-    assert abs(label.center().y() - middle.y()) < LABEL_MAX_SHIFT + 40.0
-
-
-def test_label_placement_is_deterministic():
-    """§10.4 : deux constructions donnent le même rendu."""
-    graph = simple_graph()
-    layout = layout_graph(graph, QtMeasurer())
-
-    def positions(scene):
-        return sorted(
-            (i.label_rect().x(), i.label_rect().y())
-            for i in scene.items()
-            if isinstance(i, EdgeItem) and i.label_rect() is not None
-        )
-
-    assert positions(build_scene(graph, layout)) == positions(
-        build_scene(graph, layout)
-    )
 
 
 def _node_items(scene):
@@ -519,3 +392,80 @@ def test_the_node_is_not_taller_than_its_bands(qtbot):
         "le nœud courant ne doit pas réserver la place de sa ligne HEAD"
     )
     assert len(ref_rows(node, "develop")) == 2
+
+
+# --- Les arêtes ne portent plus de décompte ------------------------------
+
+
+def test_edges_carry_no_commit_count():
+    """Demandé par l'utilisateur : le décompte surchargeait l'UI.
+
+    Le nombre de commits reste accessible au clic, dans le panneau
+    latéral, qui les liste au lieu de les résumer par un nombre.
+    """
+    graph = DisplayGraph(
+        nodes=(node("a" * 40, "base"), node("b" * 40, "tip")),
+        edges=(edge("a" * 40, "b" * 40, tuple("c" * 40 for _ in range(12))),),
+    )
+    scene = build_scene(graph, layout_graph(graph, QtMeasurer()))
+    edges = [i for i in scene.items() if isinstance(i, EdgeItem)]
+
+    assert edges[0].label is None
+    assert edges[0].label_rect() is None
+
+
+def test_no_edge_draws_any_text():
+    """L'assertion qui compte : aucun texte n'est ajouté à la scène par une
+    arête.
+
+    Vérifier `label is None` ne suffirait pas — un rendu pourrait dessiner
+    le compte par un autre chemin. On compte donc les items de texte
+    réellement présents, en excluant ceux des nœuds (les refs).
+    """
+    base = "a" * 40
+    nodes = [node(base, "base")]
+    edges = []
+    for index in range(6):
+        oid = f"{index}" * 40
+        nodes.append(node(oid, f"branche-{index}"))
+        edges.append(edge(base, oid, tuple("c" * 40 for _ in range(index + 1))))
+
+    graph = DisplayGraph(nodes=tuple(nodes), edges=tuple(edges))
+    scene = build_scene(graph, layout_graph(graph, QtMeasurer()))
+
+    textes = [
+        i.text()
+        for i in scene.items()
+        if isinstance(i, QGraphicsSimpleTextItem)
+    ]
+    # Les seuls textes sont les noms de refs portés par les nœuds.
+    attendus = {"base"} | {f"branche-{i}" for i in range(6)}
+    assert set(textes) == attendus, f"texte inattendu : {set(textes) - attendus}"
+    assert not any("commit" in t for t in textes)
+
+
+def test_removing_the_labels_leaves_the_arrows_untouched():
+    """Contrainte de l'utilisateur : « on ne touche pas aux flèches ».
+
+    La courbe et sa flèche sont construites par `_build`, avant toute
+    étiquette. Ce test le prouve en comparant la géométrie obtenue à
+    celle d'une arête construite explicitement avec une étiquette : les
+    deux chemins doivent être identiques au point près.
+    """
+    graph = simple_graph()
+    scene = build_scene(graph, layout_graph(graph, QtMeasurer()))
+    sans = next(i for i in scene.items() if isinstance(i, EdgeItem))
+
+    avec = EdgeItem(
+        sans.edge,
+        sans.path().pointAtPercent(0.0),
+        sans.path().pointAtPercent(1.0),
+        "3 commits",
+    )
+
+    assert sans.path().elementCount() == avec.path().elementCount()
+    for index in range(sans.path().elementCount()):
+        a, b = sans.path().elementAt(index), avec.path().elementAt(index)
+        assert abs(a.x - b.x) < 0.01 and abs(a.y - b.y) < 0.01, (
+            f"la géométrie a changé à l'élément {index}"
+        )

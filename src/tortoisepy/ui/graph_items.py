@@ -355,16 +355,13 @@ def build_scene(
         if ancestor is None or descendant is None:
             continue
 
-        label = (
-            # +1 : `skipped` compte les commits ENTRE les deux nœuds, sans
-            # celui que porte le nœud d'arrivée. Or il fait bien partie de
-            # l'apport de la branche — c'est ce que montre le panneau au
-            # clic. Sans ce +1, l'étiquette annonçait systématiquement un
-            # commit de moins que la réalité.
-            _skipped_label(edge.skipped_count + 1)
-        )
+        # Aucune étiquette : le décompte de commits surchargeait l'UI
+        # (demandé par l'utilisateur). Le nombre reste accessible au clic,
+        # dans le panneau latéral, qui liste les commits eux-mêmes plutôt
+        # que de les résumer par un nombre. `EdgeItem` accepte `label=None`
+        # et la courbe comme la flèche sont construites sans lui.
         scene.addItem(
-            EdgeItem(edge, _top_center(ancestor), _bottom_center(descendant), label)
+            EdgeItem(edge, _top_center(ancestor), _bottom_center(descendant))
         )
 
     _spread_labels(scene)

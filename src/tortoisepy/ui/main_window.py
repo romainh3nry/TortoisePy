@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pygit2
 import shiboken6
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QByteArray, Qt
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QLabel,
@@ -22,14 +22,17 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QToolBar,
+    QToolButton,
     QWidget,
 )
 
+from tortoisepy.cli import find_repository
 from tortoisepy.core import operations
 from tortoisepy.core.commits import commits_for_node
 from tortoisepy.core.graph import build_graph
 from tortoisepy.core.graph_cache import GraphCache, repo_fingerprint
 from tortoisepy.core.credentials import is_https, remember
+from tortoisepy.core.options import GraphOptions
 from tortoisepy.core.pull import (
     PullKind,
     analyse_pull,
@@ -41,10 +44,12 @@ from tortoisepy.core.push_state import divergence, push_state, unpushed_oids
 from tortoisepy.core.rebase import rebase_targets, start_rebase
 from tortoisepy.core.results import failed, succeeded
 from tortoisepy.core.search import search_commits
+from tortoisepy.core.shortcuts import CATALOGUE
 from tortoisepy.core.state import read_state
 from tortoisepy.layout.engine import layout_graph
 from tortoisepy.ui import actions
 from tortoisepy.ui.actions import ActionContext
+from tortoisepy.ui.settings_store import SettingsStore
 from tortoisepy.ui.commit_detail_window import CommitDetailWindow
 from tortoisepy.ui.commit_panel import CommitPanel
 from tortoisepy.ui.commit_window import CommitWindow
@@ -118,9 +123,11 @@ def _still_alive(widget) -> bool:
 class MainWindow(QMainWindow):
     """Fenêtre du Revision Graph."""
 
-    def __init__(self, repository: pygit2.Repository, parent=None):
+    def __init__(self, repository: pygit2.Repository, parent=None,
+                 settings: SettingsStore | None = None):
         super().__init__(parent)
         self.repository = repository
+        self.settings = settings or SettingsStore()
         self.measurer = QtMeasurer()
         self.graph = None
         self.state = None
@@ -137,6 +144,10 @@ class MainWindow(QMainWindow):
         # égale `build_graph` rend le même graphe.
         self._panel_cache: dict[str, tuple] = {}
         self._panel_cache_key: tuple | None = None
+        # Largeur de panneau mémorisée, appliquée au premier `showEvent`
+        # (voir `restore_settings`/`showEvent` : le splitter n'a pas de
+        # vraie taille avant le premier affichage).
+        self._largeur_panneau_en_attente: int | None = None
 
         self.view = GraphView(self)
         self.view.setContextMenuPolicy(
@@ -161,6 +172,10 @@ class MainWindow(QMainWindow):
         # 3 000 commits (mesuré), ce qui rendrait la saisie inutilisable.
         self.search_field.returnPressed.connect(self.run_search)
         self._detail_windows: list[CommitDetailWindow] = []
+        # Chaque dépôt récent ouvert crée une nouvelle fenêtre : sans
+        # garder une référence, le ramasse-miettes la détruirait aussitôt
+        # (même piège que `_detail_windows`).
+        self._recent_windows: list[MainWindow] = []
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.splitter.addWidget(self.view)
         self.splitter.addWidget(self.commit_panel)
@@ -200,10 +215,102 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(self._title())
         self.resize(1400, 850)
         self.refresh()
+        self.restore_settings()
+        self.settings.remember_repository(
+            str(Path(repository.path).parent)
+        )
+
+    def geometry_is_visible(self, geometry) -> bool:
+        """La géométrie recoupe-t-elle un écran réellement présent ?
+
+        Sans ce contrôle, une fenêtre mémorisée sur un moniteur débranché
+        rouvrirait hors de tout écran : invisible, et impossible à
+        rattraper autrement qu'en supprimant les préférences (§D51).
+        """
+        for ecran in QGuiApplication.screens():
+            if ecran.availableGeometry().intersects(geometry):
+                return True
+        return False
+
+    def restore_settings(self) -> None:
+        """Réapplique les réglages mémorisés, en se méfiant de chacun.
+
+        La largeur du panneau n'est PAS appliquée ici : à cet instant
+        (appelé depuis `__init__`), la fenêtre n'a jamais été affichée et
+        le splitter n'a donc pas encore été mis en page — `sizes()` y
+        rend `[0, 0]` et toute largeur posée maintenant serait de toute
+        façon écrasée par la mise en page que Qt effectue au premier
+        `show()` (mesuré : une largeur de 300 enregistrée revenait à 524
+        après `show()`). Elle est donc mémorisée et appliquée une seule
+        fois depuis `showEvent`, quand le splitter a une vraie largeur.
+        """
+        brut = self.settings.value("window/geometry")
+        if isinstance(brut, (bytes, QByteArray)):
+            sauvegarde = self.saveGeometry()
+            if self.restoreGeometry(QByteArray(brut)):
+                if not self.geometry_is_visible(self.geometry()):
+                    self.restoreGeometry(sauvegarde)
+
+        zoom = self.settings.value("view/zoom")
+        if isinstance(zoom, (int, float)) and zoom > 0:
+            self.view.set_zoom(float(zoom))
+
+        largeur = self.settings.value("view/panel_width")
+        if isinstance(largeur, int) and largeur > 0:
+            self._largeur_panneau_en_attente = largeur
+
+    def showEvent(self, event) -> None:
+        """Applique la largeur de panneau différée, une seule fois.
+
+        Le premier `show()` remet en page le splitter (Qt lui donne alors
+        sa vraie taille) : c'est le premier moment où `setSizes` a un
+        total fiable sur lequel s'appuyer. `_largeur_panneau_en_attente`
+        est remis à `None` juste après pour ne jamais écraser un
+        redimensionnement fait ensuite par l'utilisateur, y compris lors
+        d'un `show()` ultérieur (ex. après une minimisation).
+        """
+        super().showEvent(event)
+        largeur = self._largeur_panneau_en_attente
+        if largeur is not None:
+            self._largeur_panneau_en_attente = None
+            total = sum(self.splitter.sizes())
+            if total > largeur:
+                self.splitter.setSizes([total - largeur, largeur])
+
+    def save_settings(self) -> None:
+        """Mémorise l'état courant. Appelé à la fermeture."""
+        self.settings.set_value(
+            "window/geometry", bytes(self.saveGeometry())
+        )
+        self.settings.set_value("view/zoom", self.view.current_zoom())
+        tailles = self.splitter.sizes()
+        if len(tailles) > 1:
+            self.settings.set_value("view/panel_width", tailles[1])
+
+    def closeEvent(self, event) -> None:
+        self.save_settings()
+        super().closeEvent(event)
+
+    def graph_options(self) -> GraphOptions:
+        """Options d'affichage courantes.
+
+        Seul `show_tags` est réglable (§5.3) : les quatre autres gardent
+        les défauts que `options.py` justifie par des mesures.
+        """
+        return GraphOptions(show_tags=self.show_tags_action.isChecked())
+
+    def _on_tags_toggled(self, checked: bool) -> None:
+        self.settings.set_value("view/show_tags", checked)
+        self.refresh()
 
     def refresh(self) -> None:
         """Reconstruit le graphe et relit l'état (§7.6, §7.9)."""
-        self.graph = self._graph_cache.get(self.repository, build_graph)
+        options = self.graph_options()
+        self.graph = self._graph_cache.get(
+            self.repository,
+            lambda repo: build_graph(repo, options),
+            options_key=(options.show_tags,),
+        )
         self.state = read_state(self.repository)
         unpushed = unpushed_oids(self.repository)
         # Le mesureur est refait à chaque rafraîchissement : la branche
@@ -343,7 +450,96 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
+        # Accès à la fenêtre des raccourcis. Volontairement sans raccourci
+        # clavier : elle ne fait pas partie des dix actions du catalogue,
+        # et lui en donner un serait incohérent (un raccourci non
+        # modifiable dans la fenêtre qui sert justement à les modifier).
+        self.shortcuts_action = QAction("Keyboard Shortcuts…", self)
+        self.shortcuts_action.triggered.connect(self.open_shortcuts_window)
+        toolbar.addAction(self.shortcuts_action)
+
+        # Seul filtre exposé (§5.3, D52) : les quatre autres gardent leurs
+        # défauts mesurés (voir `core/options.py`).
+        self.show_tags_action = QAction("Show tags", self)
+        self.show_tags_action.setCheckable(True)
+        self.show_tags_action.setChecked(
+            bool(self.settings.value("view/show_tags"))
+        )
+        self.show_tags_action.toggled.connect(self._on_tags_toggled)
+        toolbar.addAction(self.show_tags_action)
+
+        # Bouton à menu déroulant plutôt qu'une barre de menus : ce projet
+        # n'a pas de `QMenuBar`, tout vit dans la barre d'outils.
+        self.recent_button = QToolButton(self)
+        self.recent_button.setText("Open Recent")
+        self.recent_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        recent_menu = QMenu(self.recent_button)
+        # Peuplé à l'ouverture, pas à la construction : la liste change
+        # quand d'autres fenêtres s'ouvrent, et `recent_repositories()`
+        # purge les dépôts disparus à la lecture — un menu construit une
+        # fois pourrait montrer un dépôt qui n'existe déjà plus.
+        recent_menu.aboutToShow.connect(self._populate_recent_menu)
+        self.recent_button.setMenu(recent_menu)
+        toolbar.addWidget(self.recent_button)
+
         return toolbar
+
+    def _populate_recent_menu(self) -> None:
+        """Reconstruit le menu des dépôts récents à chaque ouverture."""
+        menu = self.recent_button.menu()
+        menu.clear()
+
+        recents = self.settings.recent_repositories()
+        if not recents:
+            vide = menu.addAction("No recent repositories")
+            vide.setEnabled(False)
+            return
+
+        for path in recents:
+            action = menu.addAction(path)
+            # `path=path` fige la valeur : sans ça, toutes les actions
+            # partageraient la dernière valeur de la boucle (piège
+            # classique des fermetures dans une boucle Python/Qt).
+            action.triggered.connect(
+                lambda checked=False, path=path: self.open_recent_repository(
+                    path
+                )
+            )
+
+    def open_recent_repository(self, path: str) -> None:
+        """Ouvre `path` dans une NOUVELLE fenêtre, sans toucher la courante.
+
+        La référence est gardée dans `_recent_windows` : sans elle, le
+        ramasse-miettes détruirait la fenêtre aussitôt (même piège que
+        `_detail_windows`, cf. `open_commit_detail`).
+        """
+        repository = find_repository(path)
+        if repository is None:
+            self.statusBar().showMessage(
+                f"Could not open {path}", 15000
+            )
+            return
+
+        window = MainWindow(repository, settings=self.settings)
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        window.destroyed.connect(self._forget_recent_window)
+        self._recent_windows.append(window)
+        window.show()
+
+    def _forget_recent_window(self, window=None) -> None:
+        """Retire de la liste les fenêtres de dépôts récents déjà détruites.
+
+        Même précaution que `_forget_detail_window` : on filtre sur la
+        validité plutôt que de comparer `window` directement, car son
+        wrapper Python peut survivre à l'objet C++ détruit.
+        """
+        self._recent_windows = [
+            candidate
+            for candidate in self._recent_windows
+            if candidate is not window and _still_alive(candidate)
+        ]
 
     def focus_search(self) -> None:
         """Place le curseur dans le champ de recherche.
@@ -401,34 +597,47 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             )
 
     def _build_actions(self) -> None:
-        """Actions de navigation (§7.1). Qt traduit ⌘ depuis Ctrl sur macOS."""
-        specs = [
-            ("Zoom avant", QKeySequence.StandardKey.ZoomIn, self.view.zoom_in),
-            ("Zoom arrière", QKeySequence.StandardKey.ZoomOut, self.view.zoom_out),
-            ("Zoom 100 %", QKeySequence("Ctrl+0"), self.view.reset_zoom),
-            ("Ajuster à la fenêtre", QKeySequence("Ctrl+9"), self.view.fit_to_window),
-            ("Rafraîchir", QKeySequence.StandardKey.Refresh, self.refresh),
-            ("Commit…", QKeySequence("Ctrl+K"), self.open_commit_window),
-            ("Rechercher", QKeySequence("Ctrl+F"), self.focus_search),
-            ("Push", QKeySequence("Ctrl+P"), self._start_push),
-            ("Pull", QKeySequence("Ctrl+L"), self._start_pull),
-            # À côté de Pull : c'est la même famille de gestes, et Fetch
-            # n'était atteignable que par le clic droit.
-            ("Fetch", QKeySequence("Ctrl+Shift+F"), self._start_fetch),
-        ]
+        """Actions de navigation (§7.1), raccourcis lus du catalogue.
 
-        for label, shortcut, slot in specs:
-            action = QAction(label, self)
-            action.setShortcut(shortcut)
-            action.triggered.connect(slot)
+        Les séquences vivaient ici dans un littéral ; elles sont désormais
+        dans `core/shortcuts.py`, ce qui permet de les surcharger depuis
+        les préférences. Qt traduit « Ctrl » en ⌘ sur macOS.
+        """
+        slots = {
+            "zoom_in": self.view.zoom_in,
+            "zoom_out": self.view.zoom_out,
+            "zoom_reset": self.view.reset_zoom,
+            "fit_to_window": self.view.fit_to_window,
+            "refresh": self.refresh,
+            "commit": self.open_commit_window,
+            "search": self.focus_search,
+            "push": self._start_push,
+            "pull": self._start_pull,
+            "fetch": self._start_fetch,
+        }
+
+        self.actions_by_id: dict[str, QAction] = {}
+        for spec in CATALOGUE:
+            action = QAction(spec.label, self)
+            action.triggered.connect(slots[spec.action_id])
             self.addAction(action)
             self.toolbar.addAction(action)
-            if label == "Push":
-                self.push_action = action
-            if label == "Pull":
-                self.pull_action = action
-            if label == "Fetch":
-                self.fetch_action = action
+            self.actions_by_id[spec.action_id] = action
+
+        # Ces trois-là sont manipulées ailleurs (activation/désactivation
+        # pendant une opération réseau) : on garde les attributs nommés.
+        self.push_action = self.actions_by_id["push"]
+        self.pull_action = self.actions_by_id["pull"]
+        self.fetch_action = self.actions_by_id["fetch"]
+
+        self.apply_shortcuts(self.settings.resolved_shortcuts())
+
+    def apply_shortcuts(self, resolved: dict[str, str]) -> None:
+        """Applique les séquences aux actions, sans relancer l'app."""
+        for action_id, sequence in resolved.items():
+            action = self.actions_by_id.get(action_id)
+            if action is not None:
+                action.setShortcut(QKeySequence(sequence))
 
     def _update_status(self) -> None:
         if self.state is None:
@@ -558,6 +767,14 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         self.statusBar().showMessage(
             result.summary or (result.git_error or ""), 15000
         )
+
+    def open_shortcuts_window(self) -> None:
+        """Fenêtre « Keyboard Shortcuts » (§6.2)."""
+        from tortoisepy.ui.shortcuts_window import ShortcutsWindow
+
+        fenetre = ShortcutsWindow(self.settings, self)
+        fenetre.shortcuts_changed.connect(self.apply_shortcuts)
+        fenetre.exec()
 
     def start_rebase_onto(self) -> None:
         """Demande la cible, puis rebase la branche courante dessus.

@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from tortoisepy.core.operations import PROTECTED_BRANCHES
 from tortoisepy.core.model import DisplayNode, NodeKind, RefType
+from tortoisepy.core.operations import PROTECTED_BRANCHES, local_name_for
 from tortoisepy.core.state import RepositoryState
 
 
@@ -99,7 +99,14 @@ def _single_node_menu(
     # checkout et merge même vers les voisines (signalé par l'utilisateur).
     others = [b for b in _local_branches(node) if b != state.head_branch]
 
-    can_checkout = bool(others) and not busy
+    # Une distante est une cible légitime depuis la phase 21 : le checkout
+    # crée la locale du même nom. Un nœud qui n'en portait aucune avait
+    # l'entrée grisée, obligeant à passer par « Branch from revision… ».
+    distantes_utiles = [
+        d for d in _remote_branches(node)
+        if local_name_for(d) != state.head_branch
+    ]
+    can_checkout = bool(others or distantes_utiles) and not busy
     can_merge = bool(others) and not busy
     can_modify_branch = is_branch and not busy
 
@@ -111,6 +118,7 @@ def _single_node_menu(
             enabled=can_checkout,
             needs_confirmation=dirty,
             exclude=state.head_branch,
+            include_remotes=True,
         ),
         SEPARATOR,
         MenuEntry(
@@ -375,6 +383,7 @@ def _branch_entry(
     needs_confirmation: bool = False,
     exclude: str | None = None,
     only: set[str] | None = None,
+    include_remotes: bool = False,
 ) -> MenuEntry:
     """Entrée simple, ou sous-menu quand le nœud porte plusieurs branches.
 
@@ -391,10 +400,26 @@ def _branch_entry(
     branche distante n'a de sens que pour celles qui existent vraiment
     sur un serveur, et un sous-menu proposant les autres mènerait à un
     échec garanti.
+
+    `include_remotes` ajoute les branches distantes aux cibles (phase 21).
+    Réservé au checkout : basculer sur `origin/x` crée la locale `x`, ce
+    qui a du sens, alors que fusionner ou supprimer une distante n'a pas
+    la même signification et garde son chemin propre.
     """
     branches = [b for b in _local_branches(node) if b != exclude]
     if only is not None:
         branches = [b for b in branches if b in only]
+
+    if include_remotes:
+        # Une distante dont la locale est déjà proposée ferait doublon :
+        # « test-branch » et « origin/test-branch » mènent au même endroit.
+        deja = set(branches)
+        branches += [
+            distante
+            for distante in _remote_branches(node)
+            if local_name_for(distante) not in deja
+            and local_name_for(distante) != exclude
+        ]
 
     if len(branches) <= 1:
         return MenuEntry(

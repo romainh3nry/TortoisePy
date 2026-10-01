@@ -63,17 +63,40 @@ def test_a_new_commit_invalidates_the_cache(repo):
     assert cache.get(pygit2.Repository(repo.path), build) == "GRAPHE 2"
 
 
-def test_switching_head_invalidates_the_cache(repo):
-    """Review Focus 5 : le nœud courant change l'affichage."""
+def test_switching_head_moves_the_head_label(repo):
+    """Review Focus 5 : le nœud courant change l'affichage.
+
+    L'exigence est inchangée — le graphe rendu doit refléter la nouvelle
+    branche courante. Le MOYEN a changé en phase 22 : on ne reconstruit
+    plus, on déplace la ref `HEAD`. Mesuré sur un dépôt réel de 713 refs,
+    la reconstruction coûtait 2185 ms pour un graphe aux arêtes
+    identiques.
+
+    Ce test vérifie donc le résultat visible, pas le nombre d'appels à
+    `build` — un test qui compterait les reconstructions interdirait
+    l'optimisation sans rien protéger de plus.
+    """
+    from tortoisepy.core.graph import build_graph
+    from tortoisepy.core.model import RefType
+
     cache = GraphCache()
-    appels = []
-    build = lambda r: appels.append(1) or f"GRAPHE {len(appels)}"
 
     run_git(repo.workdir, "branch", "autre")
-    cache.get(repo, build)
+    avant = cache.get(repo, build_graph)
     run_git(repo.workdir, "checkout", "-q", "autre")
+    apres = cache.get(pygit2.Repository(repo.path), build_graph)
 
-    assert cache.get(pygit2.Repository(repo.path), build) == "GRAPHE 2"
+    def porteur_de_head(graphe):
+        for noeud in graphe.nodes:
+            if any(r.type is RefType.HEAD for r in noeud.refs):
+                return noeud.oid
+        return None
+
+    attendu = str(pygit2.Repository(repo.path).head.target)
+    assert porteur_de_head(apres) == attendu, (
+        "la ref HEAD doit suivre la branche courante"
+    )
+    assert porteur_de_head(avant) is not None
 
 
 def test_an_operation_in_progress_invalidates_the_cache(repo):

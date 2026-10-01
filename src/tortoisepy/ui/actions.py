@@ -18,7 +18,7 @@ from tortoisepy.core import stash_ops
 from tortoisepy.core.model import DisplayNode, RefType
 from tortoisepy.core.results import OperationResult, failed, succeeded
 from tortoisepy.core.state import RepositoryState
-from tortoisepy.ui.dialogs import confirmation_for
+from tortoisepy.ui.dialogs import ConfirmationRequest, confirmation_for
 
 
 @dataclass(frozen=True)
@@ -74,10 +74,72 @@ def execute_action(action: str, ctx: ActionContext) -> OperationResult | None:
     return handler(ctx)
 
 
+_MAX_COMMITS_LISTES = 5
+"""Au-delà, la fenêtre déborderait l'écran et ne se lirait plus."""
+
+
+def _avertissement_ecrasement(
+    ctx: ActionContext, distante: str, locale: str
+) -> ConfirmationRequest | None:
+    """Demande de confirmation avant d'écraser une locale existante.
+
+    `None` quand il n'y a rien à perdre (§D57) : la locale n'existe pas,
+    ou elle ne porte aucun commit absent de la distante. Avertir alors
+    serait une alerte qui ne protège rien — et une alerte inutile finit
+    par être validée sans être lue.
+
+    Le message **nomme** les commits détruits (§D56). « La branche sera
+    écrasée » ne dit pas si l'on perd une semaine de travail ou rien.
+    """
+    if ctx.repository.branches.local.get(locale) is None:
+        return None
+
+    perdus = operations.local_commits_ahead(ctx.repository, locale, distante)
+    if not perdus:
+        return None
+
+    lignes = [f"    {oid}  {sujet}" for oid, sujet in perdus[:_MAX_COMMITS_LISTES]]
+    if len(perdus) > _MAX_COMMITS_LISTES:
+        lignes.append(f"    … and {len(perdus) - _MAX_COMMITS_LISTES} more")
+
+    pluriel = "commit" if len(perdus) == 1 else "commits"
+    return ConfirmationRequest(
+        title=f"Local branch « {locale} » already exists",
+        message=(
+            f"Checking out {distante} will reset it to the remote, "
+            f"discarding {len(perdus)} local {pluriel} that "
+            f"{'was' if len(perdus) == 1 else 'were'} never pushed:\n\n"
+            + "\n".join(lignes)
+            + "\n\nThis cannot be undone from the graph."
+        ),
+        destructive=True,
+    )
+
+
 def _checkout_branch(ctx: ActionContext) -> OperationResult | None:
+    """Bascule sur une branche, locale ou distante (phase 21).
+
+    Une distante crée la locale du même nom. Si cette locale existe déjà
+    et porte des commits non poussés, l'écrasement est confirmé ici et
+    non dans `confirmation_for` : celle-ci est une fonction pure, sans
+    accès au dépôt, donc incapable de compter ce qui serait détruit.
+    """
     if ctx.branch is None:
         return operations.checkout_commit(ctx.repository, ctx.node.oid)
-    return operations.checkout_branch(ctx.repository, ctx.branch)
+
+    nom = ctx.branch
+    est_distante = ctx.repository.branches.local.get(nom) is None and (
+        ctx.repository.branches.remote.get(nom) is not None
+    )
+    if not est_distante:
+        return operations.checkout_branch(ctx.repository, nom)
+
+    locale = operations.local_name_for(nom)
+    demande = _avertissement_ecrasement(ctx, nom, locale)
+    if demande is not None and not ctx.confirm(ctx.parent, demande):
+        return None
+
+    return operations.checkout_branch(ctx.repository, nom, overwrite=True)
 
 
 def _create_branch(ctx: ActionContext) -> OperationResult | None:

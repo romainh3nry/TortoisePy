@@ -52,13 +52,13 @@ It is built on [pygit2](https://www.pygit2.org/) (libgit2) and
 **macOS and Linux**
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.2.0/scripts/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.3.0/scripts/install.sh | sh
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.2.0/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.3.0/scripts/install.ps1 | iex
 ```
 
 The script installs [uv](https://docs.astral.sh/uv/) if you don't have it,
@@ -75,7 +75,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh          # macOS / Linux
 winget install astral-sh.uv                              # Windows
 
 # 2. Install tortoisePy
-uv tool install git+https://github.com/romainh3nry/TortoisePy@v0.2.0
+uv tool install git+https://github.com/romainh3nry/TortoisePy@v0.3.0
 ```
 
 ### Why uv rather than pip
@@ -94,10 +94,10 @@ Re-run the install command — it always points at the latest released tag:
 
 ```bash
 # macOS / Linux
-curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.2.0/scripts/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.3.0/scripts/install.sh | sh
 
 # Windows
-irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.2.0/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.3.0/scripts/install.ps1 | iex
 ```
 
 > **`uv tool upgrade tortoisepy` will not work here.** The install pins an
@@ -190,6 +190,31 @@ start:
 - **Tests come first.** Every behaviour in this project was specified, tested,
   and then verified against a real repository — including the ones that look
   obvious.
+
+## Releasing
+
+The version lives in **one place**: the `version` field of `pyproject.toml`.
+Everything else — the install URLs in this README, the `VERSION` variable in
+both installers — is a copy, and one script rewrites them all:
+
+```bash
+python scripts/set-version.py X.Y.Z
+```
+
+It prints what it changed, and leaves Git alone. Commit, then tag:
+
+```bash
+git tag vX.Y.Z && git push origin vX.Y.Z
+```
+
+The tag matters: the install commands above point at it, so a release without
+one gives a 404.
+
+Why copies rather than a single value read at runtime: both installers run
+*before* anything is cloned, so `pyproject.toml` does not yet exist on the
+user's machine when `curl … | sh` starts. Their version has to be written in.
+Three tests keep the copies honest — one of them fails if a new file ever
+pins the version without being declared in the script.
 
 ## Licence
 
