@@ -64,6 +64,7 @@ from tortoisepy.ui.dialogs import (
     ask_pull_strategy,
     ask_reset_mode,
     confirm,
+    confirmation_for,
     show_error,
 )
 from tortoisepy.ui.graph_view import GraphView
@@ -165,6 +166,9 @@ class MainWindow(QMainWindow):
         # dépend de la longueur des noms de branches.
         self.commit_panel = CommitPanel(self)
         self.commit_panel.commit_activated.connect(self.open_commit_detail)
+        self.commit_panel.context_menu_requested.connect(
+            self._show_panel_menu
+        )
         # Le champ appartient au panneau (il en épouse la largeur) ; la
         # fenêtre s'y branche sans le posséder.
         self.search_field = self.commit_panel.search_field
@@ -699,6 +703,80 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
 
         self.branch_label.setText(texte)
         self.branch_label.setToolTip(texte.removeprefix("⎇ "))
+
+    def _show_panel_menu(self, oid: str, position) -> None:
+        """Menu contextuel du panneau latéral (§phase 23).
+
+        Le graphe ne permettait d'agir que sur la POINTE d'une branche :
+        `ctx.node.oid` désigne le nœud, et les commits plus anciens que le
+        panneau affiche étaient hors de portée (signalé par l'utilisateur).
+        """
+        entrees = self.commit_panel.menu_for(oid)
+        if not entrees:
+            return
+
+        menu = QMenu(self)
+        for entree in entrees:
+            action = menu.addAction(entree.label)
+            action.triggered.connect(
+                lambda checked=False, nom=entree.action, cible=entree.oid:
+                self.run_panel_action(nom, cible)
+            )
+        menu.exec(position)
+
+    def run_panel_action(self, action: str, oid: str) -> None:
+        """Exécute une action du panneau sur UN commit précis.
+
+        Le cherry-pick s'applique sur la branche courante, comme git et
+        TortoiseGit : appliquer ailleurs imposerait un checkout, donc de
+        quitter sa branche — bien plus que ce qu'on attend d'un clic sur
+        « Cherry-pick ».
+        """
+        if action == "copy_commit_hash":
+            self._copy_to_clipboard(oid)
+            self.statusBar().showMessage(f"{oid[:8]} copié", 5000)
+            return
+
+        if action == "show_commit_detail":
+            self.open_commit_detail(oid)
+            return
+
+        if self.state is None:
+            return
+
+        demande = confirmation_for(action, oid[:8], self.state)
+        if demande is not None and not confirm(self, demande):
+            return
+
+        with self.watcher.suspended():
+            if action == "cherry_pick_commit":
+                resultat = operations.cherry_pick(self.repository, oid)
+            elif action == "revert_commit_oid":
+                resultat = operations.revert_commit(self.repository, oid)
+            else:
+                return
+
+        if resultat.needs_refresh:
+            self._graph_cache.invalidate()
+            self.refresh()
+        self.statusBar().showMessage(resultat.summary, 15000)
+
+        if resultat.success:
+            return
+
+        # Un conflit n'est pas une erreur à lire : c'est un travail à
+        # faire. Signalé par l'utilisateur — le message annonçait des
+        # conflits sans offrir aucun moyen de les voir ni de les résoudre.
+        #
+        # Deux formes à reconnaître : « conflits sur : … » que compose
+        # `operations`, et le « conflict » que rend libgit2. Ne tester que
+        # l'anglais laissait passer le cas le plus courant (vérifié).
+        message = (resultat.git_error or "").lower()
+        if "conflit" in message or "conflict" in message:
+            self.open_conflict_window()
+            return
+
+        show_error(self, resultat)
 
     def _show_context_menu(self, position) -> None:
         """Construit le QMenu à partir du modèle (§7.3)."""
