@@ -121,11 +121,19 @@ topy                   # same as "topy ."
 Like `git` itself, `topy` walks up the directory tree — running it from
 `my-project/src/utils/` opens `my-project`.
 
+`topy` hands your shell straight back: the window opens in a detached
+process, so the terminal stays yours. Closing the last window ends the
+process — nothing is left running behind it.
+
 ```bash
+topy --wait .          # keep the terminal busy until the window closes
 topy --help            # usage
 topy --version         # version
 topy --install-icon    # install the Dock icon (macOS)
 ```
+
+Use `--wait` when you need the window's exit to gate the next step of a
+script.
 
 ## What you can do from the graph
 
