@@ -159,7 +159,7 @@ class MainWindow(QMainWindow):
         # geste que sélectionner, donc le plus direct. Le double-clic reste
         # branché — il ne coûte rien et fait la même chose.
         self.view.selection_changed.connect(self._on_selection_changed)
-        self.view.node_double_clicked.connect(self._show_commits)
+        self.view.node_double_clicked.connect(self._on_node_double_clicked)
 
         # Le panneau révèle ce que la compression masque (§4.2.1). Un
         # splitter plutôt qu'une largeur fixe : la place à donner au graphe
@@ -316,6 +316,12 @@ class MainWindow(QMainWindow):
             options_key=(options.show_tags,),
         )
         self.state = read_state(self.repository)
+
+        # Le nœud de travail est greffé APRÈS le cache : il dépend de
+        # l'arbre de travail, qui change bien plus souvent que la
+        # topologie. L'inclure dans le graphe mis en cache obligerait à
+        # tout reconstruire à chaque frappe dans un éditeur.
+        self.graph = _avec_noeud_de_travail(self.graph, self.state)
         unpushed = unpushed_oids(self.repository)
         # Le mesureur est refait à chaque rafraîchissement : la branche
         # courante change au gré des checkouts, et elle décide si la
@@ -396,8 +402,38 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         else:
             self.commit_panel.clear()
 
+    def _on_node_double_clicked(self, oid: str) -> None:
+        """Double-clic : le geste explicite.
+
+        Signalé par l'utilisateur : l'application gelait au simple CLIC
+        sur le nœud de travail. Le clic passe par `_on_selection_changed`,
+        qui appelait `_show_commits` — lequel ouvrait la fenêtre de commit.
+        Sur un gros dépôt, sa construction scanne tout l'arbre de travail.
+
+        Ouvrir une fenêtre doit rester un geste délibéré.
+        """
+        from tortoisepy.core.model import WORKING_OID
+
+        if oid == WORKING_OID:
+            self.open_commit_window()
+            return
+
+        self._show_commits(oid)
+
     def _show_commits(self, oid: str) -> None:
-        """Double-clic : liste les commits masqués par l'arête entrante."""
+        """Liste les commits masqués par l'arête entrante.
+
+        Le nœud « Uncommitted changes » n'en a aucun : on vide le panneau
+        plutôt que d'y laisser l'historique du nœud précédent. Son OID est
+        par ailleurs une sentinelle que pygit2 REFUSE (`InvalidError`,
+        vérifié) — la lui passer planterait.
+        """
+        from tortoisepy.core.model import WORKING_OID
+
+        if oid == WORKING_OID:
+            self.commit_panel.clear()
+            return
+
         if self.graph is None:
             return
 
@@ -1401,3 +1437,41 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             return
 
         show_error(self, result)
+
+
+def _avec_noeud_de_travail(graph, state):
+    """Greffe le nœud « Uncommitted changes » au-dessus de la branche
+    courante, s'il y a du travail en attente.
+
+    Demandé par l'utilisateur : une pastille faisait trop de bruit sur un
+    rendu soigné. Le nœud fantôme dit littéralement de quoi il s'agit, et
+    il est cliquable — l'information et l'action au même endroit.
+
+    Rend le graphe inchangé quand l'arbre est propre, ce qui est le cas le
+    plus fréquent : aucun nœud en trop, aucun coût.
+    """
+    from dataclasses import replace
+
+    from tortoisepy.core.model import (
+        DisplayNode, GraphEdge, NodeKind, WORKING_OID,
+    )
+
+    if graph is None or state is None or state.head_oid is None:
+        return graph
+    if not (state.has_unstaged_changes or state.has_staged_changes):
+        return graph
+
+    # Le nœud courant doit exister dans le graphe : sans lui, l'arête
+    # pointerait dans le vide.
+    if graph.node(state.head_oid) is None:
+        return graph
+
+    travail = DisplayNode(oid=WORKING_OID, kind=NodeKind.WORKING, refs=())
+    arete = GraphEdge(
+        ancestor=state.head_oid, descendant=WORKING_OID, skipped=()
+    )
+    return replace(
+        graph,
+        nodes=graph.nodes + (travail,),
+        edges=graph.edges + (arete,),
+    )

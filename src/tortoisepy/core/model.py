@@ -23,6 +23,11 @@ class RefType(Enum):
     STASH = "stash"
 
 
+WORKING_OID = "0" * 39 + "w"
+"""OID du nœud de travail. Aucun objet git ne peut porter cette valeur :
+40 caractères dont un « w », impossible en hexadécimal."""
+
+
 class NodeKind(Enum):
     REF = "ref"
     """Nœud portant au moins une ref."""
@@ -32,6 +37,14 @@ class NodeKind(Enum):
 
     STASH = "stash"
     """Stash, rattaché hors du calcul topologique (§4.1)."""
+
+    WORKING = "working"
+    """Travail non commité — ne correspond à AUCUN commit.
+
+    Son OID est la sentinelle `WORKING_OID`, qui ne désigne aucun objet
+    git. Tout ce qui manipule l'histoire (cherry-pick, reset, checkout)
+    doit l'exclure : agir sur un OID inexistant échouerait.
+    """
 
 
 @dataclass(frozen=True)

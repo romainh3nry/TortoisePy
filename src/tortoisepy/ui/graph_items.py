@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QGraphicsSimpleTextItem,
 )
 
-from tortoisepy.core.model import DisplayGraph, DisplayNode, GraphEdge
+from tortoisepy.core.model import DisplayGraph, DisplayNode, GraphEdge, NodeKind
 from tortoisepy.layout.metrics import LayoutResult, Placement
 from tortoisepy.ui import theme
 
@@ -114,7 +114,17 @@ class NodeItem(QGraphicsRectItem):
         self.setBrush(QBrush(theme.node_color(self.node, selected)))
         self.setPen(QPen(theme.PALETTE.border, theme.NODE_BORDER_WIDTH))
 
-        colour = theme.text_color(selected)
+        # Le nœud de travail garde un fond CLAIR même sélectionné : le
+        # blanc de sélection y serait invisible (signalé par
+        # l'utilisateur). Les autres nœuds gardent le comportement
+        # d'origine — `self.brush()` est la couleur du nœud ENTIER, pas
+        # celle de chaque bande, et s'en servir pour tous repeignait en
+        # blanc les étiquettes beiges d'un nœud rouge (régression
+        # signalée, capture à l'appui).
+        if self.node.kind is NodeKind.WORKING:
+            colour = theme.PALETTE.text
+        else:
+            colour = theme.text_color(selected)
         for child in self.childItems():
             if isinstance(child, QGraphicsSimpleTextItem):
                 child.setBrush(QBrush(colour))
@@ -161,6 +171,18 @@ class NodeItem(QGraphicsRectItem):
         rows = theme.ref_rows(self.node, self.current_branch)
         painter.setPen(self.pen())
 
+        if self.node.kind is NodeKind.WORKING:
+            # Bordure pointillée : il ne correspond à aucun commit, et le
+            # pointillé est la convention qui dit « pas encore réel ».
+            stylo = QPen(theme.WORKING_BORDER, 1.5)
+            stylo.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(stylo)
+            painter.setBrush(QBrush(theme.WORKING_FILL))
+            painter.drawRoundedRect(
+                self.rect(), theme.NODE_RADIUS, theme.NODE_RADIUS
+            )
+            return
+
         if self.isSelected() or len(rows) <= 1:
             # Un nœud sélectionné garde sa couleur unique (§4.3), et une
             # seule ligne n'a pas besoin d'être découpée.
@@ -180,6 +202,7 @@ class NodeItem(QGraphicsRectItem):
             painter.setBrush(QBrush(theme.UNPUSHED_MARKER))
             painter.setPen(QPen(theme.PALETTE.border, 1.0))
             painter.drawEllipse(centre, radius, radius)
+
 
 
 class EdgeItem(QGraphicsPathItem):

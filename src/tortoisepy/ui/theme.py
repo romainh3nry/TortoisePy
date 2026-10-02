@@ -52,6 +52,20 @@ PALETTE = Palette()
 
 
 UNPUSHED_MARKER = QColor(230, 140, 30)
+WORKING_FILL = QColor(248, 248, 248)
+WORKING_BORDER = QColor(140, 140, 140)
+WORKING_TEXT = QColor(90, 90, 90)
+"""Nœud « Uncommitted changes » : gris clair, bordure pointillée.
+
+Volontairement effacé — il signale, il ne réclame pas l'attention
+comme une branche.
+"""
+
+"""Travail non commité sur la branche courante.
+
+Bleu plutôt qu'orange : la pastille des commits non poussés est déjà
+orange, et les deux peuvent apparaître sur le même nœud.
+"""
 """Pastille des branches ayant des commits non poussés.
 
 Orange : ni le vert de HEAD, ni le jaune des branches locales, ni le rouge
@@ -146,9 +160,15 @@ def node_color(node: DisplayNode, selected: bool) -> QColor:
     La sélection prime sur le type : un nœud sélectionné est toujours rouge
     foncé, quelle que soit sa nature (§4.3).
     """
+    # Le nœud de travail garde son fond clair MÊME sélectionné : son
+    # `paint` l'impose de toute façon, et laisser la sélection renvoyer
+    # du rouge faisait passer le texte en blanc — invisible sur clair
+    # (signalé par l'utilisateur, capture à l'appui).
+    if node.kind is NodeKind.WORKING:
+        return WORKING_FILL
+
     if selected:
         return PALETTE.selected
-
     if node.kind is NodeKind.STASH:
         return PALETTE.stash
     if node.kind is NodeKind.JUNCTION:
@@ -191,6 +211,10 @@ def ref_rows(node: DisplayNode, current_branch: str | None = None) -> tuple[RefR
     `['develop', 'HEAD']` et un nœud détaché `['main', 'HEAD']` — même
     forme, sens opposé.
     """
+    if node.kind is NodeKind.WORKING:
+        # Jamais l'OID : c'est une sentinelle, elle n'apprendrait rien.
+        return (RefRow(label="Uncommitted changes", colour=WORKING_FILL),)
+
     if not node.refs:
         return (RefRow(label=node.oid[:8], colour=_kind_colour(node)),)
 
