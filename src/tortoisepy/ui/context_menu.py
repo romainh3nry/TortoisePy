@@ -241,7 +241,11 @@ def _single_node_menu(
         ),
     ]
 
-    if busy:
+    # Des conflits SANS opération en cours existent : vérifié, un index
+    # peut les porter alors que `.git/MERGE_HEAD` a disparu (fermeture
+    # brutale, nettoyage partiel). L'utilisateur était alors bloqué — le
+    # checkout refusait, et le menu ne proposait aucune sortie.
+    if busy or state.has_conflicts:
         entries.append(SEPARATOR)
         if state.has_conflicts:
             # Fermer la fenêtre de conflits ne les résout pas, et rien
@@ -256,9 +260,16 @@ def _single_node_menu(
                     enabled=True,
                 )
             )
+        # « Abort None » serait du charabia : sans opération nommée, on
+        # parle de ce que l'utilisateur voit — ses conflits.
+        libelle = (
+            f"Abort {state.operation_in_progress}"
+            if state.operation_in_progress
+            else "Discard conflicts and reset"
+        )
         entries.append(
             MenuEntry(
-                f"Abort {state.operation_in_progress}",
+                libelle,
                 "abort_operation",
                 enabled=True,
                 needs_confirmation=True,

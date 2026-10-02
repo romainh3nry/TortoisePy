@@ -7,6 +7,8 @@ qu'on ne peut pas rester coincé.
 
 from __future__ import annotations
 
+import pathlib
+
 import pygit2
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -233,15 +235,65 @@ class ConflictWindow(QMainWindow):
         self.theirs_button.setEnabled(remaining > 0)
 
 
-def _conflict_preview(repo: pygit2.Repository, path: str):
-    """Le fichier tel qu'il est, marqueurs compris.
+def _nom_des_cotes(repo: pygit2.Repository) -> tuple[str, str]:
+    """Noms des deux branches en conflit : (la nôtre, la leur).
 
-    Montrer le fichier de travail plutôt qu'un diff reconstruit : c'est ce
-    que l'utilisateur verra dans son éditeur, donc ce qu'il reconnaît.
+    `HEAD` et `4424f94…` ne disent rien à l'utilisateur. Git connaît
+    pourtant les noms — vérifié : la branche courante pour la nôtre,
+    `MERGE_MSG` (« Merge branch 'TEST' ») pour la leur.
+    """
+    import re
+
+    try:
+        notre = repo.head.shorthand if not repo.head_is_unborn else "HEAD"
+    except (pygit2.GitError, KeyError, ValueError):
+        notre = "HEAD"
+
+    leur = "incoming"
+
+    # En rebase, « ours » désigne la CIBLE et « theirs » le commit rejoué
+    # — l'inverse du merge (§9). Le champ est `onto_label`, pas `onto` :
+    # une première version visait le mauvais nom, et un `except` trop
+    # large le masquait (les noms restaient « HEAD » / « incoming »).
+    from tortoisepy.core.rebase import rebase_state
+
+    etat = rebase_state(repo)
+    if etat.in_progress:
+        # `onto_label` et `branch` peuvent être vides selon le backend de
+        # rebase employé (vérifié : git 2.26+ utilise le backend « merge »,
+        # où `rebase_state` ne les renseigne pas toujours). On reste alors
+        # explicite sur les RÔLES, qui eux ne changent pas.
+        cible = etat.onto_label or "the branch you rebase onto"
+        rejouee = etat.branch or "the commit being replayed"
+        return cible, rejouee
+
+    chemin = pathlib.Path(repo.path) / "MERGE_MSG"
+    try:
+        premiere = chemin.read_text(encoding="utf-8").splitlines()[0]
+        trouve = re.search(r"'([^']+)'", premiere)
+        if trouve:
+            leur = trouve.group(1)
+    except (OSError, IndexError):
+        pass
+
+    return notre, leur
+
+
+def _conflict_preview(repo: pygit2.Repository, path: str):
+    """Le fichier en conflit, ses marqueurs remplacés par des en-têtes.
+
+    Les marqueurs bruts de git (`<<<<<<< HEAD`, `=======`) n'apprennent
+    rien à qui ne les connaît pas, et le code couleur les contredisait :
+    vert pour notre version, rouge pour la leur, alors que vert et rouge
+    veulent dire « ajouté » et « supprimé » partout ailleurs (signalé par
+    l'utilisateur).
+
+    On nomme donc chaque côté, en reprenant les mots des boutons —
+    « yours » pour « Keep mine », « theirs » pour « Take theirs ».
     """
     import os
 
-    from tortoisepy.core.changes import DiffHunk, DiffLine, FileDiff
+    from tortoisepy.core.changes import DiffHunk, FileDiff
 
     full = os.path.join(repo.workdir or "", path)
     try:
@@ -250,18 +302,24 @@ def _conflict_preview(repo: pygit2.Repository, path: str):
     except OSError:
         return FileDiff(path=path)
 
+    notre, leur = _nom_des_cotes(repo)
     return FileDiff(
         path=path,
-        hunks=(DiffHunk(header=f"@@ {path} @@", lines=_colour(contenu)),),
+        hunks=(
+            DiffHunk(
+                header=f"@@ {path} @@",
+                lines=_colour(contenu, notre, leur),
+            ),
+        ),
     )
 
 
-def _colour(lines: list[str]) -> tuple:
-    """Marque le bloc local comme un ajout et le bloc distant comme un retrait.
+def _colour(lines: list[str], notre: str = "HEAD", leur: str = "incoming"):
+    """Remplace les marqueurs par des en-têtes nommés, et colore chaque côté.
 
-    `DiffView` colore déjà `+` en vert et `-` en rouge : en réutilisant ces
-    origines, l'utilisateur voit d'un coup d'œil quelle moitié vient de chez
-    lui. Les lignes de marqueur elles-mêmes restent neutres.
+    Les en-têtes portent le nom de la branche ET le mot du bouton qui la
+    garde : devant deux versions concurrentes, l'utilisateur sait laquelle
+    est la sienne et sur quoi cliquer.
     """
     from tortoisepy.core.changes import DiffLine
 
@@ -270,15 +328,19 @@ def _colour(lines: list[str]) -> tuple:
     for line in lines:
         if line.startswith("<<<<<<<"):
             side = "+"          # début de NOTRE version
-            coloured.append(DiffLine(origin=" ", content=line))
+            coloured.append(DiffLine(
+                origin=" ", content=f"▼ yours — {notre}"
+            ))
             continue
         if line.startswith("======="):
             side = "-"          # bascule vers LEUR version
-            coloured.append(DiffLine(origin=" ", content=line))
+            coloured.append(DiffLine(
+                origin=" ", content=f"▼ theirs — {leur}"
+            ))
             continue
         if line.startswith(">>>>>>>"):
             side = " "
-            coloured.append(DiffLine(origin=" ", content=line))
+            coloured.append(DiffLine(origin=" ", content="▲ end of conflict"))
             continue
         coloured.append(DiffLine(origin=side, content=line))
     return tuple(coloured)

@@ -184,7 +184,7 @@ Stated up front so you don't go looking:
 git clone https://github.com/romainh3nry/TortoisePy
 cd TortoisePy
 uv venv && uv pip install -e ".[dev]"
-uv run pytest                    # 992 tests
+uv run pytest
 uv run topy .
 ```
 
