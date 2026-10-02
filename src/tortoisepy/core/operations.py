@@ -260,10 +260,19 @@ def abort_operation(repo: pygit2.Repository) -> OperationResult:
     from tortoisepy.core.state import read_state
 
     state = read_state(repo)
-    if state.operation_in_progress is None:
+    if state.operation_in_progress is None and not state.has_conflicts:
         return failed(
             "Abandon", "no operation in progress", repository_changed=False
         )
+
+    # Des conflits SANS opération en cours : l'index les porte alors que
+    # `.git/MERGE_HEAD` a disparu (fermeture brutale, nettoyage partiel).
+    # Vérifié — l'utilisateur était bloqué : le checkout refusait avec
+    # « unresolved conflicts exist in the index », et cette fonction
+    # répondait « no operation in progress ». Aucune sortie.
+    #
+    # Le `reset(HARD)` ci-dessous suffit à vider l'index de ses conflits ;
+    # il faut seulement accepter d'y venir.
 
     # Un rebase ne s'abandonne PAS ainsi. `state_cleanup()` supprime
     # `.git/rebase-merge` et `reset(HARD)` remet la HEAD détachée sur
@@ -279,7 +288,9 @@ def abort_operation(repo: pygit2.Repository) -> OperationResult:
 
     repo.state_cleanup()
     repo.reset(repo.head.target, ResetMode.HARD)
-    return succeeded(f"{state.operation_in_progress} abandonné")
+
+    quoi = state.operation_in_progress or "conflits"
+    return succeeded(f"{quoi} abandonné")
 
 
 @guarded("Réinitialisation", changed_on_error=True)
