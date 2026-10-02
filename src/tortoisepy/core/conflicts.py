@@ -116,10 +116,30 @@ def conclude_merge(repo: pygit2.Repository) -> OperationResult:
         )
 
     their_head = _merge_head(repo)
+
+    # Sans `MERGE_HEAD`, le second parent est INCONNU. Signalé par
+    # l'utilisateur : après avoir résolu ses conflits, « Resolve »
+    # répondait « no merge in progress » et ses résolutions restaient
+    # bloquées dans l'index — seul « Abort » restait, qui les aurait
+    # détruites.
+    #
+    # On commite alors ordinairement, avec un seul parent : deviner le
+    # second mentirait sur l'histoire du dépôt. Le travail est sauvé,
+    # l'histoire reste honnête.
     if their_head is None:
-        return failed(
-            "Fusion", "no merge in progress", repository_changed=False
+        if not repo.status():
+            return failed(
+                "Fusion", "nothing to commit", repository_changed=False
+            )
+
+        signature = _signature(repo)
+        tree = repo.index.write_tree()
+        repo.create_commit(
+            "HEAD", signature, signature,
+            "Conflict resolution", tree, [repo.head.target],
         )
+        repo.state_cleanup()
+        return succeeded("Resolutions committed")
 
     signature = _signature(repo)
     tree = repo.index.write_tree()

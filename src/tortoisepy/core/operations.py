@@ -15,7 +15,7 @@ import stat
 import subprocess
 
 import pygit2
-from pygit2.enums import FileMode
+from pygit2.enums import FetchPrune, FileMode
 
 from tortoisepy.core.credentials import credentials_for, is_https
 from tortoisepy.core.model import Oid
@@ -260,10 +260,19 @@ def abort_operation(repo: pygit2.Repository) -> OperationResult:
     from tortoisepy.core.state import read_state
 
     state = read_state(repo)
-    if state.operation_in_progress is None:
+    if state.operation_in_progress is None and not state.has_conflicts:
         return failed(
             "Abandon", "no operation in progress", repository_changed=False
         )
+
+    # Des conflits SANS opération en cours : l'index les porte alors que
+    # `.git/MERGE_HEAD` a disparu (fermeture brutale, nettoyage partiel).
+    # Vérifié — l'utilisateur était bloqué : le checkout refusait avec
+    # « unresolved conflicts exist in the index », et cette fonction
+    # répondait « no operation in progress ». Aucune sortie.
+    #
+    # Le `reset(HARD)` ci-dessous suffit à vider l'index de ses conflits ;
+    # il faut seulement accepter d'y venir.
 
     # Un rebase ne s'abandonne PAS ainsi. `state_cleanup()` supprime
     # `.git/rebase-merge` et `reset(HARD)` remet la HEAD détachée sur
@@ -279,7 +288,9 @@ def abort_operation(repo: pygit2.Repository) -> OperationResult:
 
     repo.state_cleanup()
     repo.reset(repo.head.target, ResetMode.HARD)
-    return succeeded(f"{state.operation_in_progress} abandonné")
+
+    quoi = state.operation_in_progress or "conflits"
+    return succeeded(f"{quoi} abandonné")
 
 
 @guarded("Réinitialisation", changed_on_error=True)
@@ -304,9 +315,45 @@ def reset_to(
     return succeeded(f"Branche réinitialisée sur {oid[:8]} ({mode})")
 
 
+def _conclure_application(
+    repo: pygit2.Repository, message: str, resume: str
+) -> OperationResult:
+    """Transforme l'index préparé en commit, et nettoie l'état.
+
+    **`repo.cherrypick` et `repo.revert` NE COMMITENT PAS** : elles
+    préparent l'index et laissent le dépôt en cours d'opération. Vérifié —
+    sans cette conclusion, l'application annonçait « Commit appliqué »
+    alors que HEAD n'avait pas bougé et que le travail restait en attente :
+
+        resultat : success=True  Commit fcd76914 appliqué
+        HEAD avant : 582f0f83
+        HEAD apres : 582f0f83      <- rien n'a ete commite
+        statut : {'f.txt': INDEX_NEW}
+
+    `state_cleanup` retire `CHERRY_PICK_HEAD` / `REVERT_HEAD` : sans lui,
+    git considère l'opération encore en cours et le menu propose un
+    « Abort » pour une opération déjà terminée.
+    """
+    index = repo.index
+    index.write()
+    arbre = index.write_tree()
+
+    signature = _signature(repo)
+    repo.create_commit(
+        "HEAD", signature, signature, message, arbre, [repo.head.target]
+    )
+    repo.state_cleanup()
+    return succeeded(resume)
+
+
 @guarded("Cherry-pick", changed_on_error=True)
 def cherry_pick(repo: pygit2.Repository, oid: Oid) -> OperationResult:
-    """Applique un commit sur la branche courante."""
+    """Applique un commit sur la branche courante, et le commite.
+
+    Cherry-pick **copie** : le commit d'origine reste sur sa branche, et
+    la copie reçoit un nouvel identifiant. Git voit donc deux commits là
+    où l'utilisateur voit un seul changement.
+    """
     commit = _commit(repo, oid)
     repo.cherrypick(commit.id)
 
@@ -318,7 +365,9 @@ def cherry_pick(repo: pygit2.Repository, oid: Oid) -> OperationResult:
             repository_changed=True,
         )
 
-    return succeeded(f"Commit {oid[:8]} appliqué")
+    return _conclure_application(
+        repo, commit.message, f"Commit {oid[:8]} appliqué"
+    )
 
 
 @guarded("Revert", changed_on_error=True)
@@ -335,7 +384,12 @@ def revert_commit(repo: pygit2.Repository, oid: Oid) -> OperationResult:
             repository_changed=True,
         )
 
-    return succeeded(f"Commit {oid[:8]} annulé")
+    return _conclure_application(
+        repo,
+        f'Revert "{commit.message.splitlines()[0]}"\n\n'
+        f"This reverts commit {oid}.\n",
+        f"Commit {oid[:8]} annulé",
+    )
 
 
 def _conflicted_paths(repo: pygit2.Repository) -> tuple[str, ...]:
@@ -421,6 +475,7 @@ class FetchCallbacks(pygit2.RemoteCallbacks):
         self._on_progress = on_progress
         self.new_refs: list[str] = []
         self.updated_refs: list[str] = []
+        self.pruned_refs: list[str] = []
         self.received_objects = 0
         self.total_objects = 0
 
@@ -431,8 +486,11 @@ class FetchCallbacks(pygit2.RemoteCallbacks):
             self._on_progress(stats.received_objects, stats.total_objects)
 
     def update_tips(self, refname: str, old, new) -> None:
-        # Un OID nul signale une ref qui n'existait pas encore.
-        if old is None or str(old) == "0" * 40:
+        # Un OID nul en `new` signale une ref SUPPRIMÉE par le prune ;
+        # en `old`, une ref qui n'existait pas encore (vérifié).
+        if new is None or str(new) == "0" * 40:
+            self.pruned_refs.append(refname)
+        elif old is None or str(old) == "0" * 40:
             self.new_refs.append(refname)
         else:
             self.updated_refs.append(refname)
@@ -454,8 +512,9 @@ def _describe(callbacks_list: list["FetchCallbacks"]) -> str:
     """
     new = [_short_ref(r) for cb in callbacks_list for r in cb.new_refs]
     updated = [_short_ref(r) for cb in callbacks_list for r in cb.updated_refs]
+    pruned = [_short_ref(r) for cb in callbacks_list for r in cb.pruned_refs]
 
-    if not new and not updated:
+    if not new and not updated and not pruned:
         return ""
 
     parts: list[str] = []
@@ -467,6 +526,12 @@ def _describe(callbacks_list: list["FetchCallbacks"]) -> str:
         shown = ", ".join(sorted(updated)[:6])
         more = f" +{len(updated) - 6}" if len(updated) > 6 else ""
         parts.append(f"updated: {shown}{more}")
+    if pruned:
+        # Nommées comme les autres : une ref retirée en silence priverait
+        # l'utilisateur de l'information qui lui manquait justement.
+        shown = ", ".join(sorted(pruned)[:6])
+        more = f" +{len(pruned) - 6}" if len(pruned) > 6 else ""
+        parts.append(f"gone: {shown}{more}")
 
     return " — ".join(parts)
 
@@ -497,7 +562,14 @@ def fetch_remote(
     for name in names:
         remote = repo.remotes[name]
         callbacks = FetchCallbacks(remote.url, on_progress)
-        remote.fetch(callbacks=callbacks)
+        # `PRUNE` plutôt que le défaut `UNSPECIFIED` : un fetch nu laisse
+        # les refs des branches supprimées côté serveur, et le graphe
+        # affichait des branches fantômes (signalé par l'utilisateur).
+        #
+        # Le prune ne touche QUE `refs/remotes/<remote>/` — vérifié : une
+        # branche locale du même nom, et ses commits non poussés, restent
+        # intacts.
+        remote.fetch(callbacks=callbacks, prune=FetchPrune.PRUNE)
         tracked.append(callbacks)
 
     label = names[0] if len(names) == 1 else f"{len(names)} remotes"

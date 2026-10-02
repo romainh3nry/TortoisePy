@@ -86,6 +86,18 @@ def _single_node_menu(
     node: DisplayNode, state: RepositoryState
 ) -> tuple[MenuEntry, ...]:
     """§7.3 : menu hiérarchisé d'un nœud."""
+    if node.kind is NodeKind.WORKING:
+        # Ce nœud ne porte AUCUN commit : son OID est une sentinelle que
+        # pygit2 refuse (vérifié). Proposer « Cherry Pick » ou « Reset to
+        # this » mènerait à un échec garanti. Seul le commit a du sens.
+        return (
+            MenuEntry(
+                "Commit…",
+                "open_commit",
+                enabled=state.operation_in_progress is None,
+            ),
+        )
+
     busy = state.operation_in_progress is not None
     dirty = state.has_unstaged_changes or state.has_staged_changes
 
@@ -103,7 +115,7 @@ def _single_node_menu(
     # crée la locale du même nom. Un nœud qui n'en portait aucune avait
     # l'entrée grisée, obligeant à passer par « Branch from revision… ».
     distantes_utiles = [
-        d for d in _remote_branches(node)
+        d for d in _remote_branches(node, proteger=False)
         if local_name_for(d) != state.head_branch
     ]
     can_checkout = bool(others or distantes_utiles) and not busy
@@ -241,7 +253,11 @@ def _single_node_menu(
         ),
     ]
 
-    if busy:
+    # Des conflits SANS opération en cours existent : vérifié, un index
+    # peut les porter alors que `.git/MERGE_HEAD` a disparu (fermeture
+    # brutale, nettoyage partiel). L'utilisateur était alors bloqué — le
+    # checkout refusait, et le menu ne proposait aucune sortie.
+    if busy or state.has_conflicts:
         entries.append(SEPARATOR)
         if state.has_conflicts:
             # Fermer la fenêtre de conflits ne les résout pas, et rien
@@ -256,9 +272,16 @@ def _single_node_menu(
                     enabled=True,
                 )
             )
+        # « Abort None » serait du charabia : sans opération nommée, on
+        # parle de ce que l'utilisateur voit — ses conflits.
+        libelle = (
+            f"Abort {state.operation_in_progress}"
+            if state.operation_in_progress
+            else "Discard conflicts and reset"
+        )
         entries.append(
             MenuEntry(
-                f"Abort {state.operation_in_progress}",
+                libelle,
                 "abort_operation",
                 enabled=True,
                 needs_confirmation=True,
@@ -307,8 +330,20 @@ def _local_branches(node: DisplayNode) -> tuple[str, ...]:
     )
 
 
-def _remote_branches(node: DisplayNode) -> tuple[str, ...]:
+def _remote_branches(
+    node: DisplayNode, *, proteger: bool = True
+) -> tuple[str, ...]:
     """Branches distantes portées par ce nœud, `remote/branche` en entier.
+
+    `proteger=False` inclut `main`, `master` et `develop`. Deux usages,
+    deux listes : **ce qu'on peut viser n'est pas ce qu'on peut
+    détruire**. Se positionner sur `origin/develop` est le cas le plus
+    courant ; la supprimer du serveur ne l'est pas.
+
+    Signalé par l'utilisateur, capture à l'appui : « Switch / Checkout »
+    restait grisé sur un nœud ne portant que `origin/develop`, parce que
+    le filtre écrit pour la suppression avait été réutilisé tel quel pour
+    le checkout (phase 21).
 
     **Indépendant des branches locales.** Une première version partait
     de `_local_branches` et gardait celles ayant une jumelle distante :
@@ -327,10 +362,13 @@ def _remote_branches(node: DisplayNode) -> tuple[str, ...]:
             if r.type is RefType.REMOTE_BRANCH
             and "/" in r.name
             and not r.name.endswith("/HEAD")
-            # `main`, `master`, `develop` : le cœur les refuse de toute
-            # façon, et proposer une entrée vouée à l'échec n'apprend
-            # rien. Git ne protège que la branche par défaut du serveur.
-            and r.name.split("/", 1)[1] not in PROTECTED_BRANCHES
+            and (
+                not proteger
+                # `main`, `master`, `develop` : le cœur refuse de les
+                # SUPPRIMER de toute façon, et proposer une entrée vouée
+                # à l'échec n'apprend rien.
+                or r.name.split("/", 1)[1] not in PROTECTED_BRANCHES
+            )
         )
     )
 
@@ -416,7 +454,7 @@ def _branch_entry(
         deja = set(branches)
         branches += [
             distante
-            for distante in _remote_branches(node)
+            for distante in _remote_branches(node, proteger=False)
             if local_name_for(distante) not in deja
             and local_name_for(distante) != exclude
         ]

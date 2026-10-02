@@ -98,11 +98,25 @@ def list_changes(repo: pygit2.Repository) -> tuple[FileChange, ...]:
     except pygit2.GitError:
         return ()
 
+    # UN seul diff pour tous les fichiers : `_is_binary` le recalculait
+    # par fichier, ce qui rendait l'ouverture de la fenêtre de commit
+    # quadratique (14 s pour 300 fichiers, signalé par l'utilisateur).
+    binaires = _binaires(
+        _diff_en_cache(repo, contenu_non_suivi=False)
+    )
+
     changes = [
         FileChange(
             path=path,
             kind=_classify(code),
-            is_binary=_is_binary(repo, path),
+            # Sans `SHOW_UNTRACKED_CONTENT`, le diff ne sait pas qu'un
+            # fichier NON SUIVI est binaire : il n'en a pas lu le
+            # contenu. On le détermine sur place — quelques octets par
+            # fichier concerné, au lieu d'un scan de tout le dépôt.
+            is_binary=(
+                path in binaires
+                or _binaire_sur_disque(repo, path, code)
+            ),
         )
         for path, code in status.items()
     ]
@@ -239,26 +253,179 @@ def _is_binary(repo: pygit2.Repository, path: str) -> bool:
     return bool(patch and patch.delta.is_binary)
 
 
-def _patch_for(repo: pygit2.Repository, path: str):
-    """Patch d'un fichier, fichiers non suivis inclus.
+def _diff_du_depot(repo: pygit2.Repository, *, contenu_non_suivi: bool = True):
+    """Diff complet de l'arbre de travail, fichiers non suivis inclus.
+
+    **Deux diffs plutôt qu'un.** `tree.diff_to_workdir()` compare l'arbre
+    directement au disque, et s'effondre sur un gros dépôt — mesuré sur
+    un dépôt réel, pour UN seul fichier modifié :
+
+        tree.diff_to_index(index)     5.9 ms
+        index.diff_to_workdir()     431.8 ms
+                                    ────────
+                                      438 ms
+        tree.diff_to_workdir()     5851.6 ms   <- 13x plus lent
+
+    Passer par l'index est ce que fait `git status` lui-même (492 ms sur
+    le même dépôt). Les deux diffs sont fusionnés par chemin : l'état du
+    disque l'emporte, puisque c'est ce que l'utilisateur voit.
 
     `INCLUDE_UNTRACKED` est indispensable : sans lui, un fichier qu'on
-    vient de créer n'apparaît dans aucun diff. `SHOW_UNTRACKED_CONTENT`
-    génère les hunks pour les fichiers non suivis (sinon pygit2 en a 0).
+    vient de créer n'apparaît nulle part. `SHOW_UNTRACKED_CONTENT` génère
+    ses hunks (sinon pygit2 en a 0) — mesuré sans effet notable sur la
+    durée, mais réservé aux appels qui affichent vraiment un contenu.
     """
-    flags = pygit2.enums.DiffOption.INCLUDE_UNTRACKED | pygit2.enums.DiffOption.SHOW_UNTRACKED_CONTENT
+    flags = pygit2.enums.DiffOption.INCLUDE_UNTRACKED
+    if contenu_non_suivi:
+        flags |= pygit2.enums.DiffOption.SHOW_UNTRACKED_CONTENT
+
     try:
-        diff = repo.diff(
-            repo.revparse_single("HEAD").tree
-            if not repo.head_is_unborn
-            else None,
-            flags=flags,
-        )
-    except (pygit2.GitError, KeyError):
+        depuis_index = list(repo.index.diff_to_workdir(flags=flags))
+    except (pygit2.GitError, ValueError):
+        depuis_index = []
+
+    if repo.head_is_unborn:
+        return depuis_index
+
+    try:
+        arbre = repo.revparse_single("HEAD").tree
+        indexes = list(arbre.diff_to_index(repo.index))
+    except (pygit2.GitError, KeyError, ValueError):
+        return depuis_index
+
+    # Fusion par chemin : un fichier indexé PUIS modifié apparaît dans
+    # les deux diffs. Le disque gagne — c'est l'état que l'utilisateur
+    # voit et s'apprête à commiter.
+    par_chemin = {_chemin_du_patch(p): p for p in indexes}
+    par_chemin.update({_chemin_du_patch(p): p for p in depuis_index})
+    return list(par_chemin.values())
+
+
+def _chemin_du_patch(patch) -> str:
+    """Chemin d'un patch — celui d'arrivée, ou de départ s'il est supprimé."""
+    return patch.delta.new_file.path or patch.delta.old_file.path
+
+
+_NON_SUIVI = (
+    pygit2.enums.FileStatus.WT_NEW | pygit2.enums.FileStatus.INDEX_NEW
+)
+
+
+def _binaire_sur_disque(repo: pygit2.Repository, path: str, code: int) -> bool:
+    """Un fichier NON SUIVI est-il binaire ?
+
+    Même heuristique que git : un octet nul dans les premiers kilo-octets.
+    Lu seulement pour les fichiers que `status()` signale comme nouveaux,
+    donc jamais pour les milliers de fichiers ignorés d'un gros dépôt.
+    """
+    if not code & _NON_SUIVI:
+        return False
+
+    import os
+
+    try:
+        with open(os.path.join(repo.workdir or "", path), "rb") as fichier:
+            return b"\0" in fichier.read(8000)
+    except OSError:
+        return False
+
+
+def _binaires(diff) -> set[str]:
+    """Chemins binaires d'un diff déjà calculé.
+
+    Un seul parcours pour tous les fichiers : `_is_binary` recalculait le
+    diff COMPLET à chaque appel, soit une fois par fichier. Mesuré sur
+    300 fichiers modifiés — 26,5 ms par fichier, 14 s au total, alors
+    qu'un diff seul coûte 24 ms.
+    """
+    if diff is None:
+        return set()
+
+    trouves = set()
+    for patch in diff:
+        if patch.delta.is_binary:
+            trouves.add(patch.delta.new_file.path)
+            trouves.add(patch.delta.old_file.path)
+    return trouves
+
+
+_cache_diff: tuple | None = None
+"""(empreinte de l'arbre, diff). Mémoire d'un seul diff, le dernier.
+
+`diff_for` recalculait le diff COMPLET du dépôt à chaque appel — donc à
+chaque clic sur un fichier dans la fenêtre de commit. Mesuré sur 300
+fichiers : 68 ms par clic, et le coût croît avec la taille du dépôt
+(signalé par l'utilisateur sur un gros dépôt : « ça freeze »).
+"""
+
+
+def _empreinte_arbre(repo: pygit2.Repository) -> tuple:
+    """Ce qui, en changeant, rend le diff périmé.
+
+    `status()` ne suffit PAS : vérifié, il rend `WT_MODIFIED` aussi bien
+    après la première qu'après la seconde modification d'un fichier. Un
+    cache fondé sur lui seul servirait un diff périmé — pire qu'un diff
+    lent, puisque l'utilisateur verrait de faux changements.
+
+    On y ajoute donc la taille et la date de chaque fichier concerné :
+    deux contenus différents ne les partagent qu'exceptionnellement, et
+    le coût reste celui d'un `stat` par fichier modifié, pas par fichier
+    du dépôt.
+    """
+    import os
+
+    try:
+        statut = sorted(repo.status().items())
+    except pygit2.GitError:
+        return (object(),)
+
+    racine = repo.workdir or ""
+    marques = []
+    for chemin, code in statut:
         try:
-            diff = repo.diff(flags=flags)
-        except (pygit2.GitError, ValueError):
-            return None
+            infos = os.stat(os.path.join(racine, chemin))
+            marques.append((chemin, code, infos.st_size, infos.st_mtime_ns))
+        except OSError:
+            # Fichier supprimé entre `status()` et le `stat` : son absence
+            # fait partie de l'empreinte.
+            marques.append((chemin, code, None, None))
+
+    return (tuple(marques), str(repo.path))
+
+
+def _diff_en_cache(repo: pygit2.Repository, *, contenu_non_suivi: bool = True):
+    """`_diff_du_depot`, mais réutilisé tant que l'arbre n'a pas bougé.
+
+    Le diff est **matérialisé** en liste à la mise en cache : pygit2 lit
+    les fichiers paresseusement, et un diff gardé tel quel lève
+    « file changed before we could read it » dès qu'un fichier bouge
+    sous lui (vérifié — c'est ce qui arrive en usage réel, entre deux
+    clics de l'utilisateur).
+    """
+    global _cache_diff
+
+    empreinte = (_empreinte_arbre(repo), contenu_non_suivi)
+    if _cache_diff is not None and _cache_diff[0] == empreinte:
+        return _cache_diff[1]
+
+    diff = _diff_du_depot(repo, contenu_non_suivi=contenu_non_suivi)
+    try:
+        materialise = list(diff) if diff is not None else None
+    except pygit2.GitError:
+        # L'arbre a bougé pendant la lecture : on ne met rien en cache
+        # et on laisse l'appelant retenter au prochain geste.
+        _cache_diff = None
+        return None
+
+    _cache_diff = (empreinte, materialise)
+    return materialise
+
+
+def _patch_for(repo: pygit2.Repository, path: str):
+    """Patch d'un seul fichier. Pour plusieurs, voir `_diff_du_depot`."""
+    diff = _diff_en_cache(repo)
+    if diff is None:
+        return None
 
     for patch in diff:
         if patch.delta.new_file.path == path:

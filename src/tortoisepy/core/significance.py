@@ -49,25 +49,37 @@ def _walk_once(repo: pygit2.Repository, tips: set[Oid]) -> list:
 
 def _analyse(
     repo: pygit2.Repository, tips: set[Oid]
-) -> tuple[dict[Oid, frozenset[Oid]], set[Oid]]:
+) -> tuple[dict[Oid, int], set[Oid]]:
     """Marquage par pointe et repérage des merges, parents de merges et racines.
 
     Les deux résultats sortent du même parcours : les calculer séparément
     doublait le coût pour aucun gain de clarté.
 
     Retourne :
-      - pour chaque commit, l'ensemble des pointes qui l'atteignent ;
+      - pour chaque commit, un MASQUE DE BITS des pointes qui
+        l'atteignent (un bit par pointe) ;
       - les commits significatifs par leur seule topologie (merges, parents
         directs de merges, racines).
     """
-    marks: dict[Oid, set[Oid]] = defaultdict(set)
+    # Les marques sont des ENTIERS, un bit par pointe, et non des
+    # ensembles d'OID. `a | b` devient une instruction machine là où
+    # `set | set` parcourt des chaînes de 40 caractères.
+    #
+    # Mesuré sur le dépôt de l'utilisateur (671 pointes, 23 676 commits
+    # parcourus) : `_analyse` coûtait **878 ms**, l'essentiel des
+    # 1042 ms de `significant_commits`, elles-mêmes 87 % de
+    # `build_graph`. C'est la technique qui avait déjà fait passer
+    # `reduce_transitive_edges` de 4,6 s à 0,04 s en phase 17.
+    bit_de = {oid: 1 << index for index, oid in enumerate(sorted(tips))}
+
+    marks: dict[Oid, int] = defaultdict(int)
     topological: set[Oid] = set()
 
     for commit in _walk_once(repo, tips):
         oid = str(commit.id)
 
         if oid in tips:
-            marks[oid].add(oid)
+            marks[oid] |= bit_de[oid]
 
         parents = commit.parents  # itérés, jamais indexés : octopus > 2
         if not parents:
@@ -78,22 +90,27 @@ def _analyse(
 
         # Le commit précède ses parents : ses marques leur remontent.
         inherited = marks[oid]
-        for parent in parents:
-            marks[str(parent.id)] |= inherited
+        if inherited:
+            for parent in parents:
+                marks[str(parent.id)] |= inherited
 
-    reach = {oid: frozenset(labels) for oid, labels in marks.items() if labels}
-    return reach, topological
+    return {oid: masque for oid, masque in marks.items() if masque}, topological
 
 
 def _merge_bases(
-    repo: pygit2.Repository, reach: dict[Oid, frozenset[Oid]]
+    repo: pygit2.Repository, reach: dict[Oid, int]
 ) -> set[Oid]:
     """Ancêtres communs maximaux : les merge-bases.
 
     Un commun est maximal si aucun de ses enfants n'est commun aux mêmes
     pointes — sinon l'enfant est une base plus proche, et lui seul compte.
+
+    `reach` associe à chaque commit un MASQUE DE BITS des pointes qui
+    l'atteignent. `bit_count()` remplace `len(frozenset)`, et l'inclusion
+    `enfant ⊇ parent` devient `enfant & parent == parent` — des
+    opérations sur entiers, pas des parcours d'ensembles.
     """
-    common = {oid for oid, labels in reach.items() if len(labels) >= 2}
+    common = {oid for oid, masque in reach.items() if masque.bit_count() >= 2}
     if not common:
         return set()
 
@@ -111,7 +128,11 @@ def _merge_bases(
     return {
         oid
         for oid in common
-        if not any(reach[child] >= reach[oid] for child in children[oid] if child in reach)
+        if not any(
+            reach[child] & reach[oid] == reach[oid]
+            for child in children[oid]
+            if child in reach
+        )
     }
 
 

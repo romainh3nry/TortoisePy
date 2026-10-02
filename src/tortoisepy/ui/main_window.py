@@ -64,10 +64,11 @@ from tortoisepy.ui.dialogs import (
     ask_pull_strategy,
     ask_reset_mode,
     confirm,
+    confirmation_for,
     show_error,
 )
 from tortoisepy.ui.graph_view import GraphView
-from tortoisepy.ui.tasks import BackgroundTask, FetchWorker
+from tortoisepy.ui.tasks import BackgroundTask, CallableWorker, FetchWorker
 from tortoisepy.ui.theme import QtMeasurer
 from tortoisepy.ui.watcher import RepositoryWatcher
 
@@ -144,6 +145,8 @@ class MainWindow(QMainWindow):
         # égale `build_graph` rend le même graphe.
         self._panel_cache: dict[str, tuple] = {}
         self._panel_cache_key: tuple | None = None
+        self._selection_avant_refresh: str | None = None
+        self._head_avant_refresh: str | None = None
         # Largeur de panneau mémorisée, appliquée au premier `showEvent`
         # (voir `restore_settings`/`showEvent` : le splitter n'a pas de
         # vraie taille avant le premier affichage).
@@ -158,13 +161,16 @@ class MainWindow(QMainWindow):
         # geste que sélectionner, donc le plus direct. Le double-clic reste
         # branché — il ne coûte rien et fait la même chose.
         self.view.selection_changed.connect(self._on_selection_changed)
-        self.view.node_double_clicked.connect(self._show_commits)
+        self.view.node_double_clicked.connect(self._on_node_double_clicked)
 
         # Le panneau révèle ce que la compression masque (§4.2.1). Un
         # splitter plutôt qu'une largeur fixe : la place à donner au graphe
         # dépend de la longueur des noms de branches.
         self.commit_panel = CommitPanel(self)
         self.commit_panel.commit_activated.connect(self.open_commit_detail)
+        self.commit_panel.context_menu_requested.connect(
+            self._show_panel_menu
+        )
         # Le champ appartient au panneau (il en épouse la largeur) ; la
         # fenêtre s'y branche sans le posséder.
         self.search_field = self.commit_panel.search_field
@@ -215,6 +221,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(self._title())
         self.resize(1400, 850)
         self.refresh()
+        # Centré une seule fois, à l'ouverture : sur un graphe de
+        # plusieurs milliers de pixels de haut, s'ouvrir ailleurs
+        # obligerait à chercher où l'on se trouve. Les rafraîchissements
+        # suivants respectent le déplacement de l'utilisateur.
+        self._center_on_head()
         self.restore_settings()
         self.settings.remember_repository(
             str(Path(repository.path).parent)
@@ -305,6 +316,24 @@ class MainWindow(QMainWindow):
 
     def refresh(self) -> None:
         """Reconstruit le graphe et relit l'état (§7.6, §7.9)."""
+        # Mémorisée AVANT la reconstruction : `show_graph` remplace la
+        # scène, et la sélection part avec les anciens items.
+        selection = self.view.selected_oids()
+        self._selection_avant_refresh = selection[0] if selection else None
+        # HEAD d'AVANT : s'il change, c'est un checkout, et la sélection
+        # doit suivre la nouvelle branche plutôt que rester sur l'ancienne
+        # (sinon le panneau latéral montrerait la branche qu'on vient de
+        # quitter).
+        self._head_avant_refresh = (
+            self.state.head_oid if self.state else None
+        )
+        # `show_graph` remplace la scène, ce qui remet les barres à zéro.
+        # On les restaure après, pour que la vue ne saute pas.
+        defilement = (
+            self.view.horizontalScrollBar().value(),
+            self.view.verticalScrollBar().value(),
+        )
+
         options = self.graph_options()
         self.graph = self._graph_cache.get(
             self.repository,
@@ -312,6 +341,12 @@ class MainWindow(QMainWindow):
             options_key=(options.show_tags,),
         )
         self.state = read_state(self.repository)
+
+        # Le nœud de travail est greffé APRÈS le cache : il dépend de
+        # l'arbre de travail, qui change bien plus souvent que la
+        # topologie. L'inclure dans le graphe mis en cache obligerait à
+        # tout reconstruire à chaque frappe dans un éditeur.
+        self.graph = _avec_noeud_de_travail(self.graph, self.state)
         unpushed = unpushed_oids(self.repository)
         # Le mesureur est refait à chaque rafraîchissement : la branche
         # courante change au gré des checkouts, et elle décide si la
@@ -329,7 +364,18 @@ class MainWindow(QMainWindow):
             current_branch=courante,
         )
         self.commit_panel.clear()
-        self._center_on_head()
+
+        # PAS de recentrage ici : `refresh()` est appelé après CHAQUE
+        # action, et ramener la vue de force sur la branche courante
+        # défaisait le déplacement de l'utilisateur (signalé). Le
+        # centrage n'a lieu qu'à l'ouverture et sur « Recenter ».
+        #
+        # La SÉLECTION, elle, est conservée : elle remplit le panneau
+        # latéral, et la perdre à chaque rafraîchissement le viderait
+        # sans raison.
+        self._reselect_current_node()
+        self.view.horizontalScrollBar().setValue(defilement[0])
+        self.view.verticalScrollBar().setValue(defilement[1])
         self._update_status()
         self._update_push_action()
         self._update_fetch_action()
@@ -362,6 +408,26 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
                 arreter(10_000)
         super().closeEvent(event)
 
+    def _reselect_current_node(self) -> None:
+        """Rend sa sélection au nœud qui l'avait, après reconstruction.
+
+        `show_graph` remplace la scène : les items sont neufs, et la
+        sélection précédente disparaît avec les anciens. Sans cette
+        restauration, le panneau latéral se viderait à chaque action.
+        """
+        courant = self.state.head_oid if self.state else None
+
+        # Un checkout déplace HEAD : la sélection le suit, car c'est la
+        # branche que l'utilisateur vient de choisir.
+        if courant is not None and courant != self._head_avant_refresh:
+            self.view.select_node(courant)
+            return
+
+        if self._selection_avant_refresh:
+            self.view.select_node(self._selection_avant_refresh)
+        elif courant is not None:
+            self.view.select_node(courant)
+
     def _center_on_head(self) -> None:
         """Place la vue sur la branche courante **et la sélectionne**.
 
@@ -392,8 +458,38 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         else:
             self.commit_panel.clear()
 
+    def _on_node_double_clicked(self, oid: str) -> None:
+        """Double-clic : le geste explicite.
+
+        Signalé par l'utilisateur : l'application gelait au simple CLIC
+        sur le nœud de travail. Le clic passe par `_on_selection_changed`,
+        qui appelait `_show_commits` — lequel ouvrait la fenêtre de commit.
+        Sur un gros dépôt, sa construction scanne tout l'arbre de travail.
+
+        Ouvrir une fenêtre doit rester un geste délibéré.
+        """
+        from tortoisepy.core.model import WORKING_OID
+
+        if oid == WORKING_OID:
+            self.open_commit_window()
+            return
+
+        self._show_commits(oid)
+
     def _show_commits(self, oid: str) -> None:
-        """Double-clic : liste les commits masqués par l'arête entrante."""
+        """Liste les commits masqués par l'arête entrante.
+
+        Le nœud « Uncommitted changes » n'en a aucun : on vide le panneau
+        plutôt que d'y laisser l'historique du nœud précédent. Son OID est
+        par ailleurs une sentinelle que pygit2 REFUSE (`InvalidError`,
+        vérifié) — la lui passer planterait.
+        """
+        from tortoisepy.core.model import WORKING_OID
+
+        if oid == WORKING_OID:
+            self.commit_panel.clear()
+            return
+
         if self.graph is None:
             return
 
@@ -700,6 +796,80 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         self.branch_label.setText(texte)
         self.branch_label.setToolTip(texte.removeprefix("⎇ "))
 
+    def _show_panel_menu(self, oid: str, position) -> None:
+        """Menu contextuel du panneau latéral (§phase 23).
+
+        Le graphe ne permettait d'agir que sur la POINTE d'une branche :
+        `ctx.node.oid` désigne le nœud, et les commits plus anciens que le
+        panneau affiche étaient hors de portée (signalé par l'utilisateur).
+        """
+        entrees = self.commit_panel.menu_for(oid)
+        if not entrees:
+            return
+
+        menu = QMenu(self)
+        for entree in entrees:
+            action = menu.addAction(entree.label)
+            action.triggered.connect(
+                lambda checked=False, nom=entree.action, cible=entree.oid:
+                self.run_panel_action(nom, cible)
+            )
+        menu.exec(position)
+
+    def run_panel_action(self, action: str, oid: str) -> None:
+        """Exécute une action du panneau sur UN commit précis.
+
+        Le cherry-pick s'applique sur la branche courante, comme git et
+        TortoiseGit : appliquer ailleurs imposerait un checkout, donc de
+        quitter sa branche — bien plus que ce qu'on attend d'un clic sur
+        « Cherry-pick ».
+        """
+        if action == "copy_commit_hash":
+            self._copy_to_clipboard(oid)
+            self.statusBar().showMessage(f"{oid[:8]} copié", 5000)
+            return
+
+        if action == "show_commit_detail":
+            self.open_commit_detail(oid)
+            return
+
+        if self.state is None:
+            return
+
+        demande = confirmation_for(action, oid[:8], self.state)
+        if demande is not None and not confirm(self, demande):
+            return
+
+        with self.watcher.suspended():
+            if action == "cherry_pick_commit":
+                resultat = operations.cherry_pick(self.repository, oid)
+            elif action == "revert_commit_oid":
+                resultat = operations.revert_commit(self.repository, oid)
+            else:
+                return
+
+        if resultat.needs_refresh:
+            self._graph_cache.invalidate()
+            self.refresh()
+        self.statusBar().showMessage(resultat.summary, 15000)
+
+        if resultat.success:
+            return
+
+        # Un conflit n'est pas une erreur à lire : c'est un travail à
+        # faire. Signalé par l'utilisateur — le message annonçait des
+        # conflits sans offrir aucun moyen de les voir ni de les résoudre.
+        #
+        # Deux formes à reconnaître : « conflits sur : … » que compose
+        # `operations`, et le « conflict » que rend libgit2. Ne tester que
+        # l'anglais laissait passer le cas le plus courant (vérifié).
+        message = (resultat.git_error or "").lower()
+        if "conflit" in message or "conflict" in message:
+            self.open_conflict_window()
+            return
+
+        show_error(self, resultat)
+
     def _show_context_menu(self, position) -> None:
         """Construit le QMenu à partir du modèle (§7.3)."""
         if self.graph is None or self.state is None:
@@ -739,6 +909,42 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
                     )
                 )
 
+    def run_in_background(self, appelable, suite, libelle: str) -> bool:
+        """Exécute `appelable` hors du fil principal, puis appelle `suite`.
+
+        Demandé par l'utilisateur : « à chaque fois qu'une action est
+        susceptible de faire freezer l'app, on la fait en arrière-plan
+        avec un loader ». Mesuré sur son dépôt, `build_graph` coûte
+        2185 ms et `list_changes` 760 ms — autant de gels.
+
+        Rend `False` si une opération tourne déjà : une seule à la fois,
+        et la seconde demande est ignorée plutôt qu'annulée (choix de
+        l'utilisateur). Sans ce verrou, deux fils liraient le dépôt en
+        même temps et les résultats arriveraient dans le désordre.
+
+        `suite` est appelée **dans le fil principal** : elle peut toucher
+        l'interface sans risque. Elle reçoit le résultat, ou l'exception
+        si l'opération a échoué.
+        """
+        if self._task is not None and self._task.is_running():
+            return False
+
+        self.progress.setRange(0, 0)     # indéterminé : durée inconnue
+        self.progress.show()
+        self.statusBar().showMessage(libelle)
+
+        def termine(resultat):
+            # La barre disparaît MÊME en cas d'échec : la laisser
+            # tourner ferait croire à un travail toujours en cours.
+            self.progress.hide()
+            self.statusBar().clearMessage()
+            suite(resultat)
+
+        self._task = BackgroundTask(CallableWorker(appelable), self)
+        self._task.finished.connect(termine)
+        self._task.start()
+        return True
+
     def open_commit_window(self) -> None:
         """Ouvre la fenêtre de commit, ou ramène celle déjà ouverte.
 
@@ -750,9 +956,25 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             self.commit_window.activateWindow()
             return
 
-        self.commit_window = CommitWindow(self.repository, self)
-        self.commit_window.committed.connect(self._on_committed)
-        self.commit_window.show()
+        # Le coût est dans `list_changes`, que la construction déclenche :
+        # 760 ms sur le dépôt de l'utilisateur. On le paie en arrière-plan,
+        # avec le loader, puis la fenêtre se construit sur un cache chaud.
+        from tortoisepy.core.changes import list_changes
+
+        def construire(_resultat=None):
+            self.commit_window = CommitWindow(self.repository, self)
+            self.commit_window.committed.connect(self._on_committed)
+            self.commit_window.show()
+
+        lance = self.run_in_background(
+            lambda: list_changes(self.repository),
+            construire,
+            "Lecture des modifications…",
+        )
+        if not lance:
+            # Une opération tourne déjà : on construit tout de suite
+            # plutôt que d'ignorer la demande de l'utilisateur.
+            construire()
 
     def open_conflict_window(self) -> None:
         """Ouvre la résolution de conflits, ou ramène celle déjà ouverte.
@@ -1323,3 +1545,41 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             return
 
         show_error(self, result)
+
+
+def _avec_noeud_de_travail(graph, state):
+    """Greffe le nœud « Uncommitted changes » au-dessus de la branche
+    courante, s'il y a du travail en attente.
+
+    Demandé par l'utilisateur : une pastille faisait trop de bruit sur un
+    rendu soigné. Le nœud fantôme dit littéralement de quoi il s'agit, et
+    il est cliquable — l'information et l'action au même endroit.
+
+    Rend le graphe inchangé quand l'arbre est propre, ce qui est le cas le
+    plus fréquent : aucun nœud en trop, aucun coût.
+    """
+    from dataclasses import replace
+
+    from tortoisepy.core.model import (
+        DisplayNode, GraphEdge, NodeKind, WORKING_OID,
+    )
+
+    if graph is None or state is None or state.head_oid is None:
+        return graph
+    if not (state.has_unstaged_changes or state.has_staged_changes):
+        return graph
+
+    # Le nœud courant doit exister dans le graphe : sans lui, l'arête
+    # pointerait dans le vide.
+    if graph.node(state.head_oid) is None:
+        return graph
+
+    travail = DisplayNode(oid=WORKING_OID, kind=NodeKind.WORKING, refs=())
+    arete = GraphEdge(
+        ancestor=state.head_oid, descendant=WORKING_OID, skipped=()
+    )
+    return replace(
+        graph,
+        nodes=graph.nodes + (travail,),
+        edges=graph.edges + (arete,),
+    )

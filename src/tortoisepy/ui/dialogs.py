@@ -68,6 +68,23 @@ def confirmation_for(
             destructive=True,
         )
 
+    if action == "abort_operation":
+        # `abort_operation` fait `state_cleanup()` + `reset(HARD)` : tout
+        # ce qui n'est pas commité disparaît. Le piège de la phase 11
+        # était d'avoir posé `needs_confirmation` dans le menu sans
+        # brancher ici — le drapeau ne protégeait rien.
+        quoi = state.operation_in_progress or "the conflicts"
+        return ConfirmationRequest(
+            title=f"Abort {quoi} — destructive",
+            message=(
+                f"The working tree is reset to {state.head_branch or 'HEAD'}.\n\n"
+                "Conflict resolutions and uncommitted changes to tracked "
+                "files are discarded, and cannot be recovered.\n\n"
+                "Untracked files are left alone."
+            ),
+            destructive=True,
+        )
+
     if action == "drop_stash":
         return ConfirmationRequest(
             title="Drop stash — destructive",

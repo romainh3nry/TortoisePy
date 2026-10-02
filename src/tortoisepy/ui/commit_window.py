@@ -112,7 +112,17 @@ class CommitWindow(QMainWindow):
         cancel = QPushButton("Annuler")
         cancel.clicked.connect(self.close)
 
+        # À GAUCHE, séparé des boutons d'action : il agit sur la liste,
+        # pas sur le dépôt. Le mettre à côté de « Commit » inviterait au
+        # clic de trop.
+        self.check_all_button = QPushButton("Tout cocher")
+        self.check_all_button.setToolTip(
+            "Coche tous les fichiers, y compris les non suivis"
+        )
+        self.check_all_button.clicked.connect(self.check_all)
+
         buttons = QHBoxLayout()
+        buttons.addWidget(self.check_all_button)
         buttons.addStretch(1)
         buttons.addWidget(cancel)
         buttons.addWidget(self.commit_button)
@@ -187,6 +197,21 @@ class CommitWindow(QMainWindow):
             if item.checkState(0) == Qt.CheckState.Checked
             and item.data(0, SELECTABLE_ROLE)
         )
+
+    def check_all(self) -> None:
+        """Coche tous les fichiers cochables.
+
+        Demandé par l'utilisateur : les fichiers non suivis arrivent
+        décochés (D8), et les cocher un par un est fastidieux quand ils
+        sont légitimes.
+
+        Passe par `set_checked`, qui **refuse les conflits** : un
+        fichier non résolu coché produirait un commit contenant des
+        marqueurs `<<<<<<<` (§4.1). Un bouton « tout cocher » est
+        précisément le chemin par lequel cette garantie pourrait tomber.
+        """
+        for item in self._items():
+            self.set_checked(item.data(0, PATH_ROLE), True)
 
     def is_checked(self, path: str) -> bool:
         item = self._item_for(path)

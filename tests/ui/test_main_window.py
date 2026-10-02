@@ -240,19 +240,29 @@ def test_view_opens_centred_on_the_current_branch(window):
     assert abs(centre.y() - target.y()) < 50.0
 
 
-def test_centring_survives_a_refresh(window):
-    from tortoisepy.ui.graph_items import NodeItem
+def test_a_refresh_does_not_recentre(window):
+    """L'EXIGENCE A CHANGÉ (demande de l'utilisateur).
 
+    Ce test affirmait l'inverse : « le centrage survit à un
+    rafraîchissement ». Or `refresh()` est appelé après chaque action,
+    et l'utilisateur qui s'était déplacé dans le graphe était ramené de
+    force sur sa branche courante — signalé comme gênant.
+
+    Le centrage n'a plus lieu qu'à l'ouverture et sur « Recenter ».
+    """
     window.view.centerOn(0, 0)
+    avant = (
+        window.view.horizontalScrollBar().value(),
+        window.view.verticalScrollBar().value(),
+    )
+
     window.refresh()
 
-    item = next(
-        i for i in window.view.scene().items()
-        if isinstance(i, NodeItem) and i.node.oid == window.state.head_oid
+    apres = (
+        window.view.horizontalScrollBar().value(),
+        window.view.verticalScrollBar().value(),
     )
-    centre = window.view.mapToScene(window.view.viewport().rect().center())
-    target = item.sceneBoundingRect().center()
-    assert abs(centre.y() - target.y()) < 50.0
+    assert apres == avant, "le rafraîchissement a déplacé la vue"
 
 
 def test_centring_on_an_unknown_node_is_harmless(window):
@@ -443,25 +453,31 @@ def test_watcher_restarts_after_a_fetch(window, qtbot, monkeypatch):
     assert window.watcher.is_watching() is True
 
 
-def test_commit_window_opens(window):
+def test_commit_window_opens(qtbot, window):
+    """L'ouverture est DIFFÉRÉE depuis la phase 24 : `list_changes` coûte
+    760 ms sur un dépôt réel, et le payer dans le fil principal gelait
+    l'application. L'exigence est inchangée — la fenêtre s'ouvre — seul
+    le moment a bougé."""
     window.open_commit_window()
-    assert window.commit_window is not None
+    qtbot.waitUntil(lambda: window.commit_window is not None, timeout=5000)
     window.commit_window.close()
 
 
-def test_commit_window_is_reused(window):
+def test_commit_window_is_reused(qtbot, window):
     """Deux fenêtres de commit sur le même dépôt se contrediraient."""
     window.open_commit_window()
+    qtbot.waitUntil(lambda: window.commit_window is not None, timeout=5000)
     first = window.commit_window
     window.open_commit_window()
     assert window.commit_window is first
     first.close()
 
 
-def test_graph_refreshes_after_a_commit(window, monkeypatch):
+def test_graph_refreshes_after_a_commit(qtbot, window, monkeypatch):
     from tortoisepy.core.results import succeeded
 
     window.open_commit_window()
+    qtbot.waitUntil(lambda: window.commit_window is not None, timeout=5000)
     before = window.view.scene()
     window.commit_window.committed.emit(succeeded("fait"), None)
     assert window.view.scene() is not before
