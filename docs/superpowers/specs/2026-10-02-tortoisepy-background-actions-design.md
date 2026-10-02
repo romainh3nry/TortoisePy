@@ -35,7 +35,7 @@ non une liste figée.
 | D58 | **Seuil à 300 ms** : au-delà, l'opération part en arrière-plan | Tout basculer — un fil pour 5 ms est de la complexité pure |
 | D59 | **Barre de progression indéterminée**, interface utilisable | Fenêtre vide puis remplie — l'utilisateur a choisi la première |
 | D60 | **Une seule opération de fond à la fois** ; la seconde demande est ignorée | Annuler et relancer — plus de code pour annuler proprement |
-| D61 | Les opérations **d'écriture** restent synchrones | Les basculer aussi — §5.2 |
+| D61 | ~~Les opérations d'écriture restent synchrones~~ **RÉVISÉE** : elles passent aussi en arrière-plan | Les garder synchrones — justification erronée, §3.2 |
 | D62 | Un worker **générique**, pas un par opération | Dupliquer `FetchWorker` cinq fois |
 
 ### 3.1 Pourquoi un seuil et non une liste (D58)
@@ -45,15 +45,29 @@ Les coûts dépendent du dépôt : `build_graph` met 7 ms ici et 2185 ms sur
 l'autre. La règle est : **toute opération de LECTURE dont le coût croît avec
 la taille du dépôt** passe en arrière-plan.
 
-### 3.2 Pourquoi les écritures restent synchrones (D61)
+### 3.2 Les écritures aussi (D61, révisée)
 
-Un commit, un checkout, un cherry-pick modifient le dépôt. Les lancer en
-arrière-plan ouvrirait la porte à deux écritures concurrentes, et la
-garantie §7.0 (« l'app n'écrit que sur action explicite ») deviendrait
-difficile à tenir.
+**La version initiale de cette décision était fondée sur deux arguments,
+tous deux mauvais.** Elle disait :
 
-Elles sont par ailleurs rapides : ce qui coûte, c'est le **rafraîchissement
-qui suit** — et lui est une lecture, donc couvert.
+> Les lancer en arrière-plan ouvrirait la porte à deux écritures
+> concurrentes […]. Elles sont par ailleurs rapides.
+
+Le premier est **faux** : `run_in_background` refuse déjà une seconde
+opération tant que la première tourne (D60), et ce verrou ne distingue pas
+lecture et écriture. Le second n'a **jamais été mesuré** — sur un dépôt où
+`status()` met 492 ms, un checkout qui réécrit des milliers de fichiers n'a
+aucune raison d'être instantané. L'utilisateur a signalé le contraire.
+
+Les écritures passent donc en arrière-plan elles aussi, avec **deux
+précautions que les lectures n'exigent pas** :
+
+- **les actions sont désactivées pendant l'écriture.** Une lecture laisse
+  l'interface utilisable ; une écriture ne le peut pas. Lancer un commit
+  pendant qu'un checkout change de branche produirait un résultat
+  imprévisible ;
+- **aucun rafraîchissement avant la fin.** Le graphe lu à mi-checkout
+  montrerait un état transitoire.
 
 ## 4. Ce qui bascule
 

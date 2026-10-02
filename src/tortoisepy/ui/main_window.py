@@ -840,14 +840,36 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         if demande is not None and not confirm(self, demande):
             return
 
-        with self.watcher.suspended():
-            if action == "cherry_pick_commit":
-                resultat = operations.cherry_pick(self.repository, oid)
-            elif action == "revert_commit_oid":
-                resultat = operations.revert_commit(self.repository, oid)
-            else:
-                return
+        if action not in ("cherry_pick_commit", "revert_commit_oid"):
+            return
 
+        # Même traitement que les actions du graphe (D61, révisée) : un
+        # cherry-pick écrit dans le dépôt et peut durer. La suspension du
+        # surveillant reste dans le FIL PRINCIPAL — ses minuteurs Qt ne
+        # peuvent pas être démarrés ailleurs (vérifié).
+        suspension = self.watcher.suspended()
+        suspension.__enter__()
+
+        def ecrire():
+            if action == "cherry_pick_commit":
+                return operations.cherry_pick(self.repository, oid)
+            return operations.revert_commit(self.repository, oid)
+
+        def termine(resultat):
+            suspension.__exit__(None, None, None)
+            self._set_actions_enabled(True)
+            if isinstance(resultat, Exception):
+                show_error(self, failed("Action", str(resultat)))
+                return
+            self._apres_action_panneau(resultat)
+
+        self._set_actions_enabled(False)
+        if not self.run_in_background(ecrire, termine, "Opération en cours…"):
+            suspension.__exit__(None, None, None)
+            self._set_actions_enabled(True)
+
+    def _apres_action_panneau(self, resultat) -> None:
+        """Suite d'une action du panneau, une fois l'écriture terminée."""
         if resultat.needs_refresh:
             self._graph_cache.invalidate()
             self.refresh()
@@ -908,6 +930,17 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
                         name, self._selected_node(), branch
                     )
                 )
+
+    def _set_actions_enabled(self, actif: bool) -> None:
+        """Active ou désactive ce qui pourrait déclencher une écriture.
+
+        Pendant une écriture, le graphe et la barre d'outils sont gelés :
+        le verrou de `run_in_background` refuserait de toute façon une
+        seconde opération, mais sans retour visuel l'utilisateur
+        cliquerait dans le vide.
+        """
+        self.view.setEnabled(actif)
+        self.toolbar.setEnabled(actif)
 
     def run_in_background(self, appelable, suite, libelle: str) -> bool:
         """Exécute `appelable` hors du fil principal, puis appelle `suite`.
@@ -1192,17 +1225,45 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             self.open_conflict_window()
             return
 
-        with self.watcher.suspended():
-            result = actions.execute_action(action, context)
+        # Les écritures aussi passent en arrière-plan (D61, révisée) :
+        # sur un gros dépôt, un checkout réécrit des milliers de fichiers
+        # et gèle l'interface plusieurs secondes (signalé).
+        #
+        # Deux précautions que les lectures n'exigent pas : les actions
+        # sont DÉSACTIVÉES le temps de l'écriture — lancer un commit
+        # pendant qu'un checkout change de branche produirait un résultat
+        # imprévisible — et le graphe n'est rafraîchi qu'À LA FIN, sous
+        # peine de montrer un état transitoire.
+        # La suspension du surveillant reste dans le FIL PRINCIPAL : il
+        # manipule des minuteurs Qt, et les démarrer depuis un autre fil
+        # provoque « QObject::startTimer: Timers cannot be started from
+        # another thread » (vérifié).
+        suspension = self.watcher.suspended()
+        suspension.__enter__()
 
-        if result is None:
-            return  # annulé par l'utilisateur, ou action sans effet
+        def ecrire():
+            return actions.execute_action(action, context)
 
-        if result.repository_changed:
-            self.refresh()
+        def termine(result):
+            suspension.__exit__(None, None, None)
+            self._set_actions_enabled(True)
 
-        if not result.success:
-            show_error(self, result)
+            if isinstance(result, Exception):
+                show_error(self, failed("Action", str(result)))
+                return
+            if result is None:
+                return  # annulé par l'utilisateur, ou action sans effet
+
+            if result.repository_changed:
+                self.refresh()
+            if not result.success:
+                show_error(self, result)
+
+        self._set_actions_enabled(False)
+        if not self.run_in_background(ecrire, termine, "Opération en cours…"):
+            # Une opération tourne déjà : on ne lance pas la seconde.
+            suspension.__exit__(None, None, None)
+            self._set_actions_enabled(True)
 
     def _start_fetch(self) -> None:
         """Lance un fetch en arrière-plan, avec progression."""

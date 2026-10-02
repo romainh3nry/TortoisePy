@@ -282,8 +282,14 @@ def test_empty_repository_centres_without_crashing(qtbot, tmp_path):
     assert w.state.head_oid is None
 
 
-def test_menu_action_runs_the_operation(window, monkeypatch):
-    """Le menu n'affiche plus « pas encore câblé »."""
+def test_menu_action_runs_the_operation(qtbot, window, monkeypatch):
+    """Le menu n'affiche plus « pas encore câblé ».
+
+    L'exécution est DIFFÉRÉE depuis la phase 24bis : les écritures
+    partent en arrière-plan avec le loader, un checkout pouvant durer
+    plusieurs secondes sur un gros dépôt. L'exigence est inchangée —
+    l'action s'exécute — seul le moment a bougé.
+    """
     from tortoisepy.ui import actions
 
     called = []
@@ -297,10 +303,11 @@ def test_menu_action_runs_the_operation(window, monkeypatch):
         if any(r.name == "feature" for r in n.refs)
     )
     window._run_action("checkout_branch", node)
+    qtbot.waitUntil(lambda: bool(called), timeout=5000)
     assert called == ["checkout_branch"]
 
 
-def test_successful_action_refreshes_the_graph(window, monkeypatch):
+def test_successful_action_refreshes_the_graph(qtbot, window, monkeypatch):
     from tortoisepy.core.results import succeeded
     from tortoisepy.ui import actions
 
@@ -311,12 +318,13 @@ def test_successful_action_refreshes_the_graph(window, monkeypatch):
 
     node = window.graph.nodes[0]
     window._run_action("checkout_branch", node)
+    qtbot.waitUntil(lambda: window.view.scene() is not before, timeout=5000)
 
     assert window.view.scene() is not before
 
 
 def test_failed_action_still_refreshes_when_the_repo_changed(
-    window, monkeypatch
+    qtbot, window, monkeypatch
 ):
     """§7.6 : un merge en conflit échoue mais a modifié le dépôt."""
     from tortoisepy.core.results import failed
@@ -332,6 +340,7 @@ def test_failed_action_still_refreshes_when_the_repo_changed(
     before = window.view.scene()
 
     window._run_action("merge_branch", window.graph.nodes[0])
+    qtbot.waitUntil(lambda: window.view.scene() is not before, timeout=5000)
     assert window.view.scene() is not before
 
 
@@ -345,7 +354,7 @@ def test_cancelled_action_does_not_refresh(window, monkeypatch):
     assert window.view.scene() is before
 
 
-def test_watcher_is_suspended_during_an_action(window, monkeypatch):
+def test_watcher_is_suspended_during_an_action(qtbot, window, monkeypatch):
     """§7.9 : l'application ne doit pas se notifier elle-même."""
     from tortoisepy.core.results import succeeded
     from tortoisepy.ui import actions
@@ -358,6 +367,7 @@ def test_watcher_is_suspended_during_an_action(window, monkeypatch):
     )
 
     window._run_action("checkout_branch", window.graph.nodes[0])
+    qtbot.waitUntil(lambda: bool(seen), timeout=5000)
     assert seen == [True], "la surveillance doit être suspendue"
 
 
