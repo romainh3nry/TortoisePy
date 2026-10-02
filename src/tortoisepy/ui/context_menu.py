@@ -86,6 +86,18 @@ def _single_node_menu(
     node: DisplayNode, state: RepositoryState
 ) -> tuple[MenuEntry, ...]:
     """§7.3 : menu hiérarchisé d'un nœud."""
+    if node.kind is NodeKind.WORKING:
+        # Ce nœud ne porte AUCUN commit : son OID est une sentinelle que
+        # pygit2 refuse (vérifié). Proposer « Cherry Pick » ou « Reset to
+        # this » mènerait à un échec garanti. Seul le commit a du sens.
+        return (
+            MenuEntry(
+                "Commit…",
+                "open_commit",
+                enabled=state.operation_in_progress is None,
+            ),
+        )
+
     busy = state.operation_in_progress is not None
     dirty = state.has_unstaged_changes or state.has_staged_changes
 
