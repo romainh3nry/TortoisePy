@@ -145,6 +145,8 @@ class MainWindow(QMainWindow):
         # égale `build_graph` rend le même graphe.
         self._panel_cache: dict[str, tuple] = {}
         self._panel_cache_key: tuple | None = None
+        self._selection_avant_refresh: str | None = None
+        self._head_avant_refresh: str | None = None
         # Largeur de panneau mémorisée, appliquée au premier `showEvent`
         # (voir `restore_settings`/`showEvent` : le splitter n'a pas de
         # vraie taille avant le premier affichage).
@@ -219,6 +221,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(self._title())
         self.resize(1400, 850)
         self.refresh()
+        # Centré une seule fois, à l'ouverture : sur un graphe de
+        # plusieurs milliers de pixels de haut, s'ouvrir ailleurs
+        # obligerait à chercher où l'on se trouve. Les rafraîchissements
+        # suivants respectent le déplacement de l'utilisateur.
+        self._center_on_head()
         self.restore_settings()
         self.settings.remember_repository(
             str(Path(repository.path).parent)
@@ -309,6 +316,24 @@ class MainWindow(QMainWindow):
 
     def refresh(self) -> None:
         """Reconstruit le graphe et relit l'état (§7.6, §7.9)."""
+        # Mémorisée AVANT la reconstruction : `show_graph` remplace la
+        # scène, et la sélection part avec les anciens items.
+        selection = self.view.selected_oids()
+        self._selection_avant_refresh = selection[0] if selection else None
+        # HEAD d'AVANT : s'il change, c'est un checkout, et la sélection
+        # doit suivre la nouvelle branche plutôt que rester sur l'ancienne
+        # (sinon le panneau latéral montrerait la branche qu'on vient de
+        # quitter).
+        self._head_avant_refresh = (
+            self.state.head_oid if self.state else None
+        )
+        # `show_graph` remplace la scène, ce qui remet les barres à zéro.
+        # On les restaure après, pour que la vue ne saute pas.
+        defilement = (
+            self.view.horizontalScrollBar().value(),
+            self.view.verticalScrollBar().value(),
+        )
+
         options = self.graph_options()
         self.graph = self._graph_cache.get(
             self.repository,
@@ -339,7 +364,18 @@ class MainWindow(QMainWindow):
             current_branch=courante,
         )
         self.commit_panel.clear()
-        self._center_on_head()
+
+        # PAS de recentrage ici : `refresh()` est appelé après CHAQUE
+        # action, et ramener la vue de force sur la branche courante
+        # défaisait le déplacement de l'utilisateur (signalé). Le
+        # centrage n'a lieu qu'à l'ouverture et sur « Recenter ».
+        #
+        # La SÉLECTION, elle, est conservée : elle remplit le panneau
+        # latéral, et la perdre à chaque rafraîchissement le viderait
+        # sans raison.
+        self._reselect_current_node()
+        self.view.horizontalScrollBar().setValue(defilement[0])
+        self.view.verticalScrollBar().setValue(defilement[1])
         self._update_status()
         self._update_push_action()
         self._update_fetch_action()
@@ -371,6 +407,26 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             if callable(arreter):
                 arreter(10_000)
         super().closeEvent(event)
+
+    def _reselect_current_node(self) -> None:
+        """Rend sa sélection au nœud qui l'avait, après reconstruction.
+
+        `show_graph` remplace la scène : les items sont neufs, et la
+        sélection précédente disparaît avec les anciens. Sans cette
+        restauration, le panneau latéral se viderait à chaque action.
+        """
+        courant = self.state.head_oid if self.state else None
+
+        # Un checkout déplace HEAD : la sélection le suit, car c'est la
+        # branche que l'utilisateur vient de choisir.
+        if courant is not None and courant != self._head_avant_refresh:
+            self.view.select_node(courant)
+            return
+
+        if self._selection_avant_refresh:
+            self.view.select_node(self._selection_avant_refresh)
+        elif courant is not None:
+            self.view.select_node(courant)
 
     def _center_on_head(self) -> None:
         """Place la vue sur la branche courante **et la sélectionne**.

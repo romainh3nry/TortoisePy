@@ -240,19 +240,29 @@ def test_view_opens_centred_on_the_current_branch(window):
     assert abs(centre.y() - target.y()) < 50.0
 
 
-def test_centring_survives_a_refresh(window):
-    from tortoisepy.ui.graph_items import NodeItem
+def test_a_refresh_does_not_recentre(window):
+    """L'EXIGENCE A CHANGÉ (demande de l'utilisateur).
 
+    Ce test affirmait l'inverse : « le centrage survit à un
+    rafraîchissement ». Or `refresh()` est appelé après chaque action,
+    et l'utilisateur qui s'était déplacé dans le graphe était ramené de
+    force sur sa branche courante — signalé comme gênant.
+
+    Le centrage n'a plus lieu qu'à l'ouverture et sur « Recenter ».
+    """
     window.view.centerOn(0, 0)
+    avant = (
+        window.view.horizontalScrollBar().value(),
+        window.view.verticalScrollBar().value(),
+    )
+
     window.refresh()
 
-    item = next(
-        i for i in window.view.scene().items()
-        if isinstance(i, NodeItem) and i.node.oid == window.state.head_oid
+    apres = (
+        window.view.horizontalScrollBar().value(),
+        window.view.verticalScrollBar().value(),
     )
-    centre = window.view.mapToScene(window.view.viewport().rect().center())
-    target = item.sceneBoundingRect().center()
-    assert abs(centre.y() - target.y()) < 50.0
+    assert apres == avant, "le rafraîchissement a déplacé la vue"
 
 
 def test_centring_on_an_unknown_node_is_harmless(window):
