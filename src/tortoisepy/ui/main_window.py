@@ -68,7 +68,7 @@ from tortoisepy.ui.dialogs import (
     show_error,
 )
 from tortoisepy.ui.graph_view import GraphView
-from tortoisepy.ui.tasks import BackgroundTask, FetchWorker
+from tortoisepy.ui.tasks import BackgroundTask, CallableWorker, FetchWorker
 from tortoisepy.ui.theme import QtMeasurer
 from tortoisepy.ui.watcher import RepositoryWatcher
 
@@ -853,6 +853,42 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
                     )
                 )
 
+    def run_in_background(self, appelable, suite, libelle: str) -> bool:
+        """Exécute `appelable` hors du fil principal, puis appelle `suite`.
+
+        Demandé par l'utilisateur : « à chaque fois qu'une action est
+        susceptible de faire freezer l'app, on la fait en arrière-plan
+        avec un loader ». Mesuré sur son dépôt, `build_graph` coûte
+        2185 ms et `list_changes` 760 ms — autant de gels.
+
+        Rend `False` si une opération tourne déjà : une seule à la fois,
+        et la seconde demande est ignorée plutôt qu'annulée (choix de
+        l'utilisateur). Sans ce verrou, deux fils liraient le dépôt en
+        même temps et les résultats arriveraient dans le désordre.
+
+        `suite` est appelée **dans le fil principal** : elle peut toucher
+        l'interface sans risque. Elle reçoit le résultat, ou l'exception
+        si l'opération a échoué.
+        """
+        if self._task is not None and self._task.is_running():
+            return False
+
+        self.progress.setRange(0, 0)     # indéterminé : durée inconnue
+        self.progress.show()
+        self.statusBar().showMessage(libelle)
+
+        def termine(resultat):
+            # La barre disparaît MÊME en cas d'échec : la laisser
+            # tourner ferait croire à un travail toujours en cours.
+            self.progress.hide()
+            self.statusBar().clearMessage()
+            suite(resultat)
+
+        self._task = BackgroundTask(CallableWorker(appelable), self)
+        self._task.finished.connect(termine)
+        self._task.start()
+        return True
+
     def open_commit_window(self) -> None:
         """Ouvre la fenêtre de commit, ou ramène celle déjà ouverte.
 
@@ -864,9 +900,25 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             self.commit_window.activateWindow()
             return
 
-        self.commit_window = CommitWindow(self.repository, self)
-        self.commit_window.committed.connect(self._on_committed)
-        self.commit_window.show()
+        # Le coût est dans `list_changes`, que la construction déclenche :
+        # 760 ms sur le dépôt de l'utilisateur. On le paie en arrière-plan,
+        # avec le loader, puis la fenêtre se construit sur un cache chaud.
+        from tortoisepy.core.changes import list_changes
+
+        def construire(_resultat=None):
+            self.commit_window = CommitWindow(self.repository, self)
+            self.commit_window.committed.connect(self._on_committed)
+            self.commit_window.show()
+
+        lance = self.run_in_background(
+            lambda: list_changes(self.repository),
+            construire,
+            "Lecture des modifications…",
+        )
+        if not lance:
+            # Une opération tourne déjà : on construit tout de suite
+            # plutôt que d'ignorer la demande de l'utilisateur.
+            construire()
 
     def open_conflict_window(self) -> None:
         """Ouvre la résolution de conflits, ou ramène celle déjà ouverte.

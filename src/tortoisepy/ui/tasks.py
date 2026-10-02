@@ -47,6 +47,35 @@ class FetchWorker(QObject):
         self.progress.emit(received, total)
 
 
+class CallableWorker(QObject):
+    """Exécute n'importe quel appelable hors du fil principal.
+
+    `FetchWorker` est spécifique au réseau ; celui-ci sert à toute
+    opération de LECTURE dont le coût croît avec la taille du dépôt.
+    Mesuré sur un dépôt réel de 713 refs : `build_graph` 2185 ms,
+    `list_changes` 760 ms, `diff_for` 385 ms — autant de gels de
+    l'interface.
+
+    Une exception est **rapportée**, pas avalée : elle est émise comme
+    résultat, et l'appelant décide. Une opération qui échoue en silence
+    laisserait l'interface attendre un résultat qui n'arrive jamais.
+    """
+
+    progress = Signal(int, int)
+    finished = Signal(object)
+
+    def __init__(self, appelable: Callable[[], object]):
+        super().__init__()
+        self._appelable = appelable
+
+    def run(self) -> None:
+        try:
+            resultat = self._appelable()
+        except Exception as erreur:  # noqa: BLE001 — rapportée, pas avalée
+            resultat = erreur
+        self.finished.emit(resultat)
+
+
 class BackgroundTask(QObject):
     """Garde vivants un fil et son ouvrier le temps d'une opération.
 
@@ -57,7 +86,7 @@ class BackgroundTask(QObject):
     progress = Signal(int, int)
     finished = Signal(object)
 
-    def __init__(self, worker: FetchWorker, parent=None):
+    def __init__(self, worker, parent=None):
         super().__init__(parent)
         self._thread = QThread(self)
         self._worker = worker

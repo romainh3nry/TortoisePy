@@ -443,25 +443,31 @@ def test_watcher_restarts_after_a_fetch(window, qtbot, monkeypatch):
     assert window.watcher.is_watching() is True
 
 
-def test_commit_window_opens(window):
+def test_commit_window_opens(qtbot, window):
+    """L'ouverture est DIFFÉRÉE depuis la phase 24 : `list_changes` coûte
+    760 ms sur un dépôt réel, et le payer dans le fil principal gelait
+    l'application. L'exigence est inchangée — la fenêtre s'ouvre — seul
+    le moment a bougé."""
     window.open_commit_window()
-    assert window.commit_window is not None
+    qtbot.waitUntil(lambda: window.commit_window is not None, timeout=5000)
     window.commit_window.close()
 
 
-def test_commit_window_is_reused(window):
+def test_commit_window_is_reused(qtbot, window):
     """Deux fenêtres de commit sur le même dépôt se contrediraient."""
     window.open_commit_window()
+    qtbot.waitUntil(lambda: window.commit_window is not None, timeout=5000)
     first = window.commit_window
     window.open_commit_window()
     assert window.commit_window is first
     first.close()
 
 
-def test_graph_refreshes_after_a_commit(window, monkeypatch):
+def test_graph_refreshes_after_a_commit(qtbot, window, monkeypatch):
     from tortoisepy.core.results import succeeded
 
     window.open_commit_window()
+    qtbot.waitUntil(lambda: window.commit_window is not None, timeout=5000)
     before = window.view.scene()
     window.commit_window.committed.emit(succeeded("fait"), None)
     assert window.view.scene() is not before
