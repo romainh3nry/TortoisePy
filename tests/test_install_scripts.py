@@ -239,3 +239,89 @@ def test_every_version_in_the_repository_is_reachable_by_the_script():
         "ces fichiers épinglent la version sans être couverts par "
         f"scripts/set-version.py : {oublies}"
     )
+
+
+# --- Le venv de développement suit la version ---------------------------
+
+
+def test_the_script_refreshes_the_local_venv(tmp_path, monkeypatch):
+    """Demandé par l'utilisateur après l'avoir fait à la main deux fois.
+
+    Un venv en mode éditable pointe sur le code source — les
+    modifications sont immédiates — mais sa VERSION est figée à
+    l'installation. Changer `pyproject.toml` ne la met pas à jour, d'où
+    l'écart que `test_the_reported_version_follows_the_package` signale.
+    """
+    import shutil
+
+    module = _charger_set_version()
+
+    racine = tmp_path / "projet"
+    (racine / "scripts").mkdir(parents=True)
+    (racine / ".venv" / "bin").mkdir(parents=True)
+    (racine / ".venv" / "bin" / "python").write_text("")
+    for nom in ("pyproject.toml", "README.md",
+                "scripts/install.sh", "scripts/install.ps1"):
+        shutil.copy2(RACINE / nom, racine / nom)
+
+    module.RACINE = racine
+
+    lances = []
+    monkeypatch.setattr(
+        module.subprocess, "run",
+        lambda commande, **kw: lances.append(commande) or _Termine(),
+    )
+
+    module.rafraichir_venv()
+
+    assert lances, "aucune réinstallation lancée"
+    commande = lances[0]
+    assert str(racine / ".venv" / "bin" / "python") in commande[0]
+    assert "install" in commande and "-e" in commande
+    assert "--no-deps" in commande, (
+        "sans --no-deps, PySide6 et pygit2 seraient réexaminés pour rien"
+    )
+
+
+class _Termine:
+    returncode = 0
+    stdout = ""
+    stderr = ""
+
+
+def test_no_venv_is_not_an_error(tmp_path, monkeypatch):
+    """Sur une machine sans venv, le script doit continuer sans broncher.
+
+    Changer la version et réinstaller sont deux choses : échouer sur la
+    seconde priverait de la première.
+    """
+    module = _charger_set_version()
+    module.RACINE = tmp_path          # aucun .venv ici
+
+    lances = []
+    monkeypatch.setattr(
+        module.subprocess, "run",
+        lambda commande, **kw: lances.append(commande) or _Termine(),
+    )
+
+    module.rafraichir_venv()          # ne doit pas lever
+    assert lances == [], "une réinstallation a été tentée sans venv"
+
+
+def test_setting_a_version_also_refreshes(tmp_path, monkeypatch):
+    """Le bout de la chaîne : poser une version rafraîchit le venv."""
+    import shutil
+
+    module = _charger_set_version()
+    racine = tmp_path / "projet"
+    (racine / "scripts").mkdir(parents=True)
+    for nom in ("pyproject.toml", "README.md",
+                "scripts/install.sh", "scripts/install.ps1"):
+        shutil.copy2(RACINE / nom, racine / nom)
+    module.RACINE = racine
+
+    appels = []
+    monkeypatch.setattr(module, "rafraichir_venv", lambda: appels.append(1))
+
+    module.main(["9.8.7"])
+    assert appels == [1], "le venv n'a pas été rafraîchi"

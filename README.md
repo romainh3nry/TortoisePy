@@ -209,7 +209,8 @@ both installers — is a copy, and one script rewrites them all:
 python scripts/set-version.py X.Y.Z
 ```
 
-It prints what it changed, and leaves Git alone. Commit, then tag:
+It prints what it changed, refreshes your local `.venv` so
+`topy --version` keeps up, and leaves Git alone. Commit, then tag:
 
 ```bash
 git tag vX.Y.Z && git push origin vX.Y.Z
