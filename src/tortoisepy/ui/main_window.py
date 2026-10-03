@@ -43,7 +43,7 @@ from tortoisepy.core.pull import (
 from tortoisepy.core.push_state import divergence, push_state, unpushed_oids
 from tortoisepy.core.rebase import rebase_targets, start_rebase
 from tortoisepy.core.results import failed, succeeded
-from tortoisepy.core.search import search_commits
+from tortoisepy.core.search import matching_branches, search_commits
 from tortoisepy.core.shortcuts import CATALOGUE
 from tortoisepy.core.state import read_state
 from tortoisepy.layout.engine import layout_graph
@@ -146,6 +146,8 @@ class MainWindow(QMainWindow):
         self._panel_cache: dict[str, tuple] = {}
         self._panel_cache_key: tuple | None = None
         self._selection_avant_refresh: str | None = None
+        self._dernier_motif_branche: str | None = None
+        self._index_branche = 0
         self._head_avant_refresh: str | None = None
         # Largeur de panneau mémorisée, appliquée au premier `showEvent`
         # (voir `restore_settings`/`showEvent` : le splitter n'a pas de
@@ -559,6 +561,16 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         # Demandé par l'utilisateur : revenir sur la branche courante après
         # s'être déplacé dans le graphe. Pas de raccourci clavier — elle
         # n'est pas dans le catalogue des dix actions raccourcissables.
+        # Champ SÉPARÉ de celui des commits (choix de l'utilisateur) :
+        # chercher une branche et chercher un commit sont deux gestes
+        # distincts, et les mêler rendrait le résultat imprévisible.
+        self.branch_search_field = QLineEdit()
+        self.branch_search_field.setPlaceholderText("Find branch…")
+        self.branch_search_field.setClearButtonEnabled(True)
+        self.branch_search_field.setMaximumWidth(200)
+        self.branch_search_field.returnPressed.connect(self.find_branch)
+        toolbar.addWidget(self.branch_search_field)
+
         self.recenter_action = QAction("Recenter", self)
         self.recenter_action.setToolTip(
             "Bring the current branch back into view"
@@ -647,14 +659,58 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             if candidate is not window and _still_alive(candidate)
         ]
 
+    def find_branch(self) -> None:
+        """Centre sur une branche correspondant au motif, puis cycle.
+
+        Demandé par l'utilisateur : « si plusieurs branches ont le même
+        mot-clé, on navigue entre elles à chaque appui sur Entrée ».
+
+        Le cycle repart de zéro quand le motif change : hériter de la
+        position précédente ferait sauter des résultats sans raison
+        visible.
+        """
+        motif = self.branch_search_field.text()
+        trouves = matching_branches(self.graph, motif)
+
+        if not trouves:
+            if motif.strip():
+                self.statusBar().showMessage("no branch found", 15000)
+            return
+
+        if motif != self._dernier_motif_branche:
+            self._dernier_motif_branche = motif
+            self._index_branche = 0
+        else:
+            # Modulo : après le dernier on revient au premier, sinon la
+            # touche semblerait cassée une fois au bout.
+            self._index_branche = (self._index_branche + 1) % len(trouves)
+
+        cible = trouves[self._index_branche]
+        self.view.center_on_node(cible)
+        self.view.select_node(cible)
+
+        if len(trouves) > 1:
+            self.statusBar().showMessage(
+                f"{self._index_branche + 1} of {len(trouves)} branches "
+                "— press Enter for the next",
+                15000,
+            )
+        else:
+            self.statusBar().showMessage("1 branch found", 15000)
+
     def focus_search(self) -> None:
-        """Place le curseur dans le champ de recherche.
+        """Place le curseur dans la recherche de BRANCHES.
+
+        Demandé par l'utilisateur : ⌘F vise désormais ce champ plutôt
+        que celui des commits. Chercher une branche pour s'y rendre est
+        le geste le plus fréquent ; la recherche de commits reste
+        atteignable au clic, dans le panneau latéral où elle vit.
 
         Le contenu est sélectionné : une nouvelle recherche remplace
         alors la précédente sans avoir à l'effacer d'abord.
         """
-        self.search_field.setFocus()
-        self.search_field.selectAll()
+        self.branch_search_field.setFocus()
+        self.branch_search_field.selectAll()
 
     def run_search(self) -> None:
         """Surligne les commits correspondants, et dit combien."""
@@ -727,7 +783,11 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             action = QAction(spec.label, self)
             action.triggered.connect(slots[spec.action_id])
             self.addAction(action)
-            self.toolbar.addAction(action)
+            # « search » met le curseur dans le champ de recherche, qui
+            # est juste à côté : un bouton ferait doublon. L'action reste
+            # enregistrée — c'est elle que porte ⌘F.
+            if spec.action_id != "search":
+                self.toolbar.addAction(action)
             self.actions_by_id[spec.action_id] = action
 
         # Ces trois-là sont manipulées ailleurs (activation/désactivation

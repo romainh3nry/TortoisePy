@@ -1318,12 +1318,17 @@ def test_the_search_field_spans_the_commit_panel(window):
     layout = window.commit_panel.layout()
     assert layout.itemAt(0).widget() is champ, "il doit être en tête"
 
-    # Aucun QLineEdit ne doit subsister dans la barre d'outils.
-    assert not [
-        a
+    # Le champ des COMMITS ne doit pas revenir dans la barre d'outils.
+    # La recherche de BRANCHES y vit, elle, et c'est voulu : elle agit
+    # sur le graphe, pas sur la liste du panneau.
+    dans_la_barre = [
+        window.toolbar.widgetForAction(a)
         for a in window.toolbar.actions()
         if isinstance(window.toolbar.widgetForAction(a), QLineEdit)
     ]
+    assert champ not in dans_la_barre, (
+        "le champ des commits est reparti dans la barre d'outils"
+    )
 
 
 def test_searching_filters_the_commit_list(window, monkeypatch):
@@ -1500,8 +1505,13 @@ def test_unpushed_markers_are_not_cached(window, monkeypatch):
     assert vus[0] != vus[1], "les marqueurs doivent être relus à chaque affichage"
 
 
-def test_ctrl_f_is_bound_to_the_search_field(window):
+def test_ctrl_f_is_bound_to_the_branch_search(window):
     """D37 : le champ existait depuis la phase 13, sans raccourci.
+
+    **La CIBLE a changé** (demande de l'utilisateur) : ⌘F vise désormais
+    la recherche de BRANCHES, pas celle des commits. Chercher une branche
+    pour s'y rendre est le geste le plus fréquent ; le champ des commits
+    reste atteignable au clic, dans le panneau où il vit.
 
     **Le focus n'est pas vérifiable ici** : sous pytest-qt en mode
     `offscreen`, la fenêtre n'est jamais activée (`isActiveWindow()` est
@@ -1517,10 +1527,10 @@ def test_ctrl_f_is_bound_to_the_search_field(window):
     }
     assert "Ctrl+F" in actions, sorted(actions)
 
-    window.search_field.setText("ancienne recherche")
+    window.branch_search_field.setText("ancienne recherche")
     actions["Ctrl+F"].trigger()
 
-    assert window.search_field.selectedText() == "ancienne recherche", (
+    assert window.branch_search_field.selectedText() == "ancienne recherche", (
         "le contenu doit être sélectionné, pour qu'une nouvelle recherche "
         "remplace la précédente sans avoir à l'effacer"
     )
