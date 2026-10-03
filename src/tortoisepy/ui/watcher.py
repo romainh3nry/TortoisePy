@@ -113,7 +113,13 @@ class RepositoryWatcher(QObject):
         finally:
             self._pending_graph = False
             self._pending_state = False
-            self._timer.stop()
+            try:
+                self._timer.stop()
+            except RuntimeError:
+                # Le widget C++ a été détruit avant la sortie du bloc —
+                # fenêtre fermée pendant une opération. Rien à arrêter,
+                # et lever ici masquerait le vrai résultat de l'opération.
+                return
 
             # Les événements du système de fichiers arrivent APRÈS la sortie
             # du bloc : mesuré, lever le drapeau tout de suite laissait

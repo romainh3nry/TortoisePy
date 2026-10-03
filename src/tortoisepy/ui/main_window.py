@@ -43,7 +43,7 @@ from tortoisepy.core.pull import (
 from tortoisepy.core.push_state import divergence, push_state, unpushed_oids
 from tortoisepy.core.rebase import rebase_targets, start_rebase
 from tortoisepy.core.results import failed, succeeded
-from tortoisepy.core.search import search_commits
+from tortoisepy.core.search import matching_branches, search_commits
 from tortoisepy.core.shortcuts import CATALOGUE
 from tortoisepy.core.state import read_state
 from tortoisepy.layout.engine import layout_graph
@@ -146,6 +146,8 @@ class MainWindow(QMainWindow):
         self._panel_cache: dict[str, tuple] = {}
         self._panel_cache_key: tuple | None = None
         self._selection_avant_refresh: str | None = None
+        self._dernier_motif_branche: str | None = None
+        self._index_branche = 0
         self._head_avant_refresh: str | None = None
         # Largeur de panneau mémorisée, appliquée au premier `showEvent`
         # (voir `restore_settings`/`showEvent` : le splitter n'a pas de
@@ -335,19 +337,52 @@ class MainWindow(QMainWindow):
         )
 
         options = self.graph_options()
-        self.graph = self._graph_cache.get(
-            self.repository,
-            lambda repo: build_graph(repo, options),
-            options_key=(options.show_tags,),
-        )
-        self.state = read_state(self.repository)
 
-        # Le nœud de travail est greffé APRÈS le cache : il dépend de
-        # l'arbre de travail, qui change bien plus souvent que la
-        # topologie. L'inclure dans le graphe mis en cache obligerait à
-        # tout reconstruire à chaque frappe dans un éditeur.
-        self.graph = _avec_noeud_de_travail(self.graph, self.state)
-        unpushed = unpushed_oids(self.repository)
+        def lire():
+            """Les trois lectures coûteuses, hors du fil principal."""
+            graphe = self._graph_cache.get(
+                self.repository,
+                lambda repo: build_graph(repo, options),
+                options_key=(options.show_tags,),
+            )
+            etat = read_state(self.repository)
+            # Le nœud de travail est greffé APRÈS le cache : il dépend
+            # de l'arbre de travail, qui change bien plus souvent que la
+            # topologie. L'inclure dans le graphe mis en cache
+            # obligerait à tout reconstruire à chaque frappe.
+            return (
+                _avec_noeud_de_travail(graphe, etat),
+                etat,
+                unpushed_oids(self.repository),
+            )
+
+        def afficher(resultat):
+            if isinstance(resultat, Exception):
+                show_error(self, failed("Rafraîchissement", str(resultat)))
+                return
+            self.graph, self.state, unpushed = resultat
+            self._afficher_graphe(unpushed, defilement)
+
+        # Le PREMIER rafraîchissement est synchrone : `__init__` enchaîne
+        # sur `restore_settings` et `_center_on_head`, qui ont besoin du
+        # graphe. Une fenêtre qui s'ouvre sans graphe, même brièvement,
+        # est fragile — et c'est le seul appel où l'utilisateur attend
+        # déjà le démarrage.
+        if self.graph is None:
+            afficher(lire())
+            return
+
+        # `refresh` est aussi appelé depuis la FIN d'opérations déjà en
+        # arrière-plan (checkout, commit, fetch) : le verrou est alors
+        # pris. Lui refuser le passage laisserait le graphe périmé —
+        # exactement ce que le rafraîchissement doit empêcher.
+        if not self.run_in_background(lire, afficher, "Chargement du graphe…"):
+            afficher(lire())
+        return
+
+    def _afficher_graphe(self, unpushed, defilement) -> None:
+        """Pose le graphe dans la vue. **Fil principal uniquement** :
+        Qt interdit de toucher aux widgets ailleurs."""
         # Le mesureur est refait à chaque rafraîchissement : la branche
         # courante change au gré des checkouts, et elle décide si la
         # ligne `HEAD` occupe de la place (sinon le nœud courant réserve
@@ -559,6 +594,16 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         # Demandé par l'utilisateur : revenir sur la branche courante après
         # s'être déplacé dans le graphe. Pas de raccourci clavier — elle
         # n'est pas dans le catalogue des dix actions raccourcissables.
+        # Champ SÉPARÉ de celui des commits (choix de l'utilisateur) :
+        # chercher une branche et chercher un commit sont deux gestes
+        # distincts, et les mêler rendrait le résultat imprévisible.
+        self.branch_search_field = QLineEdit()
+        self.branch_search_field.setPlaceholderText("Find branch…")
+        self.branch_search_field.setClearButtonEnabled(True)
+        self.branch_search_field.setMaximumWidth(200)
+        self.branch_search_field.returnPressed.connect(self.find_branch)
+        toolbar.addWidget(self.branch_search_field)
+
         self.recenter_action = QAction("Recenter", self)
         self.recenter_action.setToolTip(
             "Bring the current branch back into view"
@@ -647,14 +692,58 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             if candidate is not window and _still_alive(candidate)
         ]
 
+    def find_branch(self) -> None:
+        """Centre sur une branche correspondant au motif, puis cycle.
+
+        Demandé par l'utilisateur : « si plusieurs branches ont le même
+        mot-clé, on navigue entre elles à chaque appui sur Entrée ».
+
+        Le cycle repart de zéro quand le motif change : hériter de la
+        position précédente ferait sauter des résultats sans raison
+        visible.
+        """
+        motif = self.branch_search_field.text()
+        trouves = matching_branches(self.graph, motif)
+
+        if not trouves:
+            if motif.strip():
+                self.statusBar().showMessage("no branch found", 15000)
+            return
+
+        if motif != self._dernier_motif_branche:
+            self._dernier_motif_branche = motif
+            self._index_branche = 0
+        else:
+            # Modulo : après le dernier on revient au premier, sinon la
+            # touche semblerait cassée une fois au bout.
+            self._index_branche = (self._index_branche + 1) % len(trouves)
+
+        cible = trouves[self._index_branche]
+        self.view.center_on_node(cible)
+        self.view.select_node(cible)
+
+        if len(trouves) > 1:
+            self.statusBar().showMessage(
+                f"{self._index_branche + 1} of {len(trouves)} branches "
+                "— press Enter for the next",
+                15000,
+            )
+        else:
+            self.statusBar().showMessage("1 branch found", 15000)
+
     def focus_search(self) -> None:
-        """Place le curseur dans le champ de recherche.
+        """Place le curseur dans la recherche de BRANCHES.
+
+        Demandé par l'utilisateur : ⌘F vise désormais ce champ plutôt
+        que celui des commits. Chercher une branche pour s'y rendre est
+        le geste le plus fréquent ; la recherche de commits reste
+        atteignable au clic, dans le panneau latéral où elle vit.
 
         Le contenu est sélectionné : une nouvelle recherche remplace
         alors la précédente sans avoir à l'effacer d'abord.
         """
-        self.search_field.setFocus()
-        self.search_field.selectAll()
+        self.branch_search_field.setFocus()
+        self.branch_search_field.selectAll()
 
     def run_search(self) -> None:
         """Surligne les commits correspondants, et dit combien."""
@@ -727,7 +816,11 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             action = QAction(spec.label, self)
             action.triggered.connect(slots[spec.action_id])
             self.addAction(action)
-            self.toolbar.addAction(action)
+            # « search » met le curseur dans le champ de recherche, qui
+            # est juste à côté : un bouton ferait doublon. L'action reste
+            # enregistrée — c'est elle que porte ⌘F.
+            if spec.action_id != "search":
+                self.toolbar.addAction(action)
             self.actions_by_id[spec.action_id] = action
 
         # Ces trois-là sont manipulées ailleurs (activation/désactivation
@@ -760,6 +853,22 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             message += f" — {self.state.operation_in_progress} en cours"
         if self.state.has_conflicts:
             message += f" — {len(self.state.conflicted_paths)} conflit(s)"
+
+        # Un résumé de fetch en attente a la priorité : il nomme les refs
+        # qui viennent d'arriver, information que « Sur <branche> » ne
+        # porte pas et que l'utilisateur n'a encore jamais vue.
+        #
+        # Le drapeau existait mais n'était LU nulle part : il ne protégeait
+        # rien. Cela ne se voyait pas tant que `refresh()` était synchrone
+        # — le résumé était réaffiché juste après l'écrasement. Depuis que
+        # la lecture passe en arrière-plan, `_update_status` s'exécute
+        # APRÈS ce réaffichage et le résumé disparaissait (reproduit).
+        if self._fetch_summary is not None:
+            resume, self._fetch_summary = self._fetch_summary, None
+            self.statusBar().showMessage(resume, 15000)
+            self._update_branch_label()
+            self.setWindowTitle(self._title())
+            return
 
         self.statusBar().showMessage(message)
         self._update_branch_label()
@@ -840,14 +949,36 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         if demande is not None and not confirm(self, demande):
             return
 
-        with self.watcher.suspended():
-            if action == "cherry_pick_commit":
-                resultat = operations.cherry_pick(self.repository, oid)
-            elif action == "revert_commit_oid":
-                resultat = operations.revert_commit(self.repository, oid)
-            else:
-                return
+        if action not in ("cherry_pick_commit", "revert_commit_oid"):
+            return
 
+        # Même traitement que les actions du graphe (D61, révisée) : un
+        # cherry-pick écrit dans le dépôt et peut durer. La suspension du
+        # surveillant reste dans le FIL PRINCIPAL — ses minuteurs Qt ne
+        # peuvent pas être démarrés ailleurs (vérifié).
+        suspension = self.watcher.suspended()
+        suspension.__enter__()
+
+        def ecrire():
+            if action == "cherry_pick_commit":
+                return operations.cherry_pick(self.repository, oid)
+            return operations.revert_commit(self.repository, oid)
+
+        def termine(resultat):
+            suspension.__exit__(None, None, None)
+            self._set_actions_enabled(True)
+            if isinstance(resultat, Exception):
+                show_error(self, failed("Action", str(resultat)))
+                return
+            self._apres_action_panneau(resultat)
+
+        self._set_actions_enabled(False)
+        if not self.run_in_background(ecrire, termine, "Opération en cours…"):
+            suspension.__exit__(None, None, None)
+            self._set_actions_enabled(True)
+
+    def _apres_action_panneau(self, resultat) -> None:
+        """Suite d'une action du panneau, une fois l'écriture terminée."""
         if resultat.needs_refresh:
             self._graph_cache.invalidate()
             self.refresh()
@@ -908,6 +1039,17 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
                         name, self._selected_node(), branch
                     )
                 )
+
+    def _set_actions_enabled(self, actif: bool) -> None:
+        """Active ou désactive ce qui pourrait déclencher une écriture.
+
+        Pendant une écriture, le graphe et la barre d'outils sont gelés :
+        le verrou de `run_in_background` refuserait de toute façon une
+        seconde opération, mais sans retour visuel l'utilisateur
+        cliquerait dans le vide.
+        """
+        self.view.setEnabled(actif)
+        self.toolbar.setEnabled(actif)
 
     def run_in_background(self, appelable, suite, libelle: str) -> bool:
         """Exécute `appelable` hors du fil principal, puis appelle `suite`.
@@ -1192,17 +1334,45 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             self.open_conflict_window()
             return
 
-        with self.watcher.suspended():
-            result = actions.execute_action(action, context)
+        # Les écritures aussi passent en arrière-plan (D61, révisée) :
+        # sur un gros dépôt, un checkout réécrit des milliers de fichiers
+        # et gèle l'interface plusieurs secondes (signalé).
+        #
+        # Deux précautions que les lectures n'exigent pas : les actions
+        # sont DÉSACTIVÉES le temps de l'écriture — lancer un commit
+        # pendant qu'un checkout change de branche produirait un résultat
+        # imprévisible — et le graphe n'est rafraîchi qu'À LA FIN, sous
+        # peine de montrer un état transitoire.
+        # La suspension du surveillant reste dans le FIL PRINCIPAL : il
+        # manipule des minuteurs Qt, et les démarrer depuis un autre fil
+        # provoque « QObject::startTimer: Timers cannot be started from
+        # another thread » (vérifié).
+        suspension = self.watcher.suspended()
+        suspension.__enter__()
 
-        if result is None:
-            return  # annulé par l'utilisateur, ou action sans effet
+        def ecrire():
+            return actions.execute_action(action, context)
 
-        if result.repository_changed:
-            self.refresh()
+        def termine(result):
+            suspension.__exit__(None, None, None)
+            self._set_actions_enabled(True)
 
-        if not result.success:
-            show_error(self, result)
+            if isinstance(result, Exception):
+                show_error(self, failed("Action", str(result)))
+                return
+            if result is None:
+                return  # annulé par l'utilisateur, ou action sans effet
+
+            if result.repository_changed:
+                self.refresh()
+            if not result.success:
+                show_error(self, result)
+
+        self._set_actions_enabled(False)
+        if not self.run_in_background(ecrire, termine, "Opération en cours…"):
+            # Une opération tourne déjà : on ne lance pas la seconde.
+            suspension.__exit__(None, None, None)
+            self._set_actions_enabled(True)
 
     def _start_fetch(self) -> None:
         """Lance un fetch en arrière-plan, avec progression."""
@@ -1253,13 +1423,21 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         # disparaîtrait sans avoir été lu.
         self._fetch_summary = result.summary
 
+        # Affiché tout de suite — l'utilisateur attend le retour du fetch —
+        # et `_fetch_summary` reste posé pour que `_update_status` ne
+        # l'écrase pas quand le rafraîchissement de fond se terminera.
+        # Le résumé nomme les refs arrivées : « new: origin/feature, v2.0 ».
+        self.statusBar().showMessage(result.summary, 15000)
+
         if result.repository_changed:
             self.refresh()
 
-        # Réaffiché après le refresh, pour qu'il survive à `_update_status`.
-        # Le résumé nomme les refs arrivées : « new: origin/feature, v2.0 ».
-        self.statusBar().showMessage(result.summary, 15000)
-        self._fetch_summary = None
+        # Le drapeau n'est pas retiré ici : `_update_status` le consomme
+        # (cf. plus haut), ce qui le relie à l'événement qui l'écrasait
+        # plutôt qu'à un délai arbitraire. Sans refresh, rien ne l'écrase
+        # et il n'y a rien à protéger — on le retire donc tout de suite.
+        if not result.repository_changed:
+            self._fetch_summary = None
 
     def _update_push_action(self) -> None:
         """Grise le bouton quand il n'y a rien à pousser.

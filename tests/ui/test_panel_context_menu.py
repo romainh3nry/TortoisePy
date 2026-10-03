@@ -126,7 +126,7 @@ def test_the_menu_offers_the_four_requested_actions(fenetre):
     }
 
 
-def test_cherry_picking_applies_the_selected_commit(fenetre):
+def test_cherry_picking_applies_the_selected_commit(qtbot, fenetre):
     """Le commit choisi atterrit sur la branche courante."""
     _afficher_feature(fenetre)
     arbre = fenetre.commit_panel._tree
@@ -136,8 +136,15 @@ def test_cherry_picking_applies_the_selected_commit(fenetre):
 
     avant = str(fenetre.repository.head.target)
     fenetre.run_panel_action("cherry_pick_commit", vise)
+    # L'écriture est DIFFÉRÉE depuis la phase 24bis : elle part en
+    # arrière-plan avec le loader, comme les actions du graphe.
+    qtbot.waitUntil(
+        lambda: str(pygit2.Repository(fenetre.repository.path).head.target)
+        != avant,
+        timeout=5000,
+    )
 
-    apres = str(fenetre.repository.head.target)
+    apres = str(pygit2.Repository(fenetre.repository.path).head.target)
     assert apres != avant, "aucun commit n'a été créé"
     assert fenetre.repository.get(apres).message.strip() == sujet
     assert fenetre.repository.head.shorthand == "main", (
@@ -224,6 +231,7 @@ def test_a_conflict_opens_the_resolution_window(qtbot, tmp_path):
     fenetre.open_conflict_window = lambda: ouvertures.append(1)
 
     fenetre.run_panel_action("cherry_pick_commit", conflictuel)
+    qtbot.waitUntil(lambda: bool(ouvertures), timeout=5000)
 
     assert ouvertures, (
         "un conflit doit ouvrir la fenêtre de résolution, "

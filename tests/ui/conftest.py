@@ -26,3 +26,42 @@ def _qapp():
 
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+@pytest.fixture
+def attendre_le_fond():
+    """Attend la fin du travail de fond d'une fenêtre.
+
+    Depuis que `refresh()` lit le dépôt en arrière-plan (loader demandé
+    par l'utilisateur), la méthode rend la main AVANT que le graphe soit
+    reposé : dix tests écrits à l'époque synchrone vérifiaient le
+    résultat trop tôt.
+
+    Attendre `view.isEnabled()` ne suffit pas pour les actions d'écriture :
+    `run_in_background` réactive l'interface, puis la suite enchaîne sur
+    `refresh()`, qui reprend le verrou et remontre la barre. On attend
+    donc le verrou lui-même, seul témoin fiable du « plus rien ne tourne ».
+
+    Le verrou se relâche ENTRE deux tâches enchaînées : une action
+    d'écriture le rend, puis son `refresh()` le reprend aussitôt. Guetter
+    le premier relâchement rendrait donc la main au milieu de la chaîne
+    (vérifié sur `test_fetch_summary_survives_the_refresh`). On exige une
+    accalmie : le verrou doit être libre, et le rester le temps de laisser
+    une tâche suivante démarrer.
+    """
+
+    def attendre(qtbot, fenetre, timeout: int = 10000) -> None:
+        def libre() -> bool:
+            tache = fenetre._task
+            return tache is None or not tache.is_running()
+
+        for _ in range(50):
+            qtbot.waitUntil(libre, timeout=timeout)
+            # Laisse une tâche enchaînée prendre le verrou, s'il y en a une.
+            qtbot.wait(30)
+            if libre():
+                return
+
+        raise AssertionError("le travail de fond ne se termine jamais")
+
+    return attendre

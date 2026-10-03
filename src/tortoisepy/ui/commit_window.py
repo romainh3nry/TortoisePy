@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QTreeWidget,
@@ -121,8 +122,18 @@ class CommitWindow(QMainWindow):
         )
         self.check_all_button.clicked.connect(self.check_all)
 
+        # Le push traverse le réseau — plusieurs secondes — et le commit
+        # écrit l'index et l'arbre. Sans retour visuel, la fenêtre paraît
+        # figée (signalé par l'utilisateur).
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)      # indéterminé : durée inconnue
+        self.progress.setMaximumWidth(180)
+        self.progress.setTextVisible(True)
+        self.progress.hide()
+
         buttons = QHBoxLayout()
         buttons.addWidget(self.check_all_button)
+        buttons.addWidget(self.progress)
         buttons.addStretch(1)
         buttons.addWidget(cancel)
         buttons.addWidget(self.commit_button)
@@ -198,6 +209,23 @@ class CommitWindow(QMainWindow):
             and item.data(0, SELECTABLE_ROLE)
         )
 
+    def _travail_en_cours(self, libelle: str) -> None:
+        """Affiche le loader et gèle les boutons.
+
+        Un second clic lancerait un commit concurrent sur le même index.
+        """
+        self.progress.setFormat(libelle)
+        self.progress.show()
+        self.commit_button.setEnabled(False)
+        self.push_button.setEnabled(False)
+
+    def _travail_fini(self) -> None:
+        """Rend la main. Appelé MÊME en cas d'échec, sinon la fenêtre
+        resterait inutilisable."""
+        self.progress.hide()
+        self.commit_button.setEnabled(True)
+        self.push_button.setEnabled(True)
+
     def check_all(self) -> None:
         """Coche tous les fichiers cochables.
 
@@ -270,9 +298,15 @@ class CommitWindow(QMainWindow):
 
     def commit(self) -> None:
         paths = self.checked_paths()
-        result = self._write_commit(paths)
-        if result.success:
-            self._try_sync_index_after_commit(paths)
+        self._travail_en_cours("Commit…")
+        try:
+            result = self._write_commit(paths)
+            if result.success:
+                self._try_sync_index_after_commit(paths)
+        finally:
+            # `finally` : une exception ne doit pas laisser la fenêtre
+            # gelée avec son loader tournant indéfiniment.
+            self._travail_fini()
         self._after_commit(result, None)
 
     def commit_and_push(self) -> None:
@@ -295,13 +329,25 @@ class CommitWindow(QMainWindow):
             return
 
         paths = self.checked_paths()
-        result = self._write_commit(paths)
-        if not result.success:
-            self._after_commit(result, None)
-            return
-        self._try_sync_index_after_commit(paths)
+        self._travail_en_cours("Commit & Push…")
+        try:
+            result = self._write_commit(paths)
+            if not result.success:
+                self._travail_fini()
+                self._after_commit(result, None)
+                return
+            self._try_sync_index_after_commit(paths)
+        except Exception:
+            self._travail_fini()
+            raise
 
-        pushed = operations.push_branch(self.repository)
+        # Le loader couvre AUSSI le push : c'est la partie la plus longue,
+        # puisqu'elle traverse le réseau.
+        try:
+            pushed = operations.push_branch(self.repository)
+        finally:
+            self._travail_fini()
+
         if not pushed.success:
             # Le commit est fait : le dire explicitement, sinon on croit
             # avoir tout perdu (§8 phase 6).

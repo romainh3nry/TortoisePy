@@ -536,6 +536,52 @@ def _describe(callbacks_list: list["FetchCallbacks"]) -> str:
     return " — ".join(parts)
 
 
+def _realigner_les_tags(repo, remote, callbacks) -> None:
+    """Fait suivre les tags DÉPLACÉS sur le serveur.
+
+    `remote.fetch` rapporte bien les nouveaux tags et retire les
+    supprimés (avec `PRUNE`), mais il ne **déplace** pas ceux qui
+    pointent ailleurs — vérifié dans un dépôt jetable :
+
+        serveur             : e21ec13a
+        clone avant         : e948ef82
+        après fetch forcé   : e948ef82   <- inchangé
+        git fetch --tags -f : e21ec13a   <- git y arrive
+
+    L'objet du nouveau tag EST pourtant rapatrié : seule la référence
+    reste en arrière. On la recrée donc, ce qui évite de déléguer à la
+    ligne de commande.
+
+    Ne lève jamais : un tag qu'on ne sait pas réaligner ne doit pas
+    faire échouer tout le fetch.
+    """
+    try:
+        remote.connect(callbacks=callbacks)
+        distants = {
+            tete.name: tete.oid
+            for tete in remote.list_heads()
+            # `refs/tags/x^{}` est le commit pointé par un tag ANNOTÉ :
+            # la ref, elle, désigne l'objet tag. Prendre le premier
+            # ferait pointer la ref sur le mauvais objet.
+            if tete.name.startswith("refs/tags/")
+            and not tete.name.endswith("^{}")
+        }
+    except (pygit2.GitError, KeyError, ValueError, TypeError, AttributeError):
+        return
+
+    for nom, cible in distants.items():
+        try:
+            locale = repo.references.get(nom)
+            if locale is not None and locale.target == cible:
+                continue
+            if repo.get(cible) is None:
+                continue  # objet absent : rien à pointer
+            repo.references.create(nom, cible, force=True)
+            callbacks.updated_refs.append(nom)
+        except (pygit2.GitError, KeyError, ValueError):
+            continue
+
+
 @guarded("Fetch")
 def fetch_remote(
     repo: pygit2.Repository,
@@ -569,7 +615,26 @@ def fetch_remote(
         # Le prune ne touche QUE `refs/remotes/<remote>/` — vérifié : une
         # branche locale du même nom, et ses commits non poussés, restent
         # intacts.
-        remote.fetch(callbacks=callbacks, prune=FetchPrune.PRUNE)
+        # Refspecs explicites : le défaut (`refs/heads/*`) ne couvre
+        # pas les tags, que git rapporte par un mécanisme séparé — il
+        # les AJOUTE sans jamais les supprimer ni les déplacer. Mesuré
+        # dans un dépôt jetable (signalé par l'utilisateur) :
+        #
+        #   tag supprimé du serveur -> survivait en local
+        #   tag déplacé             -> gardait son ancienne cible
+        #
+        # Le `+` force la mise à jour même quand elle n'est pas en
+        # avance rapide, ce qu'un tag déplacé n'est jamais. Combiné à
+        # `PRUNE`, les tags disparus sont retirés comme les branches.
+        remote.fetch(
+            refspecs=[
+                f"+refs/heads/*:refs/remotes/{name}/*",
+                "+refs/tags/*:refs/tags/*",
+            ],
+            callbacks=callbacks,
+            prune=FetchPrune.PRUNE,
+        )
+        _realigner_les_tags(repo, remote, callbacks)
         tracked.append(callbacks)
 
     label = names[0] if len(names) == 1 else f"{len(names)} remotes"

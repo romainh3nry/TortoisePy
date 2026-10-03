@@ -47,7 +47,7 @@ CATALOGUE: tuple[ShortcutSpec, ...] = (
     # ce qui règle le problème pour qui le souhaite (§6.1).
     ShortcutSpec("refresh", "Refresh", "F5"),
     ShortcutSpec("commit", "Commit…", "Ctrl+K"),
-    ShortcutSpec("search", "Search", "Ctrl+F"),
+    ShortcutSpec("search", "Find branch", "Ctrl+F"),
     ShortcutSpec("push", "Push", "Ctrl+P"),
     ShortcutSpec("pull", "Pull", "Ctrl+L"),
     ShortcutSpec("fetch", "Fetch", "Ctrl+Shift+F"),

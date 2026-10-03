@@ -20,6 +20,7 @@ l'utilisateur, pas de l'outil.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -75,6 +76,40 @@ def poser(version: str) -> list[tuple[str, int]]:
     return resultats
 
 
+def rafraichir_venv() -> bool:
+    """Remet le venv de développement à la version qu'on vient de poser.
+
+    Un venv en mode éditable pointe sur le code source — les
+    modifications y sont immédiates — mais sa VERSION est figée au
+    moment de l'installation. Changer `pyproject.toml` ne la met pas à
+    jour, et `topy --version` continue d'annoncer l'ancienne.
+
+    Rend `False` s'il n'y a pas de venv : changer la version et
+    réinstaller sont deux choses, et échouer sur la seconde priverait de
+    la première.
+
+    `--no-deps` évite de réexaminer PySide6 et pygit2 pour rien — c'est
+    ce qui rend l'opération quasi instantanée.
+    """
+    python = RACINE / ".venv" / "bin" / "python"
+    if not python.exists():
+        return False
+
+    resultat = subprocess.run(
+        [str(python), "-m", "pip", "install", "-e", str(RACINE),
+         "--no-deps", "-q"],
+        capture_output=True,
+        text=True,
+    )
+    if resultat.returncode != 0:
+        print(
+            f"  (venv non rafraîchi : {resultat.stderr.strip()[:120]})",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
 
@@ -95,6 +130,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {fichier:<22} {nombre} occurrence(s)")
 
     print(f"\n{ancienne} → {version}")
+
+    if rafraichir_venv():
+        print("  venv local rafraîchi (topy --version suit)")
+
     print("\nIl reste à committer, puis à créer le tag :")
     print(f"    git tag v{version} && git push origin v{version}")
     return 0
