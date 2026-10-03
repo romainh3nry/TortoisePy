@@ -337,19 +337,52 @@ class MainWindow(QMainWindow):
         )
 
         options = self.graph_options()
-        self.graph = self._graph_cache.get(
-            self.repository,
-            lambda repo: build_graph(repo, options),
-            options_key=(options.show_tags,),
-        )
-        self.state = read_state(self.repository)
 
-        # Le nœud de travail est greffé APRÈS le cache : il dépend de
-        # l'arbre de travail, qui change bien plus souvent que la
-        # topologie. L'inclure dans le graphe mis en cache obligerait à
-        # tout reconstruire à chaque frappe dans un éditeur.
-        self.graph = _avec_noeud_de_travail(self.graph, self.state)
-        unpushed = unpushed_oids(self.repository)
+        def lire():
+            """Les trois lectures coûteuses, hors du fil principal."""
+            graphe = self._graph_cache.get(
+                self.repository,
+                lambda repo: build_graph(repo, options),
+                options_key=(options.show_tags,),
+            )
+            etat = read_state(self.repository)
+            # Le nœud de travail est greffé APRÈS le cache : il dépend
+            # de l'arbre de travail, qui change bien plus souvent que la
+            # topologie. L'inclure dans le graphe mis en cache
+            # obligerait à tout reconstruire à chaque frappe.
+            return (
+                _avec_noeud_de_travail(graphe, etat),
+                etat,
+                unpushed_oids(self.repository),
+            )
+
+        def afficher(resultat):
+            if isinstance(resultat, Exception):
+                show_error(self, failed("Rafraîchissement", str(resultat)))
+                return
+            self.graph, self.state, unpushed = resultat
+            self._afficher_graphe(unpushed, defilement)
+
+        # Le PREMIER rafraîchissement est synchrone : `__init__` enchaîne
+        # sur `restore_settings` et `_center_on_head`, qui ont besoin du
+        # graphe. Une fenêtre qui s'ouvre sans graphe, même brièvement,
+        # est fragile — et c'est le seul appel où l'utilisateur attend
+        # déjà le démarrage.
+        if self.graph is None:
+            afficher(lire())
+            return
+
+        # `refresh` est aussi appelé depuis la FIN d'opérations déjà en
+        # arrière-plan (checkout, commit, fetch) : le verrou est alors
+        # pris. Lui refuser le passage laisserait le graphe périmé —
+        # exactement ce que le rafraîchissement doit empêcher.
+        if not self.run_in_background(lire, afficher, "Chargement du graphe…"):
+            afficher(lire())
+        return
+
+    def _afficher_graphe(self, unpushed, defilement) -> None:
+        """Pose le graphe dans la vue. **Fil principal uniquement** :
+        Qt interdit de toucher aux widgets ailleurs."""
         # Le mesureur est refait à chaque rafraîchissement : la branche
         # courante change au gré des checkouts, et elle décide si la
         # ligne `HEAD` occupe de la place (sinon le nœud courant réserve
@@ -820,6 +853,22 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             message += f" — {self.state.operation_in_progress} en cours"
         if self.state.has_conflicts:
             message += f" — {len(self.state.conflicted_paths)} conflit(s)"
+
+        # Un résumé de fetch en attente a la priorité : il nomme les refs
+        # qui viennent d'arriver, information que « Sur <branche> » ne
+        # porte pas et que l'utilisateur n'a encore jamais vue.
+        #
+        # Le drapeau existait mais n'était LU nulle part : il ne protégeait
+        # rien. Cela ne se voyait pas tant que `refresh()` était synchrone
+        # — le résumé était réaffiché juste après l'écrasement. Depuis que
+        # la lecture passe en arrière-plan, `_update_status` s'exécute
+        # APRÈS ce réaffichage et le résumé disparaissait (reproduit).
+        if self._fetch_summary is not None:
+            resume, self._fetch_summary = self._fetch_summary, None
+            self.statusBar().showMessage(resume, 15000)
+            self._update_branch_label()
+            self.setWindowTitle(self._title())
+            return
 
         self.statusBar().showMessage(message)
         self._update_branch_label()
@@ -1374,13 +1423,21 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         # disparaîtrait sans avoir été lu.
         self._fetch_summary = result.summary
 
+        # Affiché tout de suite — l'utilisateur attend le retour du fetch —
+        # et `_fetch_summary` reste posé pour que `_update_status` ne
+        # l'écrase pas quand le rafraîchissement de fond se terminera.
+        # Le résumé nomme les refs arrivées : « new: origin/feature, v2.0 ».
+        self.statusBar().showMessage(result.summary, 15000)
+
         if result.repository_changed:
             self.refresh()
 
-        # Réaffiché après le refresh, pour qu'il survive à `_update_status`.
-        # Le résumé nomme les refs arrivées : « new: origin/feature, v2.0 ».
-        self.statusBar().showMessage(result.summary, 15000)
-        self._fetch_summary = None
+        # Le drapeau n'est pas retiré ici : `_update_status` le consomme
+        # (cf. plus haut), ce qui le relie à l'événement qui l'écrasait
+        # plutôt qu'à un délai arbitraire. Sans refresh, rien ne l'écrase
+        # et il n'y a rien à protéger — on le retire donc tout de suite.
+        if not result.repository_changed:
+            self._fetch_summary = None
 
     def _update_push_action(self) -> None:
         """Grise le bouton quand il n'y a rien à pousser.

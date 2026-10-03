@@ -58,9 +58,10 @@ def test_toolbar_exists(window):
     assert window.findChildren(type(window.toolbar)) != []
 
 
-def test_refresh_rebuilds_the_graph(window):
+def test_refresh_rebuilds_the_graph(qtbot, window, attendre_le_fond):
     before = window.view.scene()
     window.refresh()
+    attendre_le_fond(qtbot, window)
     assert window.view.scene() is not before
 
 
@@ -69,10 +70,13 @@ def test_state_is_read_on_open(window):
     assert window.state.head_branch == "master"
 
 
-def test_refresh_updates_state_after_external_change(window, repo):
+def test_refresh_updates_state_after_external_change(
+    qtbot, window, repo, attendre_le_fond
+):
     path = repo.workdir
     run_git(path, "checkout", "-q", "feature")
     window.refresh()
+    attendre_le_fond(qtbot, window)
     assert window.state.head_branch == "feature"
 
 
@@ -137,7 +141,9 @@ def test_double_click_on_unknown_node_is_ignored(window):
     assert window.commit_panel.count() == 0
 
 
-def test_refresh_returns_the_focus_to_the_current_branch(window):
+def test_refresh_returns_the_focus_to_the_current_branch(
+    qtbot, window, attendre_le_fond
+):
     """Reconstruire le graphe invalide le panneau, puis la sélection
     revient sur la branche courante — le repère de l'utilisateur."""
     node = next(
@@ -148,6 +154,7 @@ def test_refresh_returns_the_focus_to_the_current_branch(window):
     assert "feature" in window.commit_panel._title.text()
 
     window.refresh()
+    attendre_le_fond(qtbot, window)
     assert window.view.selected_oids() == (window.state.head_oid,)
     assert "feature" not in window.commit_panel._title.text()
 
@@ -483,13 +490,16 @@ def test_commit_window_is_reused(qtbot, window):
     first.close()
 
 
-def test_graph_refreshes_after_a_commit(qtbot, window, monkeypatch):
+def test_graph_refreshes_after_a_commit(
+    qtbot, window, monkeypatch, attendre_le_fond
+):
     from tortoisepy.core.results import succeeded
 
     window.open_commit_window()
     qtbot.waitUntil(lambda: window.commit_window is not None, timeout=5000)
     before = window.view.scene()
     window.commit_window.committed.emit(succeeded("fait"), None)
+    attendre_le_fond(qtbot, window)
     assert window.view.scene() is not before
     window.commit_window.close()
 
@@ -520,7 +530,9 @@ def test_commit_action_is_in_the_menu():
     assert "open_commit" in set(actions(build_menu_model((node,), state)))
 
 
-def test_fetch_summary_survives_the_refresh(window, qtbot, monkeypatch):
+def test_fetch_summary_survives_the_refresh(
+    window, qtbot, monkeypatch, attendre_le_fond
+):
     """Le résumé doit rester affiché APRÈS la reconstruction du graphe.
 
     `refresh()` appelle `_update_status()`, qui écrit « Sur <branche> ».
@@ -540,8 +552,10 @@ def test_fetch_summary_survives_the_refresh(window, qtbot, monkeypatch):
     )
 
     window._start_fetch()
-    qtbot.waitUntil(lambda: not window._task.is_running(), timeout=10000)
-    qtbot.wait(100)
+    # Pas `not _task.is_running()` : le fetch rend le verrou, puis son
+    # `refresh()` le reprend aussitôt — l'attente se terminait au MILIEU
+    # de la chaîne, avant que `_update_status` ait écrit le résumé.
+    attendre_le_fond(qtbot, window)
 
     message = window.statusBar().currentMessage()
     assert "origin/feature" in message
@@ -934,7 +948,7 @@ def test_selecting_the_head_fills_the_commit_panel(window):
     assert window.commit_panel.count() > 0
 
 
-def test_the_selection_follows_a_checkout(qtbot, tmp_path):
+def test_the_selection_follows_a_checkout(qtbot, tmp_path, attendre_le_fond):
     """Après un checkout, le focus suit la nouvelle branche courante."""
     import subprocess
 
@@ -974,6 +988,7 @@ def test_the_selection_follows_a_checkout(qtbot, tmp_path):
         cwd=tmp_path, env=env, capture_output=True,
     )
     fenetre.refresh()
+    attendre_le_fond(qtbot, fenetre)
 
     assert fenetre.view.selected_oids() == (cible,)
     assert fenetre.commit_panel.count() > 0
@@ -1205,35 +1220,46 @@ def test_closing_during_a_background_task_waits_for_it(qtbot, repo):
 # --- indicateur de divergence (tâche 3) ----------------------------------
 
 
-def test_the_status_bar_shows_the_divergence(window, monkeypatch):
+def test_the_status_bar_shows_the_divergence(
+    qtbot, window, monkeypatch, attendre_le_fond
+):
     from tortoisepy.ui import main_window as module
 
     monkeypatch.setattr(module, "divergence", lambda repo: (2, 1))
     window.refresh()
+    attendre_le_fond(qtbot, window)
     assert "↑2" in window.branch_label.text()
     assert "↓1" in window.branch_label.text()
 
 
-def test_an_up_to_date_branch_shows_no_arrows(window, monkeypatch):
+def test_an_up_to_date_branch_shows_no_arrows(
+    qtbot, window, monkeypatch, attendre_le_fond
+):
     """Une branche à jour n'a pas besoin d'être commentée."""
     from tortoisepy.ui import main_window as module
 
     monkeypatch.setattr(module, "divergence", lambda repo: (0, 0))
     window.refresh()
+    attendre_le_fond(qtbot, window)
     assert "↑" not in window.branch_label.text()
     assert "↓" not in window.branch_label.text()
 
 
-def test_the_tooltip_says_the_figure_may_be_stale(window, monkeypatch):
+def test_the_tooltip_says_the_figure_may_be_stale(
+    qtbot, window, monkeypatch, attendre_le_fond
+):
     """Review Focus 2 : un indicateur muet sur sa fraîcheur mentirait."""
     from tortoisepy.ui import main_window as module
 
     monkeypatch.setattr(module, "divergence", lambda repo: (1, 1))
     window.refresh()
+    attendre_le_fond(qtbot, window)
     assert "fetch" in window.branch_label.toolTip().lower()
 
 
-def test_no_divergence_keeps_the_existing_tooltip(window, monkeypatch):
+def test_no_divergence_keeps_the_existing_tooltip(
+    qtbot, window, monkeypatch, attendre_le_fond
+):
     """Piège du brief : le chemin sans écart doit garder l'infobulle
     existante (le nom de la branche), pas la laisser vide ou dupliquée.
     """
@@ -1241,6 +1267,7 @@ def test_no_divergence_keeps_the_existing_tooltip(window, monkeypatch):
 
     monkeypatch.setattr(module, "divergence", lambda repo: None)
     window.refresh()
+    attendre_le_fond(qtbot, window)
     assert window.branch_label.toolTip() == window.state.head_branch
 
 
@@ -1285,7 +1312,9 @@ def test_a_search_without_result_says_so(window, monkeypatch):
     assert "no" in window.statusBar().currentMessage().lower()
 
 
-def test_an_unchanged_repository_is_not_rebuilt(window, monkeypatch):
+def test_an_unchanged_repository_is_not_rebuilt(
+    qtbot, window, monkeypatch, attendre_le_fond
+):
     """Le cache en action : un refresh sans changement ne reconstruit pas."""
     from tortoisepy.ui import main_window as module
 
@@ -1296,7 +1325,9 @@ def test_an_unchanged_repository_is_not_rebuilt(window, monkeypatch):
         lambda repo, *a, **k: appels.append(1) or vrai(repo, *a, **k),
     )
     window.refresh()
+    attendre_le_fond(qtbot, window)
     window.refresh()
+    attendre_le_fond(qtbot, window)
 
     assert len(appels) <= 1, f"{len(appels)} constructions pour 2 refresh"
 
@@ -1456,7 +1487,9 @@ def test_each_node_is_cached_separately(window, monkeypatch):
     assert appels == [oids[0], oids[1]], appels
 
 
-def test_a_new_commit_invalidates_the_panel_cache(window, repo):
+def test_a_new_commit_invalidates_the_panel_cache(
+    qtbot, window, repo, attendre_le_fond
+):
     """Un cache qui ne s'invalide pas affiche un historique FAUX.
 
     C'est pire que lent : l'utilisateur croit voir son dépôt.
@@ -1474,6 +1507,7 @@ def test_a_new_commit_invalidates_the_panel_cache(window, repo):
 
     run_git(repo.workdir, "commit", "-q", "--allow-empty", "-m", "tout nouveau")
     window.refresh()
+    attendre_le_fond(qtbot, window)
 
     assert autre not in window._panel_cache, (
         "un commit ailleurs doit vider le cache : le graphe a changé, "

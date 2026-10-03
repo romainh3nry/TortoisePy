@@ -102,16 +102,26 @@ def test_the_actions_are_disabled_during_a_write(qtbot, fenetre):
     qtbot.waitUntil(lambda: fenetre.view.isEnabled(), timeout=5000)
 
 
-def test_the_interface_comes_back_afterwards(qtbot, fenetre):
-    """Le verrou doit se relâcher, sinon l'app reste figée."""
+def test_the_interface_comes_back_afterwards(
+    qtbot, fenetre, attendre_le_fond
+):
+    """Le verrou doit se relâcher, sinon l'app reste figée.
+
+    `view.isEnabled()` ne suffit plus : la suite du checkout enchaîne sur
+    `refresh()`, désormais en arrière-plan, qui reprend le verrou et
+    remontre la barre. On attend donc la fin de TOUT le travail.
+    """
     fenetre._run_action("checkout_branch", _noeud(fenetre, "autre"), "autre")
     qtbot.waitUntil(lambda: fenetre.view.isEnabled(), timeout=5000)
+    attendre_le_fond(qtbot, fenetre)
 
     assert not fenetre.progress.isVisible()
     assert fenetre.repository.head.shorthand == "autre"
 
 
-def test_the_interface_comes_back_on_failure(qtbot, fenetre, monkeypatch):
+def test_the_interface_comes_back_on_failure(
+    qtbot, fenetre, monkeypatch, attendre_le_fond
+):
     """Surtout en cas d'échec : sinon l'app reste figée pour de bon."""
     from tortoisepy.ui import main_window as module
 
@@ -124,6 +134,7 @@ def test_the_interface_comes_back_on_failure(qtbot, fenetre, monkeypatch):
     fenetre._run_action("checkout_branch", _noeud(fenetre, "autre"), "autre")
 
     qtbot.waitUntil(lambda: fenetre.view.isEnabled(), timeout=5000)
+    attendre_le_fond(qtbot, fenetre)
     assert not fenetre.progress.isVisible()
 
 
