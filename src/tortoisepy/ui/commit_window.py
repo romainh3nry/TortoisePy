@@ -32,6 +32,8 @@ from tortoisepy.core.push_state import unpushed_oids
 from tortoisepy.ui.diff_view import DiffView
 from tortoisepy.ui.dialogs import confirm, show_error, show_message
 from tortoisepy.ui.dialogs import ConfirmationRequest
+from tortoisepy.core.results import failed
+from tortoisepy.ui.tasks import BackgroundTask, CallableWorker
 
 PATH_ROLE = Qt.ItemDataRole.UserRole
 SELECTABLE_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -125,6 +127,10 @@ class CommitWindow(QMainWindow):
         # Le push traverse le réseau — plusieurs secondes — et le commit
         # écrit l'index et l'arbre. Sans retour visuel, la fenêtre paraît
         # figée (signalé par l'utilisateur).
+        # La tâche de fond en cours, gardée pour que Python ne collecte ni
+        # le fil ni son ouvrier pendant l'exécution (piège QThread connu).
+        self._task: BackgroundTask | None = None
+
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)      # indéterminé : durée inconnue
         self.progress.setMaximumWidth(180)
@@ -208,6 +214,46 @@ class CommitWindow(QMainWindow):
             if item.checkState(0) == Qt.CheckState.Checked
             and item.data(0, SELECTABLE_ROLE)
         )
+
+    def closeEvent(self, event) -> None:
+        """Attend la tâche de fond avant de rendre la fenêtre.
+
+        Sans cette attente, fermer pendant un commit ou un push détruirait
+        le `QThread` en pleine exécution — « QThread: Destroyed while
+        thread is still running », le même défaut que sur la fenêtre
+        principale. Un push traverse le réseau : la fenêtre pour tomber
+        dessus est large.
+
+        `stop()` **demande** l'arrêt avant d'attendre ; il laisse
+        l'opération en cours finir — on ne coupe pas un push au milieu.
+        """
+        tache = self._task
+        if tache is not None:
+            arreter = getattr(tache, "stop", None)
+            if callable(arreter):
+                arreter(10_000)
+        super().closeEvent(event)
+
+    def _lancer_en_fond(self, appelable, suite) -> None:
+        """Exécute `appelable` hors du fil principal, puis `suite` dessus.
+
+        Signalé par l'utilisateur : « j'ai fait un commit and push et il
+        n'y avait pas le loader + processus en fond ». Le loader ÉTAIT
+        posé, mais tout le travail restait sur le fil principal : Qt
+        n'avait jamais la main pour peindre la barre, qui était donc
+        « montrée » sans jamais devenir visible, et la fenêtre gelait
+        jusqu'à la fin du push.
+
+        Les tests d'alors passaient pour la mauvaise raison : ils
+        observaient `progress.isVisible()` DEPUIS l'intérieur du travail
+        synchrone, ce qui prouve l'appel à `show()`, pas que l'interface
+        reste vivante.
+
+        `suite` reçoit le résultat, ou l'exception si l'appelable a levé.
+        """
+        self._task = BackgroundTask(CallableWorker(appelable), self)
+        self._task.finished.connect(suite)
+        self._task.start()
 
     def _travail_en_cours(self, libelle: str) -> None:
         """Affiche le loader et gèle les boutons.
@@ -299,15 +345,23 @@ class CommitWindow(QMainWindow):
     def commit(self) -> None:
         paths = self.checked_paths()
         self._travail_en_cours("Commit…")
-        try:
-            result = self._write_commit(paths)
-            if result.success:
-                self._try_sync_index_after_commit(paths)
-        finally:
-            # `finally` : une exception ne doit pas laisser la fenêtre
-            # gelée avec son loader tournant indéfiniment.
-            self._travail_fini()
-        self._after_commit(result, None)
+
+        def ecrire():
+            return self._write_commit(paths)
+
+        def ensuite(result):
+            # Tout ce qui suit touche les widgets ou ouvre des dialogues :
+            # fil principal obligatoire (Qt l'impose).
+            try:
+                if isinstance(result, Exception):
+                    raise result
+                if result.success:
+                    self._try_sync_index_after_commit(paths)
+            finally:
+                self._travail_fini()
+            self._after_commit(result, None)
+
+        self._lancer_en_fond(ecrire, ensuite)
 
     def commit_and_push(self) -> None:
         """§6.2 : pousser sort de la machine, donc on confirme."""
@@ -330,30 +384,54 @@ class CommitWindow(QMainWindow):
 
         paths = self.checked_paths()
         self._travail_en_cours("Commit & Push…")
-        try:
-            result = self._write_commit(paths)
+
+        def ecrire():
+            return self._write_commit(paths)
+
+        def apres_le_commit(result):
+            if isinstance(result, Exception):
+                self._travail_fini()
+                raise result
+
             if not result.success:
                 self._travail_fini()
                 self._after_commit(result, None)
                 return
+
+            # Sur le fil principal : peut ouvrir un dialogue.
             self._try_sync_index_after_commit(paths)
-        except Exception:
-            self._travail_fini()
-            raise
 
-        # Le loader couvre AUSSI le push : c'est la partie la plus longue,
-        # puisqu'elle traverse le réseau.
-        try:
-            pushed = operations.push_branch(self.repository)
-        finally:
-            self._travail_fini()
+            # Le loader couvre AUSSI le push : c'est la partie la plus
+            # longue, puisqu'elle traverse le réseau. Elle part donc en
+            # fond à son tour, enchaînée sur le commit — sans quoi la
+            # fenêtre regèlerait juste après avoir été rendue.
+            def pousser():
+                return operations.push_branch(self.repository)
 
-        if not pushed.success:
-            # Le commit est fait : le dire explicitement, sinon on croit
-            # avoir tout perdu (§8 phase 6).
-            show_error(self, pushed)
+            def apres_le_push(pushed):
+                self._travail_fini()
 
-        self._after_commit(result, pushed)
+                if isinstance(pushed, Exception):
+                    # Le commit est acquis : ne pas le perdre de vue même
+                    # si le push lève (§8 phase 6).
+                    show_error(
+                        self,
+                        failed("Push", f"{type(pushed).__name__}: {pushed}"),
+                    )
+                    self._after_commit(result, None)
+                    return
+
+                if not pushed.success:
+                    # Le commit est fait : le dire explicitement, sinon on
+                    # croit avoir tout perdu (§8 phase 6).
+                    show_error(self, pushed)
+
+                self._after_commit(result, pushed)
+
+            self._travail_en_cours("Push…")
+            self._lancer_en_fond(pousser, apres_le_push)
+
+        self._lancer_en_fond(ecrire, apres_le_commit)
 
     # --- interne -------------------------------------------------------
 

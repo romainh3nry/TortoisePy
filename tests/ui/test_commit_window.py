@@ -96,37 +96,47 @@ def test_checking_a_box_writes_nothing(window, repo):
     assert before == after
 
 
-def test_commit_creates_a_commit(window, repo):
+def test_commit_creates_a_commit(qtbot, window, repo, attendre_la_fenetre):
     before = len(list(repo.walk(repo.head.target)))
     window.set_message("depuis la fenêtre")
     window.commit()
+    attendre_la_fenetre(qtbot, window)
     assert len(list(repo.walk(repo.head.target))) == before + 1
 
 
-def test_commit_uses_the_typed_message(window, repo):
+def test_commit_uses_the_typed_message(
+    qtbot, window, repo, attendre_la_fenetre
+):
     window.set_message("message saisi")
     window.commit()
+    attendre_la_fenetre(qtbot, window)
     assert repo.get(repo.head.target).message.strip() == "message saisi"
 
 
-def test_commit_only_includes_checked_files(window, repo):
+def test_commit_only_includes_checked_files(
+    qtbot, window, repo, attendre_la_fenetre
+):
     window.set_message("un seul fichier")
     window.set_checked("nouveau.txt", False)
     window.commit()
+    attendre_la_fenetre(qtbot, window)
 
     commit = repo.get(repo.head.target)
     diff = repo.diff(commit.parents[0], commit)
     assert "nouveau.txt" not in {p.delta.new_file.path for p in diff}
 
 
-def test_window_refreshes_after_a_commit(window):
+def test_window_refreshes_after_a_commit(qtbot, window, attendre_la_fenetre):
     window.set_message("message")
     window.commit()
+    attendre_la_fenetre(qtbot, window)
     # Le fichier commité (suivi.txt) disparaît ; nouveau.txt reste (non coché).
     assert window.file_count() == 1
 
 
-def test_commit_survives_a_locked_index(window, repo, monkeypatch):
+def test_commit_survives_a_locked_index(
+    qtbot, window, repo, monkeypatch, attendre_la_fenetre
+):
     """Finding 2 (revue, tour 1) : l'échec de la resynchronisation ne doit
     jamais faire croire que le commit a échoué ou n'a pas eu lieu.
 
@@ -153,6 +163,7 @@ def test_commit_survives_a_locked_index(window, repo, monkeypatch):
         window.set_message("commit avec index verrouillé")
 
         window.commit()  # ne doit pas lever
+        attendre_la_fenetre(qtbot, window)
 
         assert len(list(repo.walk(repo.head.target))) == before + 1
         # La fenêtre s'est bien rafraîchie malgré l'échec de la synchronisation :
@@ -186,7 +197,9 @@ def test_conflicted_file_cannot_be_checked(qtbot, tmp_path):
     assert w.is_checkable("f.txt") is False
 
 
-def test_conflicted_file_cannot_be_forced_via_set_checked(qtbot, tmp_path):
+def test_conflicted_file_cannot_be_forced_via_set_checked(
+    qtbot, tmp_path, attendre_la_fenetre
+):
     """Finding 1 (revue, tour 1) : le flag Qt protège la souris, pas l'API.
 
     `set_checked` doit refuser de cocher un fichier non sélectionnable, et
@@ -230,6 +243,7 @@ def test_conflicted_file_cannot_be_forced_via_set_checked(qtbot, tmp_path):
     w.set_checked("sain.txt", True)
     w.set_message("tentative sur un conflit")
     w.commit()
+    attendre_la_fenetre(qtbot, w)
 
     repo = pygit2.Repository(str(path))
     commit = repo.get(repo.head.target)
@@ -248,13 +262,18 @@ def test_empty_repository_opens_without_crashing(qtbot, tmp_path):
     assert w.file_count() == 0
 
 
-def test_window_closes_after_a_successful_commit(window, repo):
+def test_window_closes_after_a_successful_commit(
+    qtbot, window, repo, attendre_la_fenetre
+):
     window.set_message("un message")
     window.commit()
+    attendre_la_fenetre(qtbot, window)
     assert window.isHidden() is True
 
 
-def test_window_stays_open_after_a_failed_commit(window, repo, monkeypatch):
+def test_window_stays_open_after_a_failed_commit(
+    qtbot, window, repo, monkeypatch, attendre_la_fenetre
+):
     """Review Focus 4 : fermer ferait perdre la rédaction."""
     from tortoisepy.core.results import failed
     from tortoisepy.ui import commit_window as module
@@ -268,13 +287,14 @@ def test_window_stays_open_after_a_failed_commit(window, repo, monkeypatch):
 
     window.set_message("un message que je ne veux pas perdre")
     window.commit()
+    attendre_la_fenetre(qtbot, window)
 
     assert window.isHidden() is False
     assert window.message() == "un message que je ne veux pas perdre"
 
 
 def test_window_closes_when_commit_succeeds_but_push_fails(
-    window, repo, monkeypatch
+    qtbot, window, repo, monkeypatch, attendre_la_fenetre
 ):
     """Review Focus 3 : le commit est acquis, donc on rend la main."""
     from tortoisepy.core.results import failed
@@ -290,11 +310,14 @@ def test_window_closes_when_commit_succeeds_but_push_fails(
 
     window.set_message("un message")
     window.commit_and_push()
+    attendre_la_fenetre(qtbot, window)
 
     assert window.isHidden() is True
 
 
-def test_committed_signal_carries_the_push_result(window, repo, monkeypatch):
+def test_committed_signal_carries_the_push_result(
+    qtbot, window, repo, monkeypatch, attendre_la_fenetre
+):
     """La fenêtre principale doit pouvoir dire « poussé » ou « non poussé »."""
     from tortoisepy.core.results import succeeded
     from tortoisepy.ui import commit_window as module
@@ -310,6 +333,7 @@ def test_committed_signal_carries_the_push_result(window, repo, monkeypatch):
     window.committed.connect(lambda *args: recus.append(args))
     window.set_message("un message")
     window.commit_and_push()
+    attendre_la_fenetre(qtbot, window)
 
     assert recus, "le signal doit être émis"
     commit_result, push_result = recus[0]
@@ -317,11 +341,14 @@ def test_committed_signal_carries_the_push_result(window, repo, monkeypatch):
     assert push_result is not None and push_result.success is True
 
 
-def test_committed_signal_has_no_push_result_for_a_plain_commit(window, repo):
+def test_committed_signal_has_no_push_result_for_a_plain_commit(
+    qtbot, window, repo, attendre_la_fenetre
+):
     recus = []
     window.committed.connect(lambda *args: recus.append(args))
     window.set_message("un message")
     window.commit()
+    attendre_la_fenetre(qtbot, window)
 
     assert recus
     commit_result, push_result = recus[0]
@@ -399,7 +426,9 @@ def test_ordinary_commit_still_requires_a_checked_file(window, repo):
     assert window.commit_button.isEnabled() is False
 
 
-def test_amending_commits_through_the_core(window, repo, monkeypatch):
+def test_amending_commits_through_the_core(
+    qtbot, window, repo, monkeypatch, attendre_la_fenetre
+):
     from tortoisepy.ui import commit_window as module
     from tortoisepy.core.results import succeeded
 
@@ -412,6 +441,7 @@ def test_amending_commits_through_the_core(window, repo, monkeypatch):
     window.amend_box.setChecked(True)
     window.set_message("corrige")
     window.commit()
+    attendre_la_fenetre(qtbot, window)
 
     assert vus, "le cœur doit être appelé"
     assert vus[0][1] == "corrige"
@@ -434,7 +464,9 @@ def _clone_with_pushed_commit(tmp_path):
     return pygit2.Repository(str(work))
 
 
-def test_commit_and_push_honours_the_amend_box(qtbot, tmp_path, monkeypatch):
+def test_commit_and_push_honours_the_amend_box(
+    qtbot, tmp_path, monkeypatch, attendre_la_fenetre
+):
     """Revue finale, Critical : il créait un SECOND commit, puis le poussait.
 
     Seul `commit()` consultait la case ; `commit_and_push()` appelait
@@ -461,6 +493,7 @@ def test_commit_and_push_honours_the_amend_box(qtbot, tmp_path, monkeypatch):
     fenetre.set_checked("oublie.txt", True)
     fenetre.set_message("faute corrigee")
     fenetre.commit_and_push()
+    attendre_la_fenetre(qtbot, fenetre)
 
     fresh = pygit2.Repository(repo.path)
     messages = [c.message.strip() for c in fresh.walk(fresh.head.target)]
