@@ -8,7 +8,7 @@ logique reste testable sans interaction.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 import pygit2
@@ -35,6 +35,22 @@ class ActionContext:
     chosen_branch: str | None = None
     """Branche désignée par le menu, quand le nœud en porte plusieurs."""
 
+    answers: dict | None = None
+    """Réponses déjà recueillies par `prepare_action`, dans le fil principal.
+
+    `None` quand l'action n'a pas été préparée : les gestionnaires posent
+    alors eux-mêmes leurs questions, comme avant. Un dictionnaire quand
+    elle l'a été : ils y lisent les réponses et **n'ouvrent aucun
+    dialogue**, ce qui leur permet de tourner en arrière-plan sans que Qt
+    abandonne le processus.
+    """
+
+    def answer(self, cle: str, defaut=None):
+        """La réponse recueillie pour `cle`, ou `defaut` si non préparée."""
+        if self.answers is None:
+            return defaut
+        return self.answers.get(cle, defaut)
+
     @property
     def branch(self) -> str | None:
         """Branche locale sur laquelle agir.
@@ -57,19 +73,140 @@ class ActionContext:
         return self.branch or self.node.oid[:8]
 
 
-def execute_action(action: str, ctx: ActionContext) -> OperationResult | None:
-    """Exécute une action. `None` si elle est annulée ou inconnue.
+#: Actions qui ouvrent un dialogue — confirmation ou saisie.
+#:
+#: Elles doivent être PRÉPARÉES dans le fil principal (cf.
+#: `prepare_action`). Qt interdit de créer un widget ailleurs et abandonne
+#: le processus : « QObject::setParent: Cannot set parent, new parent is
+#: in a different thread ». C'est le crash signalé par l'utilisateur en
+#: supprimant une branche — l'application se fermait sèchement, avant même
+#: que la confirmation s'affiche.
+#:
+#: Deux tests tiennent cette liste à jour : l'un relit le code des
+#: gestionnaires à la recherche de `ctx.confirm` / `ctx.ask_*`, l'autre
+#: interroge `confirmation_for`. Une action interactive ajoutée plus tard
+#: sans être déclarée ici ferait donc rougir la suite, au lieu de faire
+#: planter l'application.
+_INTERACTIVES = frozenset({
+    "delete_branch",
+    "delete_remote_branch",
+    "drop_stash",
+    "reset_to",
+    "revert_commit",
+    "create_branch",
+    "create_tag",
+    "rename_branch",
+    "stash_changes",
+    "checkout_branch",
+    # Trouvée par le garde-fou de la liste, pas à la main : elle aurait
+    # crashé comme les autres.
+    "abort_operation",
+})
 
-    Distinguer « annulé » de « échoué » compte : la fenêtre n'affiche une
-    erreur que dans le second cas.
+
+def needs_interaction(action: str) -> bool:
+    """Cette action ouvre-t-elle un dialogue ?
+
+    La fenêtre s'en sert pour décider si l'action doit être préparée dans
+    le fil principal avant de partir en arrière-plan.
     """
-    handler = ACTION_HANDLERS.get(action)
-    if handler is None:
+    return action in _INTERACTIVES
+
+
+def prepare_action(action: str, ctx: ActionContext) -> ActionContext | None:
+    """Pose toutes les questions, dans le FIL PRINCIPAL. `None` si annulé.
+
+    Rend un contexte enrichi des réponses, que `execute_action` rejouera
+    sans plus rien demander : l'écriture peut alors partir en
+    arrière-plan sans toucher à Qt.
+
+    Appeler les gestionnaires directement depuis le fil de fond ouvrait
+    leurs boîtes de dialogue là-bas, ce que Qt refuse en abandonnant le
+    processus (crash signalé en supprimant une branche).
+    """
+    if ACTION_HANDLERS.get(action) is None:
         return None
 
     request = confirmation_for(action, ctx.label, ctx.state)
     if request is not None and not ctx.confirm(ctx.parent, request):
         return None
+
+    reponses: dict[str, object] = {}
+
+    if action in ("create_branch", "create_tag", "rename_branch",
+                  "stash_changes"):
+        titre, invite = _QUESTION[action]
+        # « Rename » pré-remplit le nom actuel : on renomme rarement de
+        # zéro, et le handler le faisait déjà avant la préparation.
+        if action == "rename_branch":
+            nom = ctx.ask_name(ctx.parent, titre, invite, ctx.branch)
+        else:
+            nom = ctx.ask_name(ctx.parent, titre, invite)
+        # `stash_changes` accepte un message vide ; les autres non — un
+        # nom vide créerait une ref sans nom.
+        if nom is None or (not nom and action != "stash_changes"):
+            return None
+        reponses["name"] = nom
+
+    if action == "reset_to":
+        mode = ctx.ask_mode(ctx.parent)
+        if not mode:
+            return None
+        if mode == "hard":
+            # Le mode hard détruit : il a sa propre confirmation (§7.5).
+            demande = confirmation_for(
+                "reset_to", ctx.label, ctx.state, mode="hard"
+            )
+            if demande is not None and not ctx.confirm(ctx.parent, demande):
+                return None
+        reponses["mode"] = mode
+
+    if action == "checkout_branch":
+        nom = ctx.branch
+        if nom is not None:
+            locale = ctx.repository.branches.local.get(nom)
+            distante = ctx.repository.branches.remote.get(nom)
+            if locale is None and distante is not None:
+                demande = _avertissement_ecrasement(
+                    ctx, nom, operations.local_name_for(nom)
+                )
+                if demande is not None and not ctx.confirm(ctx.parent, demande):
+                    return None
+                reponses["overwrite"] = True
+
+    return replace(ctx, answers=reponses)
+
+
+_QUESTION = {
+    "create_branch": ("Create Branch", "Branch name:"),
+    "create_tag": ("Create Tag", "Tag name:"),
+    "rename_branch": ("Rename Branch", "New name:"),
+    "stash_changes": ("Stash", "Message (optional):"),
+}
+"""Titre et invite de chaque saisie, pour que `prepare_action` les pose."""
+
+
+def execute_action(action: str, ctx: ActionContext) -> OperationResult | None:
+    """Exécute une action. `None` si elle est annulée ou inconnue.
+
+    Distinguer « annulé » de « échoué » compte : la fenêtre n'affiche une
+    erreur que dans le second cas.
+
+    **Ne pose aucune question quand le contexte a été préparé** : les
+    réponses sont déjà dans `ctx.answers`, et les gestionnaires les y
+    lisent. C'est ce qui permet d'exécuter l'écriture en arrière-plan
+    sans toucher à Qt.
+    """
+    handler = ACTION_HANDLERS.get(action)
+    if handler is None:
+        return None
+
+    if ctx.answers is None:
+        # Chemin non préparé (tests, appels directs) : on conserve le
+        # comportement d'origine, questions comprises.
+        request = confirmation_for(action, ctx.label, ctx.state)
+        if request is not None and not ctx.confirm(ctx.parent, request):
+            return None
 
     return handler(ctx)
 
@@ -134,10 +271,11 @@ def _checkout_branch(ctx: ActionContext) -> OperationResult | None:
     if not est_distante:
         return operations.checkout_branch(ctx.repository, nom)
 
-    locale = operations.local_name_for(nom)
-    demande = _avertissement_ecrasement(ctx, nom, locale)
-    if demande is not None and not ctx.confirm(ctx.parent, demande):
-        return None
+    if not ctx.answer("overwrite"):
+        locale = operations.local_name_for(nom)
+        demande = _avertissement_ecrasement(ctx, nom, locale)
+        if demande is not None and not ctx.confirm(ctx.parent, demande):
+            return None
 
     return operations.checkout_branch(ctx.repository, nom, overwrite=True)
 
@@ -151,7 +289,11 @@ def _create_branch(ctx: ActionContext) -> OperationResult | None:
     Si le checkout échoue, la branche existe malgré tout : on rapporte
     l'échec du basculement sans laisser croire que rien n'a été fait.
     """
-    name = ctx.ask_name(ctx.parent, "Create Branch", "Branch name:")
+    # Déjà posée par `prepare_action` quand l'action vient de l'interface :
+    # rouvrir un dialogue ici tournerait dans le fil de fond (crash Qt).
+    name = ctx.answer("name") or ctx.ask_name(
+        ctx.parent, "Create Branch", "Branch name:"
+    )
     if not name:
         return None
 
@@ -169,7 +311,9 @@ def _create_branch(ctx: ActionContext) -> OperationResult | None:
 
 
 def _create_tag(ctx: ActionContext) -> OperationResult | None:
-    name = ctx.ask_name(ctx.parent, "Create Tag", "Tag name:")
+    name = ctx.answer("name") or ctx.ask_name(
+        ctx.parent, "Create Tag", "Tag name:"
+    )
     if not name:
         return None
     return operations.create_tag(ctx.repository, name, ctx.node.oid)
@@ -178,7 +322,7 @@ def _create_tag(ctx: ActionContext) -> OperationResult | None:
 def _rename_branch(ctx: ActionContext) -> OperationResult | None:
     if ctx.branch is None:
         return None
-    name = ctx.ask_name(
+    name = ctx.answer("name") or ctx.ask_name(
         ctx.parent, "Rename Branch", "New name:", ctx.branch
     )
     if not name:
@@ -212,14 +356,19 @@ def _reset_to(ctx: ActionContext) -> OperationResult | None:
     `execute_action` a déjà confirmé l'action elle-même ; le mode hard
     demande sa propre confirmation, puisque c'est lui qui détruit (§7.5).
     """
-    mode = ctx.ask_mode(ctx.parent)
-    if not mode:
-        return None
-
-    if mode == "hard":
-        request = confirmation_for("reset_to", ctx.label, ctx.state, mode="hard")
-        if request is not None and not ctx.confirm(ctx.parent, request):
+    mode = ctx.answer("mode")
+    if mode is None:
+        # Chemin non préparé : on pose la question ici, comme avant.
+        mode = ctx.ask_mode(ctx.parent)
+        if not mode:
             return None
+
+        if mode == "hard":
+            request = confirmation_for(
+                "reset_to", ctx.label, ctx.state, mode="hard"
+            )
+            if request is not None and not ctx.confirm(ctx.parent, request):
+                return None
 
     return operations.reset_to(ctx.repository, ctx.node.oid, mode)
 
@@ -302,7 +451,9 @@ def _delete_remote_branch(ctx: ActionContext) -> OperationResult | None:
 
 def _stash_changes(ctx: ActionContext) -> OperationResult | None:
     """Demande un message, puis met de côté."""
-    message = ctx.ask_name(ctx.parent, "Stash", "Message (optional):")
+    message = ctx.answer("name")
+    if message is None:
+        message = ctx.ask_name(ctx.parent, "Stash", "Message (optional):")
     if message is None:
         return None
     return stash_ops.stash_changes(ctx.repository, message)
