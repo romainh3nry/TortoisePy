@@ -96,8 +96,60 @@ class BackgroundTask(QObject):
         worker.progress.connect(self.progress.emit)
         worker.finished.connect(self._on_finished)
 
+        # Le parent peut être détruit SANS être fermé : destruction en
+        # cascade d'une fenêtre grand-parente, ou ramasse-miettes en fin
+        # de session. Son `closeEvent` ne passe alors pas, et le fil
+        # mourrait en pleine exécution — Qt abandonne le processus sur
+        # « QThread: Destroyed while thread is still running » (reproduit).
+        #
+        # `destroyed` est émis AVANT que l'objet C++ parent disparaisse,
+        # donc assez tôt pour attendre le fil. `__del__` seul ne suffit
+        # pas : Qt détruit cet objet avant que Python libère son wrapper.
+        if parent is not None:
+            destruction = getattr(parent, "destroyed", None)
+            if destruction is not None:
+                destruction.connect(self._sur_destruction_du_parent)
+
     def start(self) -> None:
         self._thread.start()
+
+    def _sur_destruction_du_parent(self, *_args) -> None:
+        """Arrête le fil quand le parent Qt est détruit sans fermeture."""
+        try:
+            fil = self._thread
+            if fil is not None and fil.isRunning():
+                fil.quit()
+                fil.wait(10_000)
+        except RuntimeError:
+            # L'objet C++ est déjà parti : son wrapper Python lui survit.
+            pass
+
+    def __del__(self) -> None:
+        """Dernier filet : un fil ne doit jamais mourir en pleine exécution.
+
+        Reproduit (abort du processus, pas une exception) : une fenêtre
+        portant une tâche peut être **détruite sans être fermée** — par la
+        destruction en cascade de son parent Qt, ou simplement par le
+        ramasse-miettes en fin de session. Son `closeEvent` ne passe alors
+        pas, le `QThread` est détruit en cours, et Qt abandonne le
+        processus sur « QThread: Destroyed while thread is still running ».
+
+        Chaque fenêtre arrête déjà sa tâche dans son `closeEvent` : c'est
+        le chemin normal, et il reste le bon. Ce garde-fou couvre le
+        chemin anormal, pour toutes les fenêtres à la fois plutôt que
+        fenêtre par fenêtre.
+
+        Enveloppé largement : pendant la destruction de l'interpréteur,
+        attributs et modules peuvent avoir disparu, et une exception levée
+        dans `__del__` est de toute façon ignorée.
+        """
+        try:
+            fil = self._thread
+            if fil is not None and fil.isRunning():
+                fil.quit()
+                fil.wait(10_000)
+        except Exception:   # noqa: BLE001 — rien à rattraper à ce stade
+            pass
 
     def is_running(self) -> bool:
         return self._thread.isRunning()

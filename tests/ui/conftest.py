@@ -65,3 +65,32 @@ def attendre_le_fond():
         raise AssertionError("le travail de fond ne se termine jamais")
 
     return attendre
+
+
+@pytest.fixture
+def attendre_la_fenetre():
+    """Attend la fin du travail de fond d'une fenêtre de commit.
+
+    Depuis que le commit et le push partent en arrière-plan (le loader ne
+    pouvait pas être peint autrement), `commit()` et `commit_and_push()`
+    rendent la main avant la fin du travail.
+
+    `commit_and_push` enchaîne DEUX tâches : le commit rend le verrou,
+    puis le push le reprend. Il faut donc attendre une accalmie, pas le
+    premier relâchement, sinon l'attente se termine entre les deux.
+    """
+
+    def attendre(qtbot, fenetre, timeout: int = 10000) -> None:
+        def libre() -> bool:
+            tache = getattr(fenetre, "_task", None)
+            return tache is None or not tache.is_running()
+
+        for _ in range(50):
+            qtbot.waitUntil(libre, timeout=timeout)
+            qtbot.wait(30)   # laisse une tâche enchaînée prendre le verrou
+            if libre():
+                return
+
+        raise AssertionError("le travail de fond ne se termine jamais")
+
+    return attendre

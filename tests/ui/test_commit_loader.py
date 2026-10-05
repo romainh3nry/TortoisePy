@@ -57,19 +57,49 @@ def test_the_window_has_a_progress_bar(fenetre):
     assert not fenetre.progress.isVisible(), "cachée au repos"
 
 
-def test_committing_shows_the_loader(qtbot, fenetre):
-    """L'assertion centrale : un retour visuel pendant l'écriture."""
-    vus = []
+def test_committing_shows_the_loader(qtbot, fenetre, attendre_la_fenetre):
+    """L'assertion centrale : un retour visuel pendant l'écriture.
+
+    Observé DEPUIS LE FIL PRINCIPAL, après le retour de `commit()`.
+
+    La version précédente interceptait `_write_commit` et relevait
+    `isVisible()` depuis l'intérieur du travail : elle passait alors que
+    tout tournait sur le fil principal, donc que Qt ne pouvait jamais
+    peindre la barre et que la fenêtre gelait (signalé par
+    l'utilisateur : « il n'y avait pas le loader »). Elle prouvait
+    l'appel à `show()`, pas la visibilité.
+    """
+    fenetre.commit()
+
+    assert fenetre.progress.isVisible(), (
+        "le loader n'est pas visible après le retour de commit()"
+    )
+    attendre_la_fenetre(qtbot, fenetre)
+
+
+def test_committing_does_not_block_the_interface(qtbot, fenetre, attendre_la_fenetre):
+    """Le vrai défaut signalé : « pas de loader + processus en fond ».
+
+    Le loader était posé, mais le commit tournait sur le fil principal :
+    Qt n'avait pas la main pour le peindre, et la fenêtre restait figée
+    jusqu'à la fin du push. On vérifie donc le fil, pas la barre.
+    """
+    import threading
+
+    principal = threading.get_ident()
+    fils = []
     vrai = fenetre._write_commit
 
     def observe(paths):
-        vus.append(fenetre.progress.isVisible())
+        fils.append(threading.get_ident())
         return vrai(paths)
 
     fenetre._write_commit = observe
     fenetre.commit()
 
-    assert vus and vus[0], "le loader n'était pas visible pendant le commit"
+    qtbot.waitUntil(lambda: bool(fils), timeout=5000)
+    assert fils[0] != principal, "le commit gèle l'interface"
+    attendre_la_fenetre(qtbot, fenetre)
 
 
 def test_the_loader_disappears_afterwards(qtbot, fenetre):
@@ -78,24 +108,22 @@ def test_the_loader_disappears_afterwards(qtbot, fenetre):
     qtbot.waitUntil(lambda: not fenetre.progress.isVisible(), timeout=5000)
 
 
-def test_the_buttons_are_disabled_during_the_commit(qtbot, fenetre):
-    """Un second clic lancerait un commit concurrent sur le même index."""
-    etats = []
-    vrai = fenetre._write_commit
+def test_the_buttons_are_disabled_during_the_commit(
+    qtbot, fenetre, attendre_la_fenetre
+):
+    """Un second clic lancerait un commit concurrent sur le même index.
 
-    def observe(paths):
-        etats.append(
-            (fenetre.commit_button.isEnabled(),
-             fenetre.push_button.isEnabled())
-        )
-        return vrai(paths)
-
-    fenetre._write_commit = observe
+    Relevé depuis le fil principal : c'est là que l'utilisateur clique,
+    et donc le seul endroit où la protection compte.
+    """
     fenetre.commit()
 
-    assert etats and etats[0] == (False, False), (
-        f"les boutons restaient actifs pendant le commit : {etats}"
-    )
+    assert (
+        fenetre.commit_button.isEnabled(),
+        fenetre.push_button.isEnabled(),
+    ) == (False, False), "les boutons restent actifs pendant le commit"
+
+    attendre_la_fenetre(qtbot, fenetre)
 
 
 def test_the_buttons_come_back_on_failure(qtbot, fenetre, monkeypatch):

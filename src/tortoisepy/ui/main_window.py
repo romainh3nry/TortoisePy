@@ -51,6 +51,7 @@ from tortoisepy.ui import actions
 from tortoisepy.ui.actions import ActionContext
 from tortoisepy.ui.settings_store import SettingsStore
 from tortoisepy.ui.commit_detail_window import CommitDetailWindow
+from tortoisepy.ui.log_window import LogWindow
 from tortoisepy.ui.commit_panel import CommitPanel
 from tortoisepy.ui.commit_window import CommitWindow
 from tortoisepy.ui.conflict_window import ConflictWindow
@@ -180,6 +181,11 @@ class MainWindow(QMainWindow):
         # 3 000 commits (mesuré), ce qui rendrait la saisie inutilisable.
         self.search_field.returnPressed.connect(self.run_search)
         self._detail_windows: list[CommitDetailWindow] = []
+
+        # Les fenêtres de journal, retenues pour la même raison que les
+        # détails : sans référence, le ramasse-miettes les fermerait
+        # aussitôt ouvertes.
+        self._log_windows: list[LogWindow] = []
         # Chaque dépôt récent ouvert crée une nouvelle fenêtre : sans
         # garder une référence, le ramasse-miettes la détruirait aussitôt
         # (même piège que `_detail_windows`).
@@ -1230,6 +1236,39 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
 
         self.statusBar().showMessage(message, 15000)
 
+    def open_log(self, *, ref: str | None = None, path: str | None = None) -> None:
+        """Ouvre le journal d'une branche et/ou d'un fichier.
+
+        « Show log » figurait au menu contextuel depuis le début mais ne
+        faisait **rien** : l'action rendait un succès vide, au motif que
+        « le panneau latéral affiche déjà les commits ». Le panneau montre
+        la liste du nœud sélectionné ; il ne répond ni à « tout
+        l'historique de cette branche, cherchable », ni à « quand ce
+        fichier a-t-il changé ».
+
+        Plusieurs fenêtres sont permises : elles sont en lecture seule, et
+        comparer l'histoire de deux fichiers est un usage légitime.
+        """
+        window = LogWindow(self.repository, ref=ref, path=path, parent=self)
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        window.commit_activated.connect(self.open_commit_detail)
+        window.destroyed.connect(self._forget_log_window)
+        self._log_windows.append(window)
+        window.show()
+
+    def _forget_log_window(self, window=None) -> None:
+        """Retire les fenêtres de journal détruites, comme pour les détails.
+
+        Même précaution que `_forget_detail_window` : on ne vise pas
+        `window` directement, car son wrapper Python peut survivre à
+        l'objet C++ et le toucher lèverait un `RuntimeError` de shiboken.
+        """
+        self._log_windows = [
+            candidate
+            for candidate in self._log_windows
+            if candidate is not window and _still_alive(candidate)
+        ]
+
     def open_commit_detail(self, oid: str) -> None:
         """Ouvre les changements d'un commit.
 
@@ -1314,6 +1353,13 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             self.open_commit_window()
             return
 
+        if action == "show_log":
+            # L'entrée existait mais ne faisait rien (cf. `open_log`).
+            # `context.branch` résout déjà la branche visée, en tenant
+            # compte du cas où un nœud en porte plusieurs.
+            self.open_log(ref=context.branch or context.node.oid)
+            return
+
         if action == "push_branch":
             self._start_push()
             return
@@ -1347,6 +1393,20 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         # manipule des minuteurs Qt, et les démarrer depuis un autre fil
         # provoque « QObject::startTimer: Timers cannot be started from
         # another thread » (vérifié).
+        # Les dialogues AVANT de partir en fond : Qt interdit de créer un
+        # widget hors du fil principal et abandonne le processus
+        # (« Cannot set parent, new parent is in a different thread »).
+        #
+        # Signalé par l'utilisateur : supprimer une branche fermait l'app
+        # sèchement, avant même que la confirmation s'affiche. Toute
+        # action interactive était touchée — supprimer, créer, renommer,
+        # reset, stash.
+        if actions.needs_interaction(action):
+            prepare = actions.prepare_action(action, context)
+            if prepare is None:
+                return      # refusé ou annulé : rien à écrire
+            context = prepare
+
         suspension = self.watcher.suspended()
         suspension.__enter__()
 

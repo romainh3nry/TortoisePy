@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 from tortoisepy.core.changes import FileDiff, changes_in_commit, diff_in_commit
 from tortoisepy.core.commits import read_commit
 from tortoisepy.ui.blame_window import BlameWindow
+from tortoisepy.ui.log_window import LogWindow
 from tortoisepy.ui.diff_view import DiffView
 
 PATH_ROLE = Qt.ItemDataRole.UserRole
@@ -153,7 +154,7 @@ class CommitDetailWindow(QMainWindow):
         item = self._files.topLevelItem(index)
         if item is None:
             return ()
-        return ("Blame",)
+        return ("Blame", "File history")
 
     def _show_context_menu(self, position) -> None:
         item = self._files.itemAt(position)
@@ -170,6 +171,10 @@ class CommitDetailWindow(QMainWindow):
             if entry == "Blame":
                 action.triggered.connect(
                     lambda checked=False, i=index: self.blame_row(i)
+                )
+            elif entry == "File history":
+                action.triggered.connect(
+                    lambda checked=False, i=index: self.log_row(i)
                 )
         menu.exec(self._files.viewport().mapToGlobal(position))
 
@@ -190,6 +195,56 @@ class CommitDetailWindow(QMainWindow):
         window.commit_activated.connect(self._open_commit_from_blame)
         self.blame_windows.append(window)
         window.show()
+
+    def log_row(self, index: int) -> None:
+        """Ouvre l'historique du fichier de la ligne `index`.
+
+        « Quand ce fichier a-t-il changé, et pourquoi ? » — la question
+        qu'on se pose juste avant un blâme, et qu'aucun écran ne savait
+        traiter jusqu'ici.
+
+        Pas de `ref` : on veut l'histoire du fichier telle qu'elle mène à
+        CE commit, pas telle que la voit une branche qui l'a peut-être
+        dépassé. Elle est retenue dans `self.blame_windows`, comme le
+        blâme — même raison, même ramasse-miettes.
+        """
+        item = self._files.topLevelItem(index)
+        if item is None:
+            return
+
+        path = item.data(0, PATH_ROLE)
+        window = LogWindow(self.repository, ref=self.oid, path=path, parent=self)
+        window.commit_activated.connect(self._open_commit_from_blame)
+        self.blame_windows.append(window)
+        window.show()
+
+    def closeEvent(self, event) -> None:
+        """Ferme d'abord les fenêtres filles, tâches de fond comprises.
+
+        Reproduit (abort du processus, pas une simple erreur) : fermer ce
+        détail détruit ses filles par le lien parent Qt **sans appeler
+        leur `closeEvent`**. Une `LogWindow` dont la lecture tournait
+        encore voyait alors son `QThread` mourir en pleine exécution —
+        « QThread: Destroyed while thread is still running » — et Qt
+        abandonnait le processus.
+
+        En usage réel : ouvrir l'historique d'un fichier puis refermer
+        aussitôt le détail, d'autant plus probable que la lecture est
+        longue, donc sur un gros dépôt.
+
+        On ferme explicitement chaque fille : son propre `closeEvent`
+        attend sa tâche, ce que la destruction en cascade ne fait pas.
+        """
+        for fille in list(self.blame_windows):
+            fermer = getattr(fille, "close", None)
+            if callable(fermer):
+                try:
+                    fermer()
+                except RuntimeError:
+                    # L'objet C++ peut déjà être parti : son wrapper
+                    # Python lui survit (shiboken).
+                    pass
+        super().closeEvent(event)
 
     def _open_commit_from_blame(self, oid: str) -> None:
         """Un clic dans le blâme mène au commit qui a écrit la ligne (D28)."""
