@@ -205,3 +205,43 @@ def test_comparing_writes_nothing(qtbot, fenetre, depot):
     assert {
         r: str(depot.references[r].target) for r in depot.references
     } == refs_avant
+
+
+# --- la table des gestionnaires ne doit pas mentir ----------------------
+
+
+def test_the_comparison_actions_are_not_marked_unavailable():
+    """`_not_available` annonce « hors périmètre » : ce n'est plus vrai.
+
+    Les deux actions sont implémentées — la fenêtre principale les
+    intercepte avant la table, comme elle le fait déjà pour
+    `open_commit`. Mais quiconque lit `ACTION_HANDLERS` conclurait
+    qu'elles ne font rien, et c'est le genre de piège qui coûte une
+    heure six mois plus tard.
+    """
+    from tortoisepy.ui.actions import ACTION_HANDLERS
+
+    for nom in ("compare_revisions", "show_log_of_differences"):
+        handler = ACTION_HANDLERS[nom]
+        assert handler.__name__ != "_not_available", (
+            f"« {nom} » est implémentée mais la table dit l'inverse"
+        )
+
+
+def test_the_window_handled_actions_say_so():
+    """Les actions prises en charge par la fenêtre forment une famille.
+
+    `open_commit` suivait déjà ce modèle : rendre `None` avec un
+    commentaire. Les trois doivent se reconnaître au même gestionnaire,
+    sans quoi la table reste ambiguë.
+    """
+    from tortoisepy.ui.actions import ACTION_HANDLERS
+
+    noms = {
+        nom for nom, handler in ACTION_HANDLERS.items()
+        if handler.__name__ == "_handled_by_the_window"
+    }
+
+    assert {
+        "open_commit", "compare_revisions", "show_log_of_differences"
+    } <= noms
