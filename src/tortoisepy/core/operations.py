@@ -19,6 +19,7 @@ from pygit2.enums import FetchPrune, FileMode
 
 from tortoisepy.core.credentials import credentials_for, is_https
 from tortoisepy.core.protocols import check_url_supported
+from tortoisepy.core.staging import compose_partial_content
 from tortoisepy.core.model import Oid
 from tortoisepy.core.results import OperationResult, failed, guarded, succeeded
 
@@ -666,6 +667,7 @@ def _build_tree(
     paths: tuple[str, ...],
     base: pygit2.Tree | None,
     etiquette: str = "Commit",
+    partial: dict[str, tuple] | None = None,
 ) -> pygit2.Oid | OperationResult:
     """Bâtit un arbre à partir d'un index **temporaire en mémoire**.
 
@@ -690,7 +692,18 @@ def _build_tree(
         if os.path.lexists(full):
             # Un index détaché ne lit pas le disque : le blob doit être
             # créé explicitement (vérifié).
-            blob = repo.create_blob_fromworkdir(path)
+            #
+            # `partial` fournit un contenu COMPOSÉ pour ce chemin : la
+            # version HEAD augmentée des seuls hunks retenus (`git add
+            # -p`). Le fichier sur disque garde ses autres changements,
+            # qui restent disponibles pour un commit suivant.
+            hunks = (partial or {}).get(path)
+            if hunks is not None:
+                blob = repo.create_blob(
+                    compose_partial_content(repo, path, hunks).encode("utf-8")
+                )
+            else:
+                blob = repo.create_blob_fromworkdir(path)
             # lstat (pas stat) : ne pas suivre le lien, sinon un symlink
             # serait vu comme sa cible et perdrait son mode LINK.
             info = os.lstat(full)
@@ -711,13 +724,21 @@ def _build_tree(
 
 @guarded("Commit")
 def commit_selection(
-    repo: pygit2.Repository, paths: tuple[str, ...], message: str
+    repo: pygit2.Repository,
+    paths: tuple[str, ...],
+    message: str,
+    partial: dict[str, tuple] | None = None,
 ) -> OperationResult:
     """Commite les fichiers indiqués, sans toucher à l'index de l'utilisateur.
 
     Le commit est bâti sur un index **temporaire en mémoire** : décocher un
     fichier l'exclut du commit, mais ce que l'utilisateur a préparé au
     terminal reste intact (§5).
+
+    `partial` associe à un chemin les hunks à retenir pour lui — le reste
+    de ses changements demeure dans l'arbre de travail (`git add -p`).
+    Un chemin absent de `paths` est ignoré, même s'il figure ici : la
+    case par fichier garde le dernier mot (demandé par l'utilisateur).
     """
     text = message.strip()
     if not text:
@@ -730,7 +751,7 @@ def commit_selection(
     unborn = repo.head_is_unborn
     base = None if unborn else repo.revparse_single("HEAD").tree
 
-    tree = _build_tree(repo, selected, base)
+    tree = _build_tree(repo, selected, base, partial=partial)
     if isinstance(tree, OperationResult):
         return tree
 

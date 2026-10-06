@@ -68,15 +68,37 @@ class FileChange:
 @dataclass(frozen=True)
 class DiffLine:
     origin: str
-    """`+` ajoutée, `-` supprimée, ` ` contexte."""
+    """`+` ajoutée, `-` supprimée, ` ` contexte, `=` fin de fichier
+    sans saut de ligne."""
 
     content: str
+    """Texte de la ligne, **sans** son saut de ligne — pour l'affichage."""
+
+    raw: str = ""
+    """Texte exact, saut de ligne compris.
+
+    `content` est rogné pour l'affichage, ce qui efface une distinction
+    que `core.staging` doit préserver : un fichier dont la dernière ligne
+    n'a pas de saut de ligne ne doit pas en gagner un au commit.
+    """
 
 
 @dataclass(frozen=True)
 class DiffHunk:
     header: str
     lines: tuple[DiffLine, ...]
+
+    old_start: int = 0
+    """Première ligne visée dans la version d'ORIGINE (1-indexée).
+
+    Nécessaire pour recomposer un contenu à partir d'une partie des
+    hunks seulement (`core.staging`) : l'en-tête la contient aussi
+    (« @@ -120,7 +120,7 @@ »), mais la lire là serait fragile alors que
+    pygit2 l'expose directement.
+    """
+
+    old_lines: int = 0
+    """Nombre de lignes que ce hunk remplace dans la version d'origine."""
 
 
 @dataclass(frozen=True)
@@ -224,9 +246,15 @@ def _to_file_diff(path: str, patch) -> FileDiff:
         DiffHunk(
             header=hunk.header.rstrip("\n"),
             lines=tuple(
-                DiffLine(origin=line.origin, content=line.content.rstrip("\n"))
+                DiffLine(
+                    origin=line.origin,
+                    content=line.content.rstrip("\n"),
+                    raw=line.content,
+                )
                 for line in hunk.lines
             ),
+            old_start=hunk.old_start,
+            old_lines=hunk.old_lines,
         )
         for hunk in patch.hunks
     )
