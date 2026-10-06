@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QCheckBox,
     QCompleter,
@@ -174,6 +175,21 @@ def ask_name(parent, title: str, label: str, default: str = "") -> str | None:
     return name or None
 
 
+def _largeur_pour(noms, widget) -> int:
+    """Largeur nécessaire pour afficher le plus long de ces noms.
+
+    Bornée : un nom pathologique ne doit pas produire une fenêtre plus
+    large que l'écran. Plancher pour qu'un dépôt aux noms courts garde
+    un champ de taille normale.
+    """
+    metriques = QFontMetrics(widget.font())
+    requis = max(
+        (metriques.horizontalAdvance(nom) for nom in noms), default=0
+    )
+    # La marge couvre le cadre, le padding interne et le curseur.
+    return max(320, min(requis + 40, 900))
+
+
 def _branch_completer(choices) -> QCompleter:
     """Complète sur n'importe quelle partie du nom.
 
@@ -181,13 +197,35 @@ def _branch_completer(choices) -> QCompleter:
     `origin/main` autant que `main`, sinon les branches distantes sont
     introuvables sans taper « origin/ » d'abord.
     """
-    completer = QCompleter(list(choices))
+    noms = list(choices)
+    completer = QCompleter(noms)
     completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
     completer.setFilterMode(Qt.MatchFlag.MatchContains)
     completer.setCompletionMode(
         QCompleter.CompletionMode.PopupCompletion
     )
+
+    # Le popup se cale par défaut sur la largeur du CHAMP, pas sur celle
+    # de la fenêtre : signalé par l'utilisateur, la liste proposait
+    # « CRM-3933_rate_li… » et deux fois « origin/CRM-3933_… », rendant
+    # indistinguables des branches au préfixe commun. Choisir la mauvaise
+    # cible de rebase n'est pas une erreur anodine.
+    #
+    # La largeur suit le CONTENU : une valeur fixe généreuse règlerait ce
+    # dépôt-ci et donnerait une liste absurde sur un dépôt aux noms courts.
+    if noms:
+        popup = completer.popup()
+        metriques = QFontMetrics(popup.font())
+        requis = max(metriques.horizontalAdvance(nom) for nom in noms)
+        # La marge couvre le cadre, le padding et l'ascenseur éventuel.
+        popup.setMinimumWidth(requis + 40)
+
     return completer
+
+
+_LIBELLE_BRANCHE = "Branch:"
+_LIBELLE_CIBLE = "Onto:"
+"""Libellés des deux champs. Nommés pour qu'un test les fixe."""
 
 
 class RebaseDialog(QDialog):
@@ -218,10 +256,23 @@ class RebaseDialog(QDialog):
         self._replay = QLineEdit(current_branch or "")
         self._replay.setCompleter(_branch_completer(self._locales))
         self._replay.textChanged.connect(self._on_change)
+        # Le curseur se place en fin de texte, et la vue le suit : le
+        # champ affichait « 935-2fa-email-login » au lieu de
+        # « feature/CRM-3935-2fa-email-login » (signalé, capture à
+        # l'appui). C'est le DÉBUT du nom qui l'identifie — le préfixe
+        # `feature/` ou `origin/` — donc on ramène la vue au début.
+        self._replay.setCursorPosition(0)
 
         self._target = QLineEdit()
         self._target.setCompleter(_branch_completer(self._cibles))
         self._target.textChanged.connect(self._on_change)
+
+        # Un nom de branche entier doit tenir sans défiler : sinon on ne
+        # relit pas ce qu'on a saisi avant de valider un rebase.
+        for champ in (self._replay, self._target):
+            champ.setMinimumWidth(_largeur_pour(
+                self._locales + self._cibles, champ
+            ))
 
         # N'apparaît que si la branche rejouée n'est pas la courante :
         # toujours visible, il deviendrait invisible.
@@ -239,13 +290,51 @@ class RebaseDialog(QDialog):
         self._buttons.accepted.connect(self.accept)
         self._buttons.rejected.connect(self.reject)
 
+        # Largeur de DÉPART, pas un minimum : sans elle Qt réduisait la
+        # fenêtre au plus petit de ses champs (~300 px mesurés), et les
+        # noms longs étaient tronqués avant même d'ouvrir la liste.
+        # `resize` plutôt que `setMinimumWidth` pour que la fenêtre reste
+        # rétrécissable sur un petit écran.
+        # `sizeHint` tient compte des largeurs minimales posées
+        # ci-dessus ; le plancher couvre le cas d'un dépôt aux noms
+        # courts, où une fenêtre minuscule paraîtrait cassée.
+        self.resize(max(640, self.sizeHint().width()), self.sizeHint().height())
+
         form = QFormLayout(self)
-        form.addRow("Replay:", self._replay)
-        form.addRow("Onto:", self._target)
+        # « Branch » plutôt que « Replay » (demandé par l'utilisateur) :
+        # « Replay » décrivait bien le geste — un rebase rejoue des
+        # commits — mais le mot n'existe pas dans la CLI git, et
+        # TortoiseGit, dont cette application est un clone, dit
+        # « Branch ». « Onto » est gardé : c'est le mot de git
+        # (`git rebase --onto`), et « Upstream » désignerait d'habitude
+        # la branche de suivi distante, pas la cible d'un rebase.
+        form.addRow(_LIBELLE_BRANCHE, self._replay)
+        form.addRow(_LIBELLE_CIBLE, self._target)
         form.addRow(self._warning)
         form.addRow(self._buttons)
 
         self._on_change()
+
+    def showEvent(self, event) -> None:
+        """Aligne les listes sur leurs champs au moment de l'affichage.
+
+        Le complèteur est construit avant que le champ ait sa largeur
+        finale : la régler dans `_branch_completer` garantit que les noms
+        longs tiennent, mais laisse une liste plus étroite que son champ
+        quand les noms sont courts (mesuré : 228 px sous un champ de
+        488 px), ce qui est bancal.
+
+        Ici, la mise en page est faite et les largeurs sont connues.
+        """
+        super().showEvent(event)
+        for champ in (self._replay, self._target):
+            completeur = champ.completer()
+            if completeur is None:
+                continue
+            popup = completeur.popup()
+            popup.setMinimumWidth(
+                max(popup.minimumWidth(), champ.width())
+            )
 
     # --- lecture -------------------------------------------------------
 
@@ -257,6 +346,22 @@ class RebaseDialog(QDialog):
     def target(self) -> str | None:
         saisie = self._target.text().strip()
         return saisie if saisie in set(self._cibles) else None
+
+    def field_labels(self) -> tuple[str, str]:
+        """Les deux libellés, dans l'ordre d'affichage."""
+        return (_LIBELLE_BRANCHE, _LIBELLE_CIBLE)
+
+    def replay_field(self) -> QLineEdit:
+        """Le champ de la branche rejouée (libellé « Branch »).
+
+        Le nom interne reste « replay » : il dit ce que la branche SUBIT
+        — elle est rejouée — là où le libellé dit ce qu'elle EST.
+        """
+        return self._replay
+
+    def target_field(self) -> QLineEdit:
+        """Le champ « Onto »."""
+        return self._target
 
     def replay_choices(self) -> tuple[str, ...]:
         return tuple(self._locales)
