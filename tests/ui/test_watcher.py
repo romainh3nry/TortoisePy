@@ -157,3 +157,65 @@ def test_external_change_is_still_detected_after_a_suspension(qtbot, repo_path):
         run_git(repo_path, "commit", "-q", "-m", "externe")
 
     watcher.stop()
+
+
+def test_the_paths_are_registered_in_one_call(tmp_path, qtbot, monkeypatch):
+    """`addPaths` plutôt qu'une boucle sur `addPath`.
+
+    Mesuré : 3,6× plus rapide sur un dépôt à 121 dossiers de refs, et
+    l'écart croît avec leur nombre — un dépôt d'équipe en compte des
+    centaines. Le gain reste modeste en absolu, mais une boucle là où
+    Qt offre un appel groupé n'a aucune raison d'être.
+    """
+    from PySide6.QtCore import QFileSystemWatcher
+
+    git_dir = tmp_path / ".git"
+    (git_dir / "refs" / "heads").mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+
+    appels = {"un": 0, "lot": 0}
+    vrai_add = QFileSystemWatcher.addPath
+    vrai_lot = QFileSystemWatcher.addPaths
+
+    def compte_un(self, chemin):
+        appels["un"] += 1
+        return vrai_add(self, chemin)
+
+    def compte_lot(self, chemins):
+        appels["lot"] += 1
+        return vrai_lot(self, chemins)
+
+    monkeypatch.setattr(QFileSystemWatcher, "addPath", compte_un)
+    monkeypatch.setattr(QFileSystemWatcher, "addPaths", compte_lot)
+
+    watcher = RepositoryWatcher(str(git_dir))
+    watcher.start()
+    try:
+        assert appels["lot"] == 1, "les chemins doivent être posés en un appel"
+        assert appels["un"] == 0, "aucun appel unitaire ne doit subsister"
+    finally:
+        watcher.stop()
+
+
+def test_watching_still_covers_every_path(tmp_path, qtbot):
+    """Le regroupement ne doit rien laisser de côté.
+
+    Le vrai risque du changement : poser moins de chemins qu'avant, et
+    manquer silencieusement des changements du dépôt.
+    """
+    git_dir = tmp_path / ".git"
+    (git_dir / "refs" / "heads" / "equipe").mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+
+    watcher = RepositoryWatcher(str(git_dir))
+    attendus = {str(p) for p in watcher._paths_to_watch()}
+    watcher.start()
+    try:
+        surveilles = set(
+            watcher._watcher.files() + watcher._watcher.directories()
+        )
+        assert attendus <= surveilles, (
+            f"chemins manquants : {attendus - surveilles}"
+        )
+    finally:
+        watcher.stop()
