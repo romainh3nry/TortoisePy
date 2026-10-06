@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QPushButton,
     QSplitter,
     QTreeWidget,
@@ -32,7 +33,7 @@ from tortoisepy.core.conflicts import (
     resolve_with,
 )
 from tortoisepy.ui.diff_view import DiffView
-from tortoisepy.ui.dialogs import show_error
+from tortoisepy.ui.dialogs import copy_to_clipboard, show_error
 
 PATH_ROLE = Qt.ItemDataRole.UserRole
 
@@ -47,6 +48,11 @@ class ConflictWindow(QMainWindow):
         super().__init__(parent)
         self.repository = repository
 
+        # Les éditeurs de fusion ouverts, retenus pour que le
+        # ramasse-miettes ne les ferme pas aussitôt (piège vécu dans ce
+        # projet avec les fenêtres de détail).
+        self.merge_editors: list = []
+
         self._files = QTreeWidget()
         self._files.setColumnCount(2)
         self._files.setHeaderLabels(("Fichier", "État"))
@@ -55,6 +61,21 @@ class ConflictWindow(QMainWindow):
             QAbstractItemView.SelectionMode.SingleSelection
         )
         self._files.itemSelectionChanged.connect(self._on_file_selected)
+        # La liste n'avait aucun menu contextuel : pendant un conflit, le
+        # chemin est pourtant ce qu'on recopie le plus (demandé).
+        self._files.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self._files.customContextMenuRequested.connect(self._show_file_menu)
+
+        # Une liste vide et muette est indiscernable d'un défaut :
+        # l'utilisateur avait résolu ses conflits, voyait zéro fichier et
+        # un bouton « Continue » actif, sans rien pour relier les deux —
+        # il a cru son rebase terminé alors qu'il attendait d'être conclu.
+        self.hint_label = QLabel()
+        self.hint_label.setWordWrap(True)
+        self.hint_label.setStyleSheet("padding: 8px; font-weight: bold;")
+        self.hint_label.hide()
 
         self.diff_view = DiffView()
 
@@ -62,6 +83,15 @@ class ConflictWindow(QMainWindow):
         self.mine_button.clicked.connect(self.keep_mine)
         self.theirs_button = QPushButton("Take theirs")
         self.theirs_button.clicked.connect(self.take_theirs)
+        # Troisième voie : composer au lieu de choisir. Demandé par
+        # l'utilisateur pour les blocs que git marque en conflit alors
+        # qu'ils sont seulement voisins — garder les DEUX.
+        self.edit_button = QPushButton("Edit…")
+        self.edit_button.setToolTip(
+            "Ouvre les deux versions côte à côte et compose le résultat"
+        )
+        self.edit_button.clicked.connect(self.edit_conflict)
+
         self.resolve_button = QPushButton("Resolve")
         self.resolve_button.clicked.connect(self.resolve)
         self.abort_button = QPushButton("Abort")
@@ -70,6 +100,7 @@ class ConflictWindow(QMainWindow):
         buttons = QHBoxLayout()
         buttons.addWidget(self.mine_button)
         buttons.addWidget(self.theirs_button)
+        buttons.addWidget(self.edit_button)
         buttons.addStretch(1)
         buttons.addWidget(self.abort_button)
         buttons.addWidget(self.resolve_button)
@@ -80,6 +111,7 @@ class ConflictWindow(QMainWindow):
         layout.addLayout(buttons)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(self.hint_label)
         splitter.addWidget(self._files)
         splitter.addWidget(self.diff_view)
         splitter.addWidget(bottom)
@@ -187,6 +219,76 @@ class ConflictWindow(QMainWindow):
             return
         self.close()
 
+    def context_actions_for_row(self, index: int) -> tuple[str, ...]:
+        """Entrées du menu contextuel pour la ligne `index`.
+
+        Séparé du `QMenu`, pour qu'un test lise les entrées sans ouvrir
+        un vrai menu — même principe que dans la fenêtre de détail.
+        """
+        if self._files.topLevelItem(index) is None:
+            return ()
+        return ("Copy path",)
+
+    def copy_path_row(self, index: int) -> None:
+        """Copie le chemin du fichier en conflit de la ligne `index`.
+
+        Relatif au dépôt : c'est ce que git attend dans ses commandes, et
+        ce qu'on colle dans un éditeur depuis la racine du projet.
+        """
+        item = self._files.topLevelItem(index)
+        if item is None:
+            return
+        copy_to_clipboard(item.data(0, PATH_ROLE))
+
+    def _show_file_menu(self, position) -> None:
+        item = self._files.itemAt(position)
+        if item is None:
+            return
+        index = self._files.indexOfTopLevelItem(item)
+        entrees = self.context_actions_for_row(index)
+        if not entrees:
+            return
+
+        menu = QMenu(self)
+        for entree in entrees:
+            action = menu.addAction(entree)
+            if entree == "Copy path":
+                action.triggered.connect(
+                    lambda checked=False, i=index: self.copy_path_row(i)
+                )
+        menu.exec(self._files.viewport().mapToGlobal(position))
+
+    def edit_conflict(self) -> None:
+        """Ouvre l'éditeur à trois colonnes sur le fichier sélectionné.
+
+        Demandé par l'utilisateur : « il faudrait qu'on puisse modifier
+        le fichier avec une colonne yours, une autre theirs et au milieu
+        le fichier final ». Choisir un camp ne suffit pas quand les deux
+        blocs doivent être gardés.
+
+        Les étiquettes viennent des boutons de CETTE fenêtre : en rebase,
+        « ours » et « theirs » sont inversés par rapport au merge, et
+        cette fenêtre le sait déjà (`_apply_labels`). Les recalculer
+        ailleurs risquerait de dire le contraire à deux centimètres
+        d'écart.
+        """
+        item = self._files.currentItem()
+        if item is None:
+            return
+
+        from tortoisepy.ui.merge_editor import MergeEditor
+
+        editeur = MergeEditor(
+            self.repository,
+            item.data(0, PATH_ROLE),
+            ours_label=self.mine_button.text(),
+            theirs_label=self.theirs_button.text(),
+            parent=self,
+        )
+        editeur.resolved.connect(lambda _chemin: self.refresh())
+        self.merge_editors.append(editeur)
+        editeur.show()
+
     def abort(self) -> None:
         """Rend la main : restaure l'état d'avant l'opération.
 
@@ -228,11 +330,38 @@ class ConflictWindow(QMainWindow):
 
     def _update_buttons(self) -> None:
         remaining = self.file_count()
+        self._update_hint(remaining)
         # Conclure avec un conflit restant produirait un commit contenant
         # des marqueurs `<<<<<<<` (règle de la phase 6).
         self.resolve_button.setEnabled(remaining == 0)
         self.mine_button.setEnabled(remaining > 0)
         self.theirs_button.setEnabled(remaining > 0)
+        self.edit_button.setEnabled(remaining > 0)
+
+    def _update_hint(self, remaining: int) -> None:
+        """Explique une liste vide, et seulement dans ce cas.
+
+        Tant qu'il reste des conflits, ce message serait un contresens :
+        il dit justement qu'il n'y a plus rien à faire ici.
+        """
+        if remaining > 0:
+            self.hint_label.hide()
+            return
+
+        geste = self.resolve_button.text()
+        if self.rebase.in_progress:
+            self.hint_label.setText(
+                "Tous les conflits sont résolus. Cliquez "
+                f"« {geste} » pour terminer le rebase — "
+                "tant qu'il n'est pas conclu, votre branche reste où "
+                "elle était."
+            )
+        else:
+            self.hint_label.setText(
+                f"Tous les conflits sont résolus. Cliquez « {geste} » "
+                "pour conclure la fusion."
+            )
+        self.hint_label.show()
 
 
 def _nom_des_cotes(repo: pygit2.Repository) -> tuple[str, str]:

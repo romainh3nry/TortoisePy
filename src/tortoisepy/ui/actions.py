@@ -415,6 +415,29 @@ def _copy_hash(ctx: ActionContext) -> OperationResult | None:
     )
 
 
+def _copy_branch_name(ctx: ActionContext) -> OperationResult | None:
+    """Copie le nom de la branche visée. N'écrit rien dans le dépôt.
+
+    Demandé par l'utilisateur : c'est ce qu'on recopie sans cesse à la
+    main pour une commande au terminal.
+
+    `ctx.branch` résout la branche DÉSIGNÉE par le menu : un nœud peut en
+    porter plusieurs, et se rabattre sur la première les rendrait
+    inatteignables — le défaut avait déjà été signalé sur la création de
+    tag.
+
+    Sans branche locale, on ne copie rien plutôt que l'OID : « Copy
+    SHA-1 » existe déjà pour cela, et deux entrées faisant la même chose
+    tromperaient.
+    """
+    nom = ctx.branch
+    if nom is None:
+        return None
+
+    ctx.copy(nom)
+    return succeeded(f"Copy branch name « {nom} »", repository_changed=False)
+
+
 def _show_log(ctx: ActionContext) -> OperationResult | None:
     """Le panneau latéral affiche déjà les commits à la sélection."""
     return succeeded("Show log", repository_changed=False)
@@ -491,6 +514,7 @@ ACTION_HANDLERS: dict[str, Callable[[ActionContext], OperationResult | None]] = 
     "pull_branch": _pull_branch,
     "abort_operation": _abort_operation,
     "copy_hash": _copy_hash,
+    "copy_branch_name": _copy_branch_name,
     "show_log": _show_log,
     "open_commit": _open_commit,
     # Hors périmètre v1 : le diff visuel est délégué (§7.4, §11).

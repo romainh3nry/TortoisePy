@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -30,12 +31,47 @@ from tortoisepy.core.amend import amend_commit, can_amend, last_commit_message
 from tortoisepy.core.changes import diff_for, list_changes
 from tortoisepy.core.push_state import unpushed_oids
 from tortoisepy.ui.diff_view import DiffView
-from tortoisepy.ui.dialogs import confirm, show_error, show_message
+from tortoisepy.ui.dialogs import (
+    confirm,
+    copy_to_clipboard,
+    show_error,
+    show_message,
+)
 from tortoisepy.ui.dialogs import ConfirmationRequest
 from tortoisepy.core.results import failed
 from tortoisepy.ui.tasks import BackgroundTask, CallableWorker
 
 PATH_ROLE = Qt.ItemDataRole.UserRole
+HUNK_ROLE = Qt.ItemDataRole.UserRole + 2
+"""Index du bloc dans le diff du fichier courant.
+
+`+ 2` pour ne heurter ni `PATH_ROLE` ni `SELECTABLE_ROLE`.
+"""
+
+
+def _present_dans_head(repository, chemin: str) -> bool:
+    """Ce chemin existe-t-il dans HEAD ?
+
+    Un fichier ajouté n'y est pas, et un dépôt sans commit n'a pas de
+    HEAD du tout.
+    """
+    try:
+        repository.revparse_single("HEAD").peel(pygit2.Tree)[chemin]
+    except (KeyError, pygit2.GitError, ValueError):
+        return False
+    return True
+
+
+def _resumer(hunk) -> str:
+    """Étiquette courte d'un bloc : sa position et son poids.
+
+    L'en-tête brut (« @@ -120,7 +120,7 @@ ») est illisible pour qui ne
+    pratique pas le format unifié ; le détail se lit dans le diff à
+    côté, qui reste la vue de référence.
+    """
+    ajouts = sum(1 for l in hunk.lines if l.origin == "+")
+    retraits = sum(1 for l in hunk.lines if l.origin == "-")
+    return f"Ligne {hunk.old_start} — +{ajouts} / -{retraits}"
 SELECTABLE_ROLE = Qt.ItemDataRole.UserRole + 1
 """Mémorise `FileChange.selectable` à côté du chemin (Finding 1, tour 1).
 
@@ -74,6 +110,13 @@ class CommitWindow(QMainWindow):
         )
         self._files.itemSelectionChanged.connect(self._on_file_selected)
         self._files.itemChanged.connect(lambda *_: self._update_buttons())
+        # La liste n'avait aucun menu contextuel (signalé) : c'est le
+        # quatrième écran affichant des fichiers, et le seul où le chemin
+        # n'était pas copiable.
+        self._files.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self._files.customContextMenuRequested.connect(self._show_file_menu)
 
         self.diff_view = DiffView()
 
@@ -154,9 +197,31 @@ class CommitWindow(QMainWindow):
         layout.addWidget(self._message)
         layout.addLayout(buttons)
 
+        # Les blocs du fichier courant, cochables un par un — « git add
+        # -p ». `DiffView` est un `QPlainTextEdit` : y loger des cases
+        # demanderait de le réécrire, et son rendu est validé. On les
+        # pose donc À CÔTÉ, ce qui laisse le diff intact.
+        self._hunks = QTreeWidget()
+        self._hunks.setColumnCount(1)
+        self._hunks.setHeaderLabels(("Blocs à commiter",))
+        self._hunks.setRootIsDecorated(False)
+        self._hunks.itemChanged.connect(self._on_hunk_toggled)
+
+        # Les blocs retenus, par chemin : {chemin: {index, …}}. Mémorisés
+        # ici et non dans les widgets, qui sont reconstruits à chaque
+        # changement de fichier — les choix seraient perdus en silence.
+        self._hunks_retenus: dict[str, set[int]] = {}
+        self._hunks_connus: dict[str, tuple] = {}
+
+        diff_et_hunks = QSplitter(Qt.Orientation.Horizontal)
+        diff_et_hunks.addWidget(self.diff_view)
+        diff_et_hunks.addWidget(self._hunks)
+        diff_et_hunks.setStretchFactor(0, 3)
+        diff_et_hunks.setStretchFactor(1, 1)
+
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(self._files)
-        splitter.addWidget(self.diff_view)
+        splitter.addWidget(diff_et_hunks)
         splitter.addWidget(bottom)
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 3)
@@ -203,6 +268,24 @@ class CommitWindow(QMainWindow):
         return self._files.topLevelItemCount()
 
     def checked_paths(self) -> tuple[str, ...]:
+        """Chemins cochés, hors ceux dont aucun bloc n'est retenu.
+
+        Décocher tous les blocs d'un fichier revient à ne rien commiter
+        pour lui : le garder produirait un commit vide de son côté, sans
+        que rien ne l'annonce.
+        """
+        return tuple(
+            chemin for chemin in self._chemins_coches()
+            if not self._tous_les_blocs_ecartes(chemin)
+        )
+
+    def _tous_les_blocs_ecartes(self, path: str) -> bool:
+        connus = self._hunks_connus.get(path)
+        if not connus:
+            return False
+        return not self.checked_hunks(path)
+
+    def _chemins_coches(self) -> tuple[str, ...]:
         # Deuxième garde (Finding 1) : même si une case a été cochée par un
         # appel direct à `item.setCheckState()` en contournant `set_checked`,
         # un fichier non sélectionnable (conflit) ne doit jamais atteindre
@@ -233,6 +316,49 @@ class CommitWindow(QMainWindow):
             if callable(arreter):
                 arreter(10_000)
         super().closeEvent(event)
+
+    def context_actions_for_row(self, index: int) -> tuple[str, ...]:
+        """Entrées du menu contextuel pour la ligne `index`.
+
+        Séparé du `QMenu`, pour qu'un test lise les entrées sans ouvrir
+        un vrai menu — même principe que les autres fenêtres à liste.
+        """
+        if self._files.topLevelItem(index) is None:
+            return ()
+        return ("Copy path",)
+
+    def copy_path_row(self, index: int) -> None:
+        """Copie le chemin du fichier de la ligne `index`.
+
+        Relatif au dépôt, comme ailleurs : c'est ce que git attend dans
+        ses commandes.
+
+        **Ne touche pas aux cases à cocher** : elles décident de ce qui
+        sera commité, et les bousculer ferait perdre une préparation
+        faite à la main.
+        """
+        item = self._files.topLevelItem(index)
+        if item is None:
+            return
+        copy_to_clipboard(item.data(0, PATH_ROLE))
+
+    def _show_file_menu(self, position) -> None:
+        item = self._files.itemAt(position)
+        if item is None:
+            return
+        index = self._files.indexOfTopLevelItem(item)
+        entrees = self.context_actions_for_row(index)
+        if not entrees:
+            return
+
+        menu = QMenu(self)
+        for entree in entrees:
+            action = menu.addAction(entree)
+            if entree == "Copy path":
+                action.triggered.connect(
+                    lambda checked=False, i=index: self.copy_path_row(i)
+                )
+        menu.exec(self._files.viewport().mapToGlobal(position))
 
     def _lancer_en_fond(self, appelable, suite) -> None:
         """Exécute `appelable` hors du fil principal, puis `suite` dessus.
@@ -339,7 +465,8 @@ class CommitWindow(QMainWindow):
         if self.amend_box.isChecked():
             return amend_commit(self.repository, paths, self.message())
         return operations.commit_selection(
-            self.repository, paths, self.message()
+            self.repository, paths, self.message(),
+            partial=self.partial_hunks(),
         )
 
     def commit(self) -> None:
@@ -512,10 +639,120 @@ class CommitWindow(QMainWindow):
         item = self._files.currentItem()
         if item is None:
             self.diff_view.clear()
+            self._hunks.clear()
             return
-        self.diff_view.show_diff(
-            diff_for(self.repository, item.data(0, PATH_ROLE))
+
+        chemin = item.data(0, PATH_ROLE)
+        diff = diff_for(self.repository, chemin)
+        self.diff_view.show_diff(diff)
+        self._remplir_les_hunks(chemin, diff)
+
+    def _remplir_les_hunks(self, chemin: str, diff) -> None:
+        """Liste les blocs du fichier, cochés selon les choix mémorisés.
+
+        Un fichier sans version HEAD (non suivi) ou binaire n'a pas de
+        bloc : il garde le tout-ou-rien de sa case, et afficher une liste
+        vide vaut mieux qu'un choix qui n'en est pas un.
+        """
+        self._hunks.blockSignals(True)
+        self._hunks.clear()
+
+        # Sans version HEAD, il n'y a rien à quoi comparer : composer un
+        # contenu partiel est impossible (`compose_partial_content` lève).
+        # Un fichier non suivi garde donc le tout-ou-rien de sa case, et
+        # une liste vide vaut mieux qu'un choix qui n'en est pas un.
+        hunks = () if not _present_dans_head(self.repository, chemin) else (
+            diff.hunks
         )
+
+        self._hunks_connus[chemin] = hunks
+        retenus = self._hunks_retenus.setdefault(
+            chemin, set(range(len(hunks)))
+        )
+
+        for index, hunk in enumerate(hunks):
+            ligne = QTreeWidgetItem([_resumer(hunk)])
+            ligne.setData(0, HUNK_ROLE, index)
+            ligne.setCheckState(
+                0,
+                Qt.CheckState.Checked if index in retenus
+                else Qt.CheckState.Unchecked,
+            )
+            self._hunks.addTopLevelItem(ligne)
+
+        self._hunks.blockSignals(False)
+
+    def _on_hunk_toggled(self, item, _colonne) -> None:
+        chemin = self._chemin_courant()
+        if chemin is None:
+            return
+        index = item.data(0, HUNK_ROLE)
+        self.set_hunk_checked(
+            chemin, index, item.checkState(0) == Qt.CheckState.Checked
+        )
+
+    def _chemin_courant(self) -> str | None:
+        item = self._files.currentItem()
+        return None if item is None else item.data(0, PATH_ROLE)
+
+    # --- lecture et réglage des blocs ----------------------------------
+
+    def hunk_count(self) -> int:
+        """Nombre de blocs affichés pour le fichier courant."""
+        return self._hunks.topLevelItemCount()
+
+    def checked_hunks(self, path: str) -> tuple[int, ...]:
+        """Indices des blocs retenus pour ce fichier, triés."""
+        connus = self._hunks_connus.get(path, ())
+        retenus = self._hunks_retenus.get(path, set(range(len(connus))))
+        return tuple(sorted(retenus))
+
+    def set_hunk_checked(self, path: str, index: int, checked: bool) -> None:
+        """Retient ou écarte un bloc, et met à jour l'affichage du fichier."""
+        connus = self._hunks_connus.get(path, ())
+        retenus = self._hunks_retenus.setdefault(
+            path, set(range(len(connus)))
+        )
+        if checked:
+            retenus.add(index)
+        else:
+            retenus.discard(index)
+        self._marquer_partiel(path)
+
+    def is_partial(self, path: str) -> bool:
+        """Ce fichier n'est-il retenu qu'en partie ?
+
+        Sans ce signe dans la liste, on commiterait en croyant tout
+        prendre, et la différence ne se découvrirait qu'après coup.
+        """
+        connus = self._hunks_connus.get(path)
+        if not connus:
+            return False
+        return len(self.checked_hunks(path)) != len(connus)
+
+    def partial_hunks(self) -> dict[str, tuple]:
+        """Les blocs retenus, pour les fichiers partiellement pris.
+
+        Un fichier entièrement coché n'y figure pas : il emprunte alors
+        le chemin éprouvé, qui lit le fichier du disque.
+        """
+        resultat = {}
+        for chemin in self.checked_paths():
+            if not self.is_partial(chemin):
+                continue
+            connus = self._hunks_connus.get(chemin, ())
+            resultat[chemin] = tuple(
+                connus[i] for i in self.checked_hunks(chemin)
+            )
+        return resultat
+
+    def _marquer_partiel(self, path: str) -> None:
+        item = self._item_for(path)
+        if item is None:
+            return
+        suffixe = "  (partiel)" if self.is_partial(path) else ""
+        base = item.text(1).removesuffix("  (partiel)")
+        item.setText(1, base + suffixe)
 
     def _on_amend_toggled(self, coche: bool) -> None:
         """Emprunte le message du dernier commit, ou le rend.

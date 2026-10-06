@@ -14,15 +14,18 @@ import shiboken6
 from PySide6.QtCore import QByteArray, Qt
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMenu,
     QProgressBar,
+    QPushButton,
     QSizePolicy,
     QSplitter,
     QToolBar,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -64,6 +67,7 @@ from tortoisepy.ui.dialogs import (
     ask_name,
     ask_pull_strategy,
     ask_reset_mode,
+    copy_to_clipboard,
     confirm,
     confirmation_for,
     show_error,
@@ -195,7 +199,40 @@ class MainWindow(QMainWindow):
         self.splitter.addWidget(self.commit_panel)
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 2)
-        self.setCentralWidget(self.splitter)
+
+        # Bandeau d'opération en cours — signalé par l'utilisateur : après
+        # un rebase interrompu par un conflit, il avait résolu ses
+        # fichiers mais pas conclu l'opération. Le graphe montrait alors
+        # HEAD détaché et sa branche inchangée, sans que rien ne dise
+        # qu'un rebase attendait d'être terminé. Fermer la fenêtre de
+        # conflits effaçait le dernier indice.
+        self.operation_banner = QLabel()
+        self.operation_banner.setWordWrap(True)
+        self.banner_continue = QPushButton("Continue")
+        self.banner_continue.clicked.connect(self.continue_operation)
+        self.banner_abort = QPushButton("Abort")
+        self.banner_abort.clicked.connect(self.abort_operation)
+
+        self._banner = QWidget()
+        # Jaune d'avertissement : l'état est transitoire, pas fautif.
+        self._banner.setStyleSheet(
+            "background: #8a6d1f; color: white; border-radius: 4px;"
+        )
+        bandeau = QHBoxLayout(self._banner)
+        bandeau.setContentsMargins(10, 6, 10, 6)
+        bandeau.addWidget(self.operation_banner)
+        bandeau.addStretch(1)
+        bandeau.addWidget(self.banner_continue)
+        bandeau.addWidget(self.banner_abort)
+        self._banner.hide()
+
+        central = QWidget()
+        disposition = QVBoxLayout(central)
+        disposition.setContentsMargins(0, 0, 0, 0)
+        disposition.setSpacing(4)
+        disposition.addWidget(self._banner)
+        disposition.addWidget(self.splitter)
+        self.setCentralWidget(central)
 
         self.toolbar = self._build_toolbar()
         self._build_actions()
@@ -873,11 +910,13 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             resume, self._fetch_summary = self._fetch_summary, None
             self.statusBar().showMessage(resume, 15000)
             self._update_branch_label()
+            self._update_operation_banner()
             self.setWindowTitle(self._title())
             return
 
         self.statusBar().showMessage(message)
         self._update_branch_label()
+        self._update_operation_banner()
         self.setWindowTitle(self._title())
 
     def _update_branch_label(self) -> None:
@@ -1235,6 +1274,68 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             )
 
         self.statusBar().showMessage(message, 15000)
+
+    def _update_operation_banner(self) -> None:
+        """Montre le bandeau tant qu'une opération attend d'être conclue.
+
+        Un bandeau toujours visible ne serait plus un signal : il
+        n'apparaît que lorsqu'il y a vraiment quelque chose à finir.
+        """
+        operation = self.state.operation_in_progress if self.state else None
+        if not operation:
+            self._banner.hide()
+            return
+
+        reste = len(self.state.conflicted_paths) if self.state else 0
+        if reste:
+            texte = (
+                f"{operation.capitalize()} en cours — {reste} conflit(s) "
+                "à résoudre avant de pouvoir continuer."
+            )
+        else:
+            # Le cas qui a trompé l'utilisateur : plus rien à résoudre,
+            # mais la branche ne bougera pas tant que ce n'est pas conclu.
+            texte = (
+                f"{operation.capitalize()} en cours — conflits résolus. "
+                "Cliquez « Continue » pour terminer : votre branche reste "
+                "où elle était tant que l'opération n'est pas conclue."
+            )
+
+        self.operation_banner.setText(texte)
+        self.banner_continue.setEnabled(reste == 0)
+        self._banner.show()
+
+    def continue_operation(self) -> None:
+        """Conclut l'opération en cours depuis le bandeau.
+
+        Le geste doit être à portée : dire qu'une opération attend sans
+        offrir de la terminer ne serait qu'une moitié de remède.
+        """
+        from tortoisepy.core.rebase import continue_rebase, rebase_state
+
+        from tortoisepy.core.conflicts import conclude_merge
+
+        if rebase_state(self.repository).in_progress:
+            resultat = continue_rebase(self.repository)
+        else:
+            resultat = conclude_merge(self.repository)
+
+        self.refresh()
+        if not resultat.success:
+            show_error(self, resultat)
+            return
+        self.statusBar().showMessage(resultat.summary, 15000)
+
+    def abort_operation(self) -> None:
+        """Annule l'opération en cours et revient à l'état d'avant."""
+        from tortoisepy.core.operations import abort_operation
+
+        resultat = abort_operation(self.repository)
+        self.refresh()
+        if not resultat.success:
+            show_error(self, resultat)
+            return
+        self.statusBar().showMessage(resultat.summary, 15000)
 
     def open_log(self, *, ref: str | None = None, path: str | None = None) -> None:
         """Ouvre le journal d'une branche et/ou d'un fichier.
@@ -1633,9 +1734,9 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             return None
 
     def _copy_to_clipboard(self, text: str) -> None:
-        clipboard = QGuiApplication.clipboard()
-        if clipboard is not None:
-            clipboard.setText(text)
+        """Délègue au module partagé : les trois fenêtres qui copient
+        quelque chose doivent le faire de la même façon."""
+        copy_to_clipboard(text)
 
     def _update_fetch_action(self) -> None:
         """Grise Fetch quand il n'y a pas de remote à interroger."""

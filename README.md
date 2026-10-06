@@ -52,13 +52,13 @@ It is built on [pygit2](https://www.pygit2.org/) (libgit2) and
 **macOS and Linux**
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.8.0/scripts/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.9.0/scripts/install.sh | sh
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.8.0/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.9.0/scripts/install.ps1 | iex
 ```
 
 The script installs [uv](https://docs.astral.sh/uv/) if you don't have it,
@@ -75,7 +75,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh          # macOS / Linux
 winget install astral-sh.uv                              # Windows
 
 # 2. Install tortoisePy
-uv tool install git+https://github.com/romainh3nry/TortoisePy@v0.8.0
+uv tool install git+https://github.com/romainh3nry/TortoisePy@v0.9.0
 ```
 
 ### Why uv rather than pip
@@ -94,10 +94,10 @@ Re-run the install command — it always points at the latest released tag:
 
 ```bash
 # macOS / Linux
-curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.8.0/scripts/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.9.0/scripts/install.sh | sh
 
 # Windows
-irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.8.0/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.9.0/scripts/install.ps1 | iex
 ```
 
 > **`uv tool upgrade tortoisepy` will not work here.** The install pins an
@@ -146,14 +146,22 @@ Right-click any node:
 | **Undo** | Revert a commit, reset (soft / mixed / hard) |
 | **Remote** | Fetch, pull, push, push with `--force-with-lease`, delete a remote branch |
 | **Set aside** | Stash changes, apply, pop, drop |
-| **Inspect** | Show a commit's files and diff, blame a file, compare two revisions, copy the SHA |
+| **Inspect** | Show a commit's files and diff, blame a file, compare two revisions, show a branch's log |
+| **Copy** | The SHA, a branch name (local or remote), a file path |
 
 Plus, outside the graph:
 
 - **Commit** — pick files, write a message, optionally amend the last commit
+- **Commit part of a file** — tick the hunks you want, like `git add -p`; the
+  rest stays in your working tree for the next commit
 - **Search** — by message, author or SHA; matching nodes are highlighted and
   the commit list filters down
-- **Resolve conflicts** — after a merge, pull or rebase, choose a side per file
+- **File history** — every commit that touched a file, searchable, from the
+  commit detail window
+- **Resolve conflicts** — after a merge, pull or rebase: choose a side per
+  file, or open the three-way editor (yours | result | theirs) and compose the
+  result yourself — useful when git flags two unrelated blocks that merely sit
+  next to each other
 - **Ahead / behind** — the status bar shows how far you have diverged from the
   server, as of your last fetch
 
@@ -172,10 +180,7 @@ Stated up front so you don't go looking:
 
 - **Interactive rebase** (`rebase -i`) — reordering and squashing commits is an
   application of its own
-- **Staging by hunk** — you commit whole files; this is the biggest gap and it
-  is on the list
-- **Line-by-line conflict resolution** — you pick one side per file
-- **File history** (`git log -- file`) — blame is there, this is not
+- **Word-level diff** — changes are shown and staged by line, not by word
 - **Submodules, worktrees, LFS**
 
 ## Building from source
