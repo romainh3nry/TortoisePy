@@ -55,6 +55,7 @@ from tortoisepy.ui.actions import ActionContext
 from tortoisepy.ui.settings_store import SettingsStore
 from tortoisepy.ui.commit_detail_window import CommitDetailWindow
 from tortoisepy.ui.log_window import LogWindow
+from tortoisepy.ui.compare_window import CompareWindow
 from tortoisepy.ui.commit_panel import CommitPanel
 from tortoisepy.ui.commit_window import CommitWindow
 from tortoisepy.ui.conflict_window import ConflictWindow
@@ -190,6 +191,9 @@ class MainWindow(QMainWindow):
         # détails : sans référence, le ramasse-miettes les fermerait
         # aussitôt ouvertes.
         self._log_windows: list[LogWindow] = []
+
+        # Les comparaisons ouvertes, retenues pour la même raison.
+        self._compare_windows: list[CompareWindow] = []
         # Chaque dépôt récent ouvert crée une nouvelle fenêtre : sans
         # garder une référence, le ramasse-miettes la détruirait aussitôt
         # (même piège que `_detail_windows`).
@@ -1337,7 +1341,64 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             return
         self.statusBar().showMessage(resultat.summary, 15000)
 
-    def open_log(self, *, ref: str | None = None, path: str | None = None) -> None:
+    def _deux_revisions(self) -> tuple[str, str] | None:
+        """Les deux révisions sélectionnées, dans l'ordre du graphe.
+
+        `None` s'il n'y en a pas exactement deux : ne rien faire vaut
+        mieux qu'ouvrir une fenêtre vide.
+        """
+        selection = self.view.selected_oids()
+        if len(selection) != 2:
+            return None
+        return selection[0], selection[1]
+
+    def compare_revisions(self) -> None:
+        """Ouvre le diff entre les deux nœuds sélectionnés.
+
+        L'entrée figurait au menu depuis le début, **active**, et son
+        gestionnaire était `_not_available` : elle ne faisait rien. Une
+        entrée qui ne répond pas apprend à se méfier de l'interface.
+        """
+        revisions = self._deux_revisions()
+        if revisions is None:
+            return
+
+        fenetre = CompareWindow(self.repository, *revisions, parent=self)
+        fenetre.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        fenetre.destroyed.connect(self._forget_compare_window)
+        self._compare_windows.append(fenetre)
+        fenetre.show()
+
+    def _forget_compare_window(self, window=None) -> None:
+        """Retire les comparaisons détruites, comme pour les autres filles."""
+        self._compare_windows = [
+            candidate
+            for candidate in self._compare_windows
+            if candidate is not window and _still_alive(candidate)
+        ]
+
+    def show_log_of_differences(self) -> None:
+        """Les commits qui séparent les deux nœuds — `git log A..B`.
+
+        Seconde entrée morte du menu de comparaison. Bornée par la
+        révision de départ : sans cela elle afficherait tout
+        l'historique, ce que « Show log » fait déjà, et les deux entrées
+        feraient la même chose.
+        """
+        revisions = self._deux_revisions()
+        if revisions is None:
+            return
+
+        base, cible = revisions
+        self.open_log(ref=cible, until=base)
+
+    def open_log(
+        self,
+        *,
+        ref: str | None = None,
+        path: str | None = None,
+        until: str | None = None,
+    ) -> None:
         """Ouvre le journal d'une branche et/ou d'un fichier.
 
         « Show log » figurait au menu contextuel depuis le début mais ne
@@ -1350,7 +1411,9 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         Plusieurs fenêtres sont permises : elles sont en lecture seule, et
         comparer l'histoire de deux fichiers est un usage légitime.
         """
-        window = LogWindow(self.repository, ref=ref, path=path, parent=self)
+        window = LogWindow(
+            self.repository, ref=ref, path=path, until=until, parent=self
+        )
         window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         window.commit_activated.connect(self.open_commit_detail)
         window.destroyed.connect(self._forget_log_window)
@@ -1429,6 +1492,18 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         laisser le watcher réagir déclencherait une reconstruction de plus
         (§7.9).
         """
+        # Ces deux actions portent sur DEUX nœuds : `_selected_node()` rend
+        # `None` dans ce cas, donc la garde ci-dessous les écartait avant
+        # même de regarder l'action. C'est la raison profonde pour
+        # laquelle elles ne faisaient rien.
+        if action == "compare_revisions":
+            self.compare_revisions()
+            return
+
+        if action == "show_log_of_differences":
+            self.show_log_of_differences()
+            return
+
         if action is None or node is None or self.state is None:
             return
 

@@ -195,6 +195,64 @@ def diff_in_commit(repo: pygit2.Repository, oid: str, path: str) -> FileDiff:
     return FileDiff(path=path)
 
 
+def changes_between(
+    repo: pygit2.Repository, base: str, cible: str
+) -> tuple[FileChange, ...]:
+    """Fichiers qui diffèrent entre deux révisions — `git diff A B`.
+
+    Distinct de `changes_in_commit`, qui compare un commit à SON PARENT :
+    ici les deux points sont quelconques et peuvent être éloignés. Un
+    fichier ajouté puis supprimé entre les deux ne figure pas — seul
+    l'écart net compte, comme git.
+
+    Rend un tuple vide si une révision est introuvable : un nœud peut
+    disparaître entre l'affichage du menu et le clic.
+    """
+    diff = _diff_entre(repo, base, cible)
+    if diff is None:
+        return ()
+
+    changes = [
+        FileChange(
+            path=patch.delta.new_file.path or patch.delta.old_file.path,
+            kind=_DELTA_KINDS.get(patch.delta.status, ChangeKind.MODIFIED),
+            is_binary=patch.delta.is_binary,
+        )
+        for patch in diff
+    ]
+    return tuple(sorted(changes, key=lambda c: c.path))
+
+
+def diff_between(
+    repo: pygit2.Repository, base: str, cible: str, path: str
+) -> FileDiff:
+    """Diff d'un fichier entre deux révisions."""
+    diff = _diff_entre(repo, base, cible)
+    if diff is None:
+        return FileDiff(path=path)
+
+    for patch in diff:
+        if path in (patch.delta.new_file.path, patch.delta.old_file.path):
+            return _to_file_diff(path, patch)
+    return FileDiff(path=path)
+
+
+def _diff_entre(repo: pygit2.Repository, base: str, cible: str):
+    """Diff des arbres de deux révisions, ou `None` si l'une manque.
+
+    Le SENS compte : `base.diff_to_tree(cible)` dit ce qu'il faut faire à
+    `base` pour obtenir `cible`. L'inverser montrerait des ajouts là où
+    il y a des suppressions.
+    """
+    try:
+        arbre_base = repo.get(pygit2.Oid(hex=base)).peel(pygit2.Tree)
+        arbre_cible = repo.get(pygit2.Oid(hex=cible)).peel(pygit2.Tree)
+    except (AttributeError, ValueError, KeyError, pygit2.GitError):
+        return None
+
+    return arbre_base.diff_to_tree(arbre_cible)
+
+
 def _commit_diff(repo: pygit2.Repository, oid: str):
     """Diff d'un commit contre son premier parent.
 

@@ -61,6 +61,7 @@ class LogWindow(QMainWindow):
         *,
         ref: str | None = None,
         path: str | None = None,
+        until: str | None = None,
         page_size: int = DEFAULT_LIMIT,
         parent=None,
     ):
@@ -68,6 +69,10 @@ class LogWindow(QMainWindow):
         self.repository = repository
         self.ref = ref
         self.path = path
+        # Borne le parcours — « git log A..B » : les commits de B que A
+        # n'a pas. Sert à « Show log of differences », qui sinon
+        # afficherait tout l'historique comme « Show log ».
+        self.until = until
         self.page_size = page_size
 
         # Les commits déjà lus, gardés en mémoire : la recherche filtre
@@ -181,6 +186,7 @@ class LogWindow(QMainWindow):
                 path=self.path,
                 limit=demande,
                 after=apres,
+                until=self.until,
             )
 
         def afficher(resultat):
@@ -255,6 +261,8 @@ class LogWindow(QMainWindow):
 
     def _titre(self) -> str:
         """La source doit figurer au titre, sinon la fenêtre ne se relit pas."""
+        if self.until:
+            return f"Log — {self.until[:8]} … {(self.ref or 'HEAD')[:8]}"
         if self.path and self.ref:
             return f"Log — {self.path} @ {self.ref}"
         if self.path:
