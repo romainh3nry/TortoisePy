@@ -1,8 +1,15 @@
 """Lister et résoudre les conflits — §6 de la spec phase 8.
 
-Résoudre, ici, c'est choisir un camp par fichier (D12) : ni éditeur de
-fusion, ni choix ligne à ligne. Cela couvre la majorité des cas sans
-ouvrir un chantier à soi seul.
+Deux façons de résoudre :
+
+  - **choisir un camp** (D12), qui couvre la majorité des cas ;
+  - **composer un contenu** (`resolve_with_content`), pour les blocs que
+    git marque en conflit alors qu'ils sont seulement voisins.
+
+Le second cas a été signalé par l'utilisateur sur un rebase : deux clés
+YAML sans rapport, `rate-limit:` et `twoFactorAuth:`, adjacentes dans le
+fichier. Les garder toutes les deux était la bonne résolution, et aucun
+camp seul ne convenait.
 """
 
 from __future__ import annotations
@@ -38,6 +45,113 @@ class ConflictedFile:
         doit le dire clairement plutôt que de proposer un contenu vide.
         """
         return self.has_ours != self.has_theirs
+
+
+@dataclass(frozen=True)
+class ConflictVersions:
+    """Le texte des deux camps, pour les montrer côte à côte.
+
+    `base` est l'ancêtre commun quand il existe : absent d'un conflit
+    ajout/ajout, où aucun des deux camps ne part de quelque chose.
+    """
+
+    ours: str
+    theirs: str
+    base: str | None = None
+
+
+def read_versions(
+    repo: pygit2.Repository, path: str
+) -> ConflictVersions | None:
+    """Le contenu des deux camps d'un conflit, ou `None` s'il n'y en a pas.
+
+    Sert à l'affichage en colonnes : l'interface montre « yours » et
+    « theirs » et laisse composer le résultat entre les deux.
+
+    Un camp absent (le fichier a été supprimé de ce côté) rend une chaîne
+    vide plutôt que `None` : c'est bien ce que ce camp propose — rien —
+    et l'afficher comme tel vaut mieux qu'une colonne manquante.
+    """
+    conflicts = repo.index.conflicts
+    if conflicts is None:
+        return None
+
+    try:
+        ancetre, notre, leur = conflicts[path]
+    except KeyError:
+        return None
+
+    return ConflictVersions(
+        ours=_texte(repo, notre),
+        theirs=_texte(repo, leur),
+        base=_texte(repo, ancetre) if ancetre is not None else None,
+    )
+
+
+def _texte(repo: pygit2.Repository, entree) -> str:
+    """Le contenu d'une entrée d'index, décodé. Vide si elle est absente.
+
+    `errors="replace"` : un fichier en conflit peut porter n'importe quel
+    octet, et lever ici empêcherait d'afficher tout le reste.
+    """
+    if entree is None:
+        return ""
+    objet = repo.get(entree.id)
+    if objet is None:
+        return ""
+    return objet.data.decode("utf-8", errors="replace")
+
+
+@guarded("Résolution", changed_on_error=True)
+def resolve_with_content(
+    repo: pygit2.Repository, path: str, content: str
+) -> OperationResult:
+    """Résout un conflit avec un contenu composé par l'utilisateur.
+
+    Signalé par l'utilisateur : deux blocs voisins mais indépendants
+    (`rate-limit:` et `twoFactorAuth:`) que git marque en conflit. Les
+    garder tous les deux est la bonne résolution, et ni « ours » ni
+    « theirs » ne la permettait.
+
+    Différence avec `resolve_with` : ce contenu **n'existe pas** dans la
+    base d'objets, puisqu'il vient d'être écrit. Il faut donc créer le
+    blob, sans quoi l'index référencerait un objet absent et le commit
+    échouerait plus tard, loin de sa cause.
+
+    Refuse un chemin qui n'est pas en conflit : écrire là écraserait un
+    fichier que l'utilisateur n'a pas désigné (§7.0).
+    """
+    conflicts = repo.index.conflicts
+    if conflicts is None:
+        return failed("Résolution", "no conflict in progress")
+
+    try:
+        _, ours, theirs = conflicts[path]
+    except KeyError:
+        return failed("Résolution", f"no conflict on {path}")
+
+    index = repo.index
+    oid = repo.create_blob(content.encode("utf-8"))
+
+    # Le mode vient du camp qui existe : un exécutable doit le rester, et
+    # le deviner depuis le disque serait faux après une suppression.
+    reference = ours or theirs
+    mode = reference.mode if reference is not None else FileMode.BLOB
+
+    del index.conflicts[path]
+    index.add(pygit2.IndexEntry(path, oid, mode))
+
+    full = os.path.join(repo.workdir or "", path)
+    os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
+    if os.path.lexists(full):
+        # Jamais `open` sur un lien symbolique : il suivrait le lien et
+        # écraserait sa cible, un fichier sans rapport avec le conflit.
+        os.remove(full)
+    with open(full, "wb") as handle:
+        handle.write(content.encode("utf-8"))
+
+    index.write()
+    return succeeded(f"« {path} » résolu")
 
 
 def list_conflicts(repo: pygit2.Repository) -> tuple[ConflictedFile, ...]:
