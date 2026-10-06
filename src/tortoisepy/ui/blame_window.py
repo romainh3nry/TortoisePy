@@ -120,10 +120,6 @@ class BlameWindow(QMainWindow):
         self._task.finished.connect(self._afficher)
         self._task.start()
 
-    def line_count(self) -> int:
-        """Nombre de lignes affichées. Sert aux tests."""
-        return self._lines.topLevelItemCount()
-
     def closeEvent(self, event) -> None:
         """Attend la tâche avant de rendre la fenêtre.
 

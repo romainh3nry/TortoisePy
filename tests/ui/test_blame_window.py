@@ -18,6 +18,22 @@ def run_git(path, *args, auteur="Alice"):
     )
 
 
+def _attendre_le_calcul(qtbot, fenetre, timeout: int = 5000) -> None:
+    """Attend la fin du calcul de fond.
+
+    `blame_file` s'exécute désormais hors du fil principal : la fenêtre
+    s'ouvrait grise et vide pendant tout le calcul, qui atteint deux
+    secondes sur un fichier très remanié. Ces tests, écrits à l'époque
+    synchrone, vérifiaient donc avant que le résultat soit posé.
+    """
+    def fini() -> bool:
+        tache = getattr(fenetre, "_task", None)
+        return tache is None or not tache.is_running()
+
+    qtbot.waitUntil(fini, timeout=timeout)
+    qtbot.wait(20)   # laisse le slot `finished` poser le résultat
+
+
 @pytest.fixture
 def repo(tmp_path):
     path = tmp_path / "d"
@@ -34,12 +50,14 @@ def repo(tmp_path):
 def test_the_window_lists_every_line(qtbot, repo):
     fenetre = BlameWindow(repo, "f.txt", str(repo.head.target))
     qtbot.addWidget(fenetre)
+    _attendre_le_calcul(qtbot, fenetre)
     assert fenetre.line_count() == 3
 
 
 def test_each_row_shows_its_author(qtbot, repo):
     fenetre = BlameWindow(repo, "f.txt", str(repo.head.target))
     qtbot.addWidget(fenetre)
+    _attendre_le_calcul(qtbot, fenetre)
     assert fenetre.author_at(1) == "Alice"
     assert fenetre.author_at(2) == "Bob"
 
@@ -48,6 +66,7 @@ def test_clicking_a_line_emits_its_commit(qtbot, repo):
     """D28 : « qui » puis « pourquoi »."""
     fenetre = BlameWindow(repo, "f.txt", str(repo.head.target))
     qtbot.addWidget(fenetre)
+    _attendre_le_calcul(qtbot, fenetre)
 
     with qtbot.waitSignal(fenetre.commit_activated, timeout=1000) as bloqueur:
         fenetre.activate_line(2)
@@ -65,6 +84,7 @@ def test_a_binary_file_says_so_instead_of_showing_bytes(qtbot, repo):
     fresh = pygit2.Repository(repo.path)
     fenetre = BlameWindow(fresh, "bin.dat", str(fresh.head.target))
     qtbot.addWidget(fenetre)
+    _attendre_le_calcul(qtbot, fenetre)
 
     assert fenetre.line_count() == 0
     assert "binary" in fenetre.message().lower()
@@ -73,6 +93,7 @@ def test_a_binary_file_says_so_instead_of_showing_bytes(qtbot, repo):
 def test_a_missing_file_says_why(qtbot, repo):
     fenetre = BlameWindow(repo, "fantome.txt", str(repo.head.target))
     qtbot.addWidget(fenetre)
+    _attendre_le_calcul(qtbot, fenetre)
     assert fenetre.line_count() == 0
     assert "fantome.txt" in fenetre.message()
 
@@ -80,6 +101,7 @@ def test_a_missing_file_says_why(qtbot, repo):
 def test_the_title_names_the_file_and_the_commit(qtbot, repo):
     fenetre = BlameWindow(repo, "f.txt", str(repo.head.target))
     qtbot.addWidget(fenetre)
+    _attendre_le_calcul(qtbot, fenetre)
     assert "f.txt" in fenetre.windowTitle()
     assert str(repo.head.target)[:8] in fenetre.windowTitle()
 
@@ -93,6 +115,7 @@ def test_an_out_of_range_line_is_harmless(qtbot, repo):
     """
     fenetre = BlameWindow(repo, "f.txt", str(repo.head.target))
     qtbot.addWidget(fenetre)
+    _attendre_le_calcul(qtbot, fenetre)
 
     for numero in (0, -1, 99):
         fenetre.activate_line(numero)  # ne doit pas lever
@@ -104,6 +127,7 @@ def test_activating_a_line_of_an_unblamable_file_is_harmless(qtbot, repo):
     """La liste est vide : activer quoi que ce soit ne doit rien faire."""
     fenetre = BlameWindow(repo, "fantome.txt", str(repo.head.target))
     qtbot.addWidget(fenetre)
+    _attendre_le_calcul(qtbot, fenetre)
 
     recus = []
     fenetre.commit_activated.connect(recus.append)
@@ -129,6 +153,7 @@ def test_an_empty_file_says_why_it_is_empty(qtbot, repo):
     fresh = pygit2.Repository(repo.path)
     fenetre = BlameWindow(fresh, "vide.txt", str(fresh.head.target))
     qtbot.addWidget(fenetre)
+    _attendre_le_calcul(qtbot, fenetre)
 
     assert fenetre.line_count() == 0
     assert fenetre.message(), "la fenêtre doit dire pourquoi elle est vide"
