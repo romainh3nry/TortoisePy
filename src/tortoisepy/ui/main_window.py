@@ -10,7 +10,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pygit2
-import shiboken6
 from PySide6.QtCore import QByteArray, Qt
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
@@ -56,6 +55,7 @@ from tortoisepy.ui.settings_store import SettingsStore
 from tortoisepy.ui.commit_detail_window import CommitDetailWindow
 from tortoisepy.ui.log_window import LogWindow
 from tortoisepy.ui.compare_window import CompareWindow
+from tortoisepy.ui.child_windows import ChildWindows
 from tortoisepy.ui.commit_panel import CommitPanel
 from tortoisepy.ui.commit_window import CommitWindow
 from tortoisepy.ui.conflict_window import ConflictWindow
@@ -117,16 +117,6 @@ def _needs_authentication(result) -> bool:
     return any(marker in message for marker in _AUTH_MARKERS)
 
 
-def _still_alive(widget) -> bool:
-    """Le widget Qt existe-t-il encore côté C++ ?
-
-    Un wrapper Python peut survivre à l'objet C++ que Qt a détruit
-    (`WA_DeleteOnClose`) : y toucher lève alors un `RuntimeError` de
-    shiboken. `isValid` est le seul test fiable.
-    """
-    return shiboken6.isValid(widget)
-
-
 class MainWindow(QMainWindow):
     """Fenêtre du Revision Graph."""
 
@@ -185,19 +175,19 @@ class MainWindow(QMainWindow):
         # Sur validation, pas à la frappe : chercher coûte ~325 ms sur
         # 3 000 commits (mesuré), ce qui rendrait la saisie inutilisable.
         self.search_field.returnPressed.connect(self.run_search)
-        self._detail_windows: list[CommitDetailWindow] = []
+        self._detail_windows = ChildWindows()
 
         # Les fenêtres de journal, retenues pour la même raison que les
         # détails : sans référence, le ramasse-miettes les fermerait
         # aussitôt ouvertes.
-        self._log_windows: list[LogWindow] = []
+        self._log_windows = ChildWindows()
 
         # Les comparaisons ouvertes, retenues pour la même raison.
-        self._compare_windows: list[CompareWindow] = []
+        self._compare_windows = ChildWindows()
         # Chaque dépôt récent ouvert crée une nouvelle fenêtre : sans
         # garder une référence, le ramasse-miettes la détruirait aussitôt
         # (même piège que `_detail_windows`).
-        self._recent_windows: list[MainWindow] = []
+        self._recent_windows = ChildWindows()
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.splitter.addWidget(self.view)
         self.splitter.addWidget(self.commit_panel)
@@ -722,22 +712,9 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
 
         window = MainWindow(repository, settings=self.settings)
         window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        window.destroyed.connect(self._forget_recent_window)
-        self._recent_windows.append(window)
+        self._recent_windows.add(window)
         window.show()
 
-    def _forget_recent_window(self, window=None) -> None:
-        """Retire de la liste les fenêtres de dépôts récents déjà détruites.
-
-        Même précaution que `_forget_detail_window` : on filtre sur la
-        validité plutôt que de comparer `window` directement, car son
-        wrapper Python peut survivre à l'objet C++ détruit.
-        """
-        self._recent_windows = [
-            candidate
-            for candidate in self._recent_windows
-            if candidate is not window and _still_alive(candidate)
-        ]
 
     def find_branch(self) -> None:
         """Centre sur une branche correspondant au motif, puis cycle.
@@ -1365,17 +1342,9 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
 
         fenetre = CompareWindow(self.repository, *revisions, parent=self)
         fenetre.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        fenetre.destroyed.connect(self._forget_compare_window)
-        self._compare_windows.append(fenetre)
+        self._compare_windows.add(fenetre)
         fenetre.show()
 
-    def _forget_compare_window(self, window=None) -> None:
-        """Retire les comparaisons détruites, comme pour les autres filles."""
-        self._compare_windows = [
-            candidate
-            for candidate in self._compare_windows
-            if candidate is not window and _still_alive(candidate)
-        ]
 
     def show_log_of_differences(self) -> None:
         """Les commits qui séparent les deux nœuds — `git log A..B`.
@@ -1416,22 +1385,9 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         )
         window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         window.commit_activated.connect(self.open_commit_detail)
-        window.destroyed.connect(self._forget_log_window)
-        self._log_windows.append(window)
+        self._log_windows.add(window)
         window.show()
 
-    def _forget_log_window(self, window=None) -> None:
-        """Retire les fenêtres de journal détruites, comme pour les détails.
-
-        Même précaution que `_forget_detail_window` : on ne vise pas
-        `window` directement, car son wrapper Python peut survivre à
-        l'objet C++ et le toucher lèverait un `RuntimeError` de shiboken.
-        """
-        self._log_windows = [
-            candidate
-            for candidate in self._log_windows
-            if candidate is not window and _still_alive(candidate)
-        ]
 
     def open_commit_detail(self, oid: str) -> None:
         """Ouvre les changements d'un commit.
@@ -1455,23 +1411,9 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         # `destroyed` porte l'objet détruit : le prendre en argument plutôt
         # que de capturer `window` dans la fermeture évite de garder une
         # référence forte sur ce qu'on veut justement laisser mourir.
-        window.destroyed.connect(self._forget_detail_window)
-        self._detail_windows.append(window)
+        self._detail_windows.add(window)
         window.show()
 
-    def _forget_detail_window(self, window=None) -> None:
-        """Retire de la liste les fenêtres de détail déjà détruites.
-
-        Ne pas viser `window` directement : son wrapper Python peut survivre
-        à l'objet C++, et le toucher lèverait alors un `RuntimeError` de
-        shiboken. On filtre donc sur la validité, ce qui reste correct même
-        si le signal arrive deux fois.
-        """
-        self._detail_windows = [
-            candidate
-            for candidate in self._detail_windows
-            if candidate is not window and _still_alive(candidate)
-        ]
 
     def _selected_node(self):
         """Le nœud sélectionné, ou None s'il n'y en a pas exactement un."""
