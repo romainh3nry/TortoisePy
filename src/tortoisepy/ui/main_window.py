@@ -67,6 +67,7 @@ from tortoisepy.ui.dialogs import (
     ask_name,
     ask_pull_strategy,
     ask_reset_mode,
+    copy_to_clipboard,
     confirm,
     confirmation_for,
     show_error,
@@ -1733,9 +1734,9 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             return None
 
     def _copy_to_clipboard(self, text: str) -> None:
-        clipboard = QGuiApplication.clipboard()
-        if clipboard is not None:
-            clipboard.setText(text)
+        """Délègue au module partagé : les trois fenêtres qui copient
+        quelque chose doivent le faire de la même façon."""
+        copy_to_clipboard(text)
 
     def _update_fetch_action(self) -> None:
         """Grise Fetch quand il n'y a pas de remote à interroger."""

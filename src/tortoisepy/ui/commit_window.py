@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -30,7 +31,12 @@ from tortoisepy.core.amend import amend_commit, can_amend, last_commit_message
 from tortoisepy.core.changes import diff_for, list_changes
 from tortoisepy.core.push_state import unpushed_oids
 from tortoisepy.ui.diff_view import DiffView
-from tortoisepy.ui.dialogs import confirm, show_error, show_message
+from tortoisepy.ui.dialogs import (
+    confirm,
+    copy_to_clipboard,
+    show_error,
+    show_message,
+)
 from tortoisepy.ui.dialogs import ConfirmationRequest
 from tortoisepy.core.results import failed
 from tortoisepy.ui.tasks import BackgroundTask, CallableWorker
@@ -74,6 +80,13 @@ class CommitWindow(QMainWindow):
         )
         self._files.itemSelectionChanged.connect(self._on_file_selected)
         self._files.itemChanged.connect(lambda *_: self._update_buttons())
+        # La liste n'avait aucun menu contextuel (signalé) : c'est le
+        # quatrième écran affichant des fichiers, et le seul où le chemin
+        # n'était pas copiable.
+        self._files.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self._files.customContextMenuRequested.connect(self._show_file_menu)
 
         self.diff_view = DiffView()
 
@@ -233,6 +246,49 @@ class CommitWindow(QMainWindow):
             if callable(arreter):
                 arreter(10_000)
         super().closeEvent(event)
+
+    def context_actions_for_row(self, index: int) -> tuple[str, ...]:
+        """Entrées du menu contextuel pour la ligne `index`.
+
+        Séparé du `QMenu`, pour qu'un test lise les entrées sans ouvrir
+        un vrai menu — même principe que les autres fenêtres à liste.
+        """
+        if self._files.topLevelItem(index) is None:
+            return ()
+        return ("Copy path",)
+
+    def copy_path_row(self, index: int) -> None:
+        """Copie le chemin du fichier de la ligne `index`.
+
+        Relatif au dépôt, comme ailleurs : c'est ce que git attend dans
+        ses commandes.
+
+        **Ne touche pas aux cases à cocher** : elles décident de ce qui
+        sera commité, et les bousculer ferait perdre une préparation
+        faite à la main.
+        """
+        item = self._files.topLevelItem(index)
+        if item is None:
+            return
+        copy_to_clipboard(item.data(0, PATH_ROLE))
+
+    def _show_file_menu(self, position) -> None:
+        item = self._files.itemAt(position)
+        if item is None:
+            return
+        index = self._files.indexOfTopLevelItem(item)
+        entrees = self.context_actions_for_row(index)
+        if not entrees:
+            return
+
+        menu = QMenu(self)
+        for entree in entrees:
+            action = menu.addAction(entree)
+            if entree == "Copy path":
+                action.triggered.connect(
+                    lambda checked=False, i=index: self.copy_path_row(i)
+                )
+        menu.exec(self._files.viewport().mapToGlobal(position))
 
     def _lancer_en_fond(self, appelable, suite) -> None:
         """Exécute `appelable` hors du fil principal, puis `suite` dessus.

@@ -315,6 +315,28 @@ def _single_node_menu(
     entries.append(SEPARATOR)
     entries.append(MenuEntry("Show log", "show_log"))
     entries.append(MenuEntry("Copy SHA-1 to clipboard", "copy_hash"))
+    # Demandé par l'utilisateur : le nom de la branche se recopie à la
+    # main bien plus souvent qu'un SHA-1, pour une commande au terminal.
+    # `branch=` nomme la branche visée quand le nœud en porte plusieurs.
+    #
+    # Les DISTANTES aussi (signalé) : une première version n'offrait que
+    # les locales, donc rien sur un nœud ne portant qu'`origin/…`, et
+    # seulement la locale dès qu'une jumelle existait — le cas le plus
+    # fréquent. Or `origin/develop` est précisément ce qu'on recopie pour
+    # un `git checkout origin/…`.
+    #
+    # `proteger=False` : la liste complète, `main` et `develop` compris.
+    # **Ce qu'on peut copier n'est pas ce qu'on peut détruire** — le
+    # filtre écrit pour la suppression avait déjà grisé à tort
+    # « Switch / Checkout » en phase 21.
+    for branche in _local_branches(node) + _remote_branches(
+        node, proteger=False
+    ):
+        entries.append(MenuEntry(
+            f"Copy branch name « {branche} »",
+            "copy_branch_name",
+            branch=branche,
+        ))
 
     return tuple(entries)
 

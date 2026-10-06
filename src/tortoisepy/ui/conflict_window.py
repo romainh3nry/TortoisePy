@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QPushButton,
     QSplitter,
     QTreeWidget,
@@ -32,7 +33,7 @@ from tortoisepy.core.conflicts import (
     resolve_with,
 )
 from tortoisepy.ui.diff_view import DiffView
-from tortoisepy.ui.dialogs import show_error
+from tortoisepy.ui.dialogs import copy_to_clipboard, show_error
 
 PATH_ROLE = Qt.ItemDataRole.UserRole
 
@@ -60,6 +61,12 @@ class ConflictWindow(QMainWindow):
             QAbstractItemView.SelectionMode.SingleSelection
         )
         self._files.itemSelectionChanged.connect(self._on_file_selected)
+        # La liste n'avait aucun menu contextuel : pendant un conflit, le
+        # chemin est pourtant ce qu'on recopie le plus (demandé).
+        self._files.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self._files.customContextMenuRequested.connect(self._show_file_menu)
 
         # Une liste vide et muette est indiscernable d'un défaut :
         # l'utilisateur avait résolu ses conflits, voyait zéro fichier et
@@ -211,6 +218,45 @@ class ConflictWindow(QMainWindow):
             self.refresh()
             return
         self.close()
+
+    def context_actions_for_row(self, index: int) -> tuple[str, ...]:
+        """Entrées du menu contextuel pour la ligne `index`.
+
+        Séparé du `QMenu`, pour qu'un test lise les entrées sans ouvrir
+        un vrai menu — même principe que dans la fenêtre de détail.
+        """
+        if self._files.topLevelItem(index) is None:
+            return ()
+        return ("Copy path",)
+
+    def copy_path_row(self, index: int) -> None:
+        """Copie le chemin du fichier en conflit de la ligne `index`.
+
+        Relatif au dépôt : c'est ce que git attend dans ses commandes, et
+        ce qu'on colle dans un éditeur depuis la racine du projet.
+        """
+        item = self._files.topLevelItem(index)
+        if item is None:
+            return
+        copy_to_clipboard(item.data(0, PATH_ROLE))
+
+    def _show_file_menu(self, position) -> None:
+        item = self._files.itemAt(position)
+        if item is None:
+            return
+        index = self._files.indexOfTopLevelItem(item)
+        entrees = self.context_actions_for_row(index)
+        if not entrees:
+            return
+
+        menu = QMenu(self)
+        for entree in entrees:
+            action = menu.addAction(entree)
+            if entree == "Copy path":
+                action.triggered.connect(
+                    lambda checked=False, i=index: self.copy_path_row(i)
+                )
+        menu.exec(self._files.viewport().mapToGlobal(position))
 
     def edit_conflict(self) -> None:
         """Ouvre l'éditeur à trois colonnes sur le fichier sélectionné.

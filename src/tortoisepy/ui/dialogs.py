@@ -10,7 +10,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFontMetrics
+from PySide6.QtGui import QFontMetrics, QGuiApplication
+
+
+def copy_to_clipboard(text: str) -> None:
+    """Met `text` dans le presse-papier.
+
+    Partagée par les trois fenêtres qui copient quelque chose : le
+    graphe, le détail d'un commit et les conflits. Elle vivait en
+    méthode privée de `MainWindow`, donc inatteignable depuis les deux
+    autres.
+
+    Un presse-papier absent (environnement sans affichage) est ignoré en
+    silence : l'action est un confort, et lever ici ferait échouer une
+    opération par ailleurs réussie.
+    """
+    presse_papier = QGuiApplication.clipboard()
+    if presse_papier is not None:
+        presse_papier.setText(text)
+
 from PySide6.QtWidgets import (
     QCheckBox,
     QCompleter,

@@ -24,6 +24,7 @@ from tortoisepy.core.changes import FileDiff, changes_in_commit, diff_in_commit
 from tortoisepy.core.commits import read_commit
 from tortoisepy.ui.blame_window import BlameWindow
 from tortoisepy.ui.log_window import LogWindow
+from tortoisepy.ui.dialogs import copy_to_clipboard
 from tortoisepy.ui.diff_view import DiffView
 
 PATH_ROLE = Qt.ItemDataRole.UserRole
@@ -154,7 +155,7 @@ class CommitDetailWindow(QMainWindow):
         item = self._files.topLevelItem(index)
         if item is None:
             return ()
-        return ("Blame", "File history")
+        return ("Blame", "File history", "Copy path")
 
     def _show_context_menu(self, position) -> None:
         item = self._files.itemAt(position)
@@ -176,6 +177,10 @@ class CommitDetailWindow(QMainWindow):
                 action.triggered.connect(
                     lambda checked=False, i=index: self.log_row(i)
                 )
+            elif entry == "Copy path":
+                action.triggered.connect(
+                    lambda checked=False, i=index: self.copy_path_row(i)
+                )
         menu.exec(self._files.viewport().mapToGlobal(position))
 
     def blame_row(self, index: int) -> None:
@@ -195,6 +200,18 @@ class CommitDetailWindow(QMainWindow):
         window.commit_activated.connect(self._open_commit_from_blame)
         self.blame_windows.append(window)
         window.show()
+
+    def copy_path_row(self, index: int) -> None:
+        """Copie le chemin du fichier de la ligne `index`.
+
+        Demandé par l'utilisateur. Le chemin est **relatif au dépôt** :
+        c'est celui que git attend dans ses commandes, et un chemin
+        absolu porterait le nom de la machine.
+        """
+        item = self._files.topLevelItem(index)
+        if item is None:
+            return
+        copy_to_clipboard(item.data(0, PATH_ROLE))
 
     def log_row(self, index: int) -> None:
         """Ouvre l'historique du fichier de la ligne `index`.
