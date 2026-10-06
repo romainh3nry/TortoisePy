@@ -54,6 +54,19 @@ def failed(
     )
 
 
+class WrittenMessage(Exception):
+    """Exception dont le texte est déjà écrit POUR l'utilisateur.
+
+    `guarded` préfixe normalement le nom de la classe — utile devant une
+    erreur inattendue (« TypeError: … »), parasite devant une phrase
+    rédigée (« ProtocolUnavailable: SSH n'est pas disponible… »).
+
+    Définie ici plutôt que dans le module qui s'en sert : `results` ne
+    doit dépendre de rien, alors que tout dépend de lui. L'importer
+    depuis `protocols` créerait un cycle.
+    """
+
+
 def guarded(summary: str, changed_on_error: bool = False) -> Callable:
     """Convertit toute exception en `OperationResult`.
 
@@ -70,6 +83,12 @@ def guarded(summary: str, changed_on_error: bool = False) -> Callable:
             try:
                 return function(*args, **kwargs)
             except pygit2.GitError as error:
+                return failed(summary, str(error), changed_on_error)
+            except WrittenMessage as error:
+                # Ces exceptions PORTENT le message destiné à
+                # l'utilisateur : le préfixer de leur nom de classe
+                # (« ProtocolUnavailable: … ») n'ajouterait qu'un détail
+                # d'implémentation devant une phrase déjà claire.
                 return failed(summary, str(error), changed_on_error)
             except Exception as error:
                 # Volontairement large : lister les types attendus

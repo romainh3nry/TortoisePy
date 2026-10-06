@@ -352,8 +352,32 @@ def test_failed_action_still_refreshes_when_the_repo_changed(
 
 
 def test_cancelled_action_does_not_refresh(window, monkeypatch):
-    from tortoisepy.ui import actions
+    """Annuler en répondant à la QUESTION : rien ne doit bouger.
 
+    `create_branch` demande un nom. Depuis que les dialogues sont posés
+    AVANT de partir en arrière-plan (sinon Qt abandonne le processus),
+    l'annulation se joue dans `prepare_action` — et remplacer seulement
+    `execute_action` laissait s'ouvrir une vraie modale que personne ne
+    ferme : le test bloquait indéfiniment, et toute la suite avec lui.
+    """
+    from tortoisepy.ui import main_window as module
+
+    monkeypatch.setattr(module, "ask_name", lambda *a, **k: None)
+    before = window.view.scene()
+
+    window._run_action("create_branch", window.graph.nodes[0])
+    assert window.view.scene() is before
+
+
+def test_an_action_returning_nothing_does_not_refresh(window, monkeypatch):
+    """L'autre voie d'annulation : le gestionnaire lui-même rend `None`.
+
+    Les deux comptent — une action peut être abandonnée à la question ou
+    au moment d'écrire — et seule celle-ci était couverte.
+    """
+    from tortoisepy.ui import actions, main_window as module
+
+    monkeypatch.setattr(module, "ask_name", lambda *a, **k: "peu importe")
     monkeypatch.setattr(actions, "execute_action", lambda action, ctx: None)
     before = window.view.scene()
 

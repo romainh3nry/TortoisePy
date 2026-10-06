@@ -18,6 +18,7 @@ import pygit2
 from pygit2.enums import FetchPrune, FileMode
 
 from tortoisepy.core.credentials import credentials_for, is_https
+from tortoisepy.core.protocols import check_url_supported
 from tortoisepy.core.model import Oid
 from tortoisepy.core.results import OperationResult, failed, guarded, succeeded
 
@@ -451,6 +452,16 @@ def _credentials(url: str):
     `portfolio`). Passer par `git credential` règle le cas sur toutes les
     plateformes, puisque c'est Git qui choisit son backend.
     """
+    # Avant toute tentative : libgit2 sait-il parler ce protocole ?
+    # Sinon il répond « Unsupported URL protocol in git provider », qui ne
+    # nomme ni le protocole ni la sortie (signalé sur une installation
+    # Windows, dont la roue pygit2 est publiée sans libssh2).
+    #
+    # Ici plutôt que dans chaque opération : `_credentials` est le passage
+    # obligé du fetch, du push et du pull. `@guarded` convertit la levée
+    # en message affiché, sans préfixe (cf. `WrittenMessage`).
+    check_url_supported(url)
+
     if is_https(url):
         found = credentials_for(url)
         if found is not None:
