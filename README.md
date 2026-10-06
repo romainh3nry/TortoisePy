@@ -154,6 +154,8 @@ Plus, outside the graph:
 - **Commit** — pick files, write a message, optionally amend the last commit
 - **Commit part of a file** — tick the hunks you want, like `git add -p`; the
   rest stays in your working tree for the next commit
+- **Word-level diff** — within a modified line, the words that actually changed
+  are shown in bold, so you don't compare two red-and-green lines by eye
 - **Search** — by message, author or SHA; matching nodes are highlighted and
   the commit list filters down
 - **File history** — every commit that touched a file, searchable, from the
@@ -180,7 +182,8 @@ Stated up front so you don't go looking:
 
 - **Interactive rebase** (`rebase -i`) — reordering and squashing commits is an
   application of its own
-- **Word-level diff** — changes are shown and staged by line, not by word
+- **Staging by word** — the changed words are highlighted within a line, but
+  you stage whole hunks, not fragments of a line
 - **Submodules, worktrees, LFS**
 
 ## Building from source
