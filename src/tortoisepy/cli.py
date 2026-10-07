@@ -229,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     from PySide6.QtWidgets import QApplication
 
     from tortoisepy.ui.main_window import MainWindow
+    from tortoisepy.ui.splash import StartupSplash, should_show_splash
 
     # Le nom affiché vient de `argv[0]`, lu par Qt **à la construction**
     # de la QApplication : appelé après, `setApplicationName` ne change
@@ -248,8 +249,48 @@ def main(argv: list[str] | None = None) -> int:
 
     install_if_missing()
 
-    window = MainWindow(repository)
+    # L'écran d'attente AVANT la construction : c'est elle qui coûte —
+    # mesuré sur un dépôt de 935 nœuds, `build_graph` demande 1522 ms, et
+    # `MainWindow` se construit d'un bloc. Pendant ce temps, rien ne
+    # s'affichait et l'application paraissait ne pas démarrer.
+    #
+    # `processEvents` est indispensable : sans lui, l'écran est créé mais
+    # jamais peint, puisque la boucle d'événements ne démarre qu'à
+    # `app.exec()`, après la construction.
+    ecran = None
+    if should_show_splash(repository):
+        from pathlib import Path
+
+        ecran = StartupSplash(Path(repository.workdir or ".").name)
+        ecran.show()
+        app.processEvents()
+
+    try:
+        # `defer_graph` : le graphe se construit en arrière-plan, donc la
+        # fenêtre paraît tout de suite et l'écran d'attente peut s'animer.
+        # Mesuré sur un dépôt de 935 nœuds, `build_graph` coûte 1522 ms —
+        # pendant lesquelles rien ne s'affichait.
+        #
+        # Seulement quand l'écran est montré : sur un petit dépôt, le
+        # mode synchrone évite un aller-retour entre fils pour 17 ms.
+        window = MainWindow(
+            repository,
+            on_progress=ecran.pump if ecran is not None else None,
+            defer_graph=ecran is not None,
+        )
+    except Exception:
+        # L'écran ne doit pas rester orphelin si la construction échoue.
+        if ecran is not None:
+            ecran.finish()
+        raise
+
     window.show()
+
+    if ecran is not None:
+        # L'écran se retire quand le graphe est posé, pas avant : le
+        # fermer ici laisserait une fenêtre vide le temps du calcul.
+        window.graph_ready.connect(ecran.finish)
+
     return app.exec()
 
 

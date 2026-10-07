@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pygit2
-from PySide6.QtCore import QByteArray, Qt
+from PySide6.QtCore import QByteArray, Qt, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -120,9 +120,34 @@ def _needs_authentication(result) -> bool:
 class MainWindow(QMainWindow):
     """Fenêtre du Revision Graph."""
 
+    graph_ready = Signal()
+    """Émis quand le graphe est posé dans la vue, au premier affichage.
+
+    L'écran d'attente s'en sert pour se retirer : le fermer dès que la
+    fenêtre paraît laisserait une fenêtre vide le temps du calcul, pire
+    que l'écran lui-même.
+    """
+
     def __init__(self, repository: pygit2.Repository, parent=None,
-                 settings: SettingsStore | None = None):
+                 settings: SettingsStore | None = None,
+                 on_progress=None,
+                 defer_graph: bool = False):
         super().__init__(parent)
+        # Démarrage différé : le graphe se construit en arrière-plan et la
+        # fenêtre paraît tout de suite. Mesuré sur un dépôt de 935 nœuds,
+        # `build_graph` coûte 1522 ms — pendant lesquelles rien ne
+        # s'affichait, pas même l'écran d'attente, faute de boucle Qt.
+        #
+        # **Non activé par défaut** : des centaines de tests comptent sur
+        # un graphe prêt à la construction, et les forcer à changer sans
+        # qu'aucun comportement utilisateur ne l'exige coûterait plus que
+        # le gain. Seul le démarrage réel le demande.
+        self._defer_graph = defer_graph
+        # Appelé entre les étapes coûteuses de la construction, pour que
+        # l'écran d'attente puisse se repeindre : le fil principal est
+        # occupé une seconde et demie sur un gros dépôt, et sa barre
+        # restait figée (signalé par l'utilisateur).
+        self._on_progress = on_progress or (lambda: None)
         self.repository = repository
         self.settings = settings or SettingsStore()
         self.measurer = QtMeasurer()
@@ -193,6 +218,17 @@ class MainWindow(QMainWindow):
         self.splitter.addWidget(self.commit_panel)
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 2)
+        # Tailles explicites en plus des facteurs : ceux-ci ne jouent que
+        # sur l'espace EXCÉDENTAIRE, et Qt part des tailles souhaitées des
+        # widgets. En démarrage différé, la vue est vide au premier
+        # `show()` : sa taille souhaitée est minuscule, et le panneau
+        # raflait presque tout — mesuré [90, 1306] au lieu de [976, 420]
+        # (signalé par l'utilisateur).
+        #
+        # En PROPORTION de la fenêtre, pas en pixels : une valeur absolue
+        # convenait à 1400 px de large et laissait le panneau déborder dès
+        # que la fenêtre s'élargissait (vérifié).
+        self._repartir_le_splitter()
 
         # Bandeau d'opération en cours — signalé par l'utilisateur : après
         # un rebase interrompu par un conflit, il avait résolu ses
@@ -258,14 +294,24 @@ class MainWindow(QMainWindow):
         self.conflict_window: ConflictWindow | None = None
 
         self.setWindowTitle(self._title())
-        self.resize(1400, 850)
+        self._taille_par_defaut()
+
+        # `restore_settings` AVANT le graphe : vérifié, il ne touche que
+        # le zoom et le splitter, donc rien qui en dépende. Le laisser
+        # après obligerait à l'attendre pour rien.
+        self.restore_settings()
+
         self.refresh()
+        self._on_progress()
         # Centré une seule fois, à l'ouverture : sur un graphe de
         # plusieurs milliers de pixels de haut, s'ouvrir ailleurs
         # obligerait à chercher où l'on se trouve. Les rafraîchissements
         # suivants respectent le déplacement de l'utilisateur.
+        #
+        # En mode différé, le graphe n'est pas encore là : `_center_on_head`
+        # sort proprement sans état, et c'est `_afficher_graphe` qui
+        # rappelle le centrage quand le graphe arrive.
         self._center_on_head()
-        self.restore_settings()
         self.settings.remember_repository(
             str(Path(repository.path).parent)
         )
@@ -281,6 +327,45 @@ class MainWindow(QMainWindow):
             if ecran.availableGeometry().intersects(geometry):
                 return True
         return False
+
+    def _repartir_le_splitter(self) -> None:
+        """Donne 60 % au graphe, 40 % au panneau.
+
+        La proportion suit les facteurs d'étirement déjà posés (3 contre
+        2). Elle est recalculée sur la largeur réelle de la fenêtre, et
+        reste donc juste quelle que soit la taille d'écran.
+        """
+        largeur = max(self.width(), 800)
+        self.splitter.setSizes(
+            [int(largeur * 0.6), largeur - int(largeur * 0.6)]
+        )
+
+    def _taille_par_defaut(self) -> None:
+        """Ouvre sur toute la largeur de l'écran (demandé).
+
+        1400 px en dur laissaient des bandes vides sur un écran large, et
+        le graphe est justement ce qui profite de la place.
+
+        `availableGeometry` et non `geometry` : la barre de menus et le
+        Dock de macOS ne sont pas de l'espace utilisable, et les ignorer
+        ferait passer la fenêtre dessous.
+
+        Cette taille ne vaut que pour une PREMIÈRE ouverture :
+        `restore_settings`, appelé juste après, réapplique la géométrie
+        mémorisée s'il y en a une. L'écraser rendrait le réglage inutile.
+        """
+        ecran = QGuiApplication.primaryScreen()
+        if ecran is None:
+            self.resize(1400, 850)
+            return
+
+        disponible = ecran.availableGeometry()
+        self.resize(disponible.width(), disponible.height())
+        self.move(disponible.topLeft())
+        # La répartition dépend de la largeur : la recalculer après le
+        # redimensionnement, sinon elle resterait celle de la taille
+        # posée à la construction du splitter.
+        self._repartir_le_splitter()
 
     def restore_settings(self) -> None:
         """Réapplique les réglages mémorisés, en se méfiant de chacun.
@@ -320,6 +405,15 @@ class MainWindow(QMainWindow):
         d'un `show()` ultérieur (ex. après une minimisation).
         """
         super().showEvent(event)
+
+        # La répartition est recalculée ici : à la construction, le
+        # splitter n'a pas encore sa largeur réelle, et la contrainte de
+        # largeur minimale du panneau tirait la proportion à 53/46 au
+        # lieu de 60/40 (mesuré sur 1440, 1920 et 2560 px).
+        if not getattr(self, "_splitter_reparti", False):
+            self._splitter_reparti = True
+            self._repartir_le_splitter()
+
         largeur = self._largeur_panneau_en_attente
         if largeur is not None:
             self._largeur_panneau_en_attente = None
@@ -376,13 +470,22 @@ class MainWindow(QMainWindow):
         options = self.graph_options()
 
         def lire():
-            """Les trois lectures coûteuses, hors du fil principal."""
+            """Les trois lectures coûteuses, hors du fil principal.
+
+            `_on_progress` rend la main à Qt entre elles : au PREMIER
+            rafraîchissement, cette fonction s'exécute sur le fil
+            principal (cf. plus bas), et sans ces reprises l'écran
+            d'attente reste figé pendant toute la construction.
+            """
+            self._on_progress()
             graphe = self._graph_cache.get(
                 self.repository,
                 lambda repo: build_graph(repo, options),
                 options_key=(options.show_tags,),
             )
+            self._on_progress()
             etat = read_state(self.repository)
+            self._on_progress()
             # Le nœud de travail est greffé APRÈS le cache : il dépend
             # de l'arbre de travail, qui change bien plus souvent que la
             # topologie. L'inclure dans le graphe mis en cache
@@ -400,12 +503,22 @@ class MainWindow(QMainWindow):
             self.graph, self.state, unpushed = resultat
             self._afficher_graphe(unpushed, defilement)
 
-        # Le PREMIER rafraîchissement est synchrone : `__init__` enchaîne
-        # sur `restore_settings` et `_center_on_head`, qui ont besoin du
-        # graphe. Une fenêtre qui s'ouvre sans graphe, même brièvement,
-        # est fragile — et c'est le seul appel où l'utilisateur attend
-        # déjà le démarrage.
+        # Le PREMIER rafraîchissement est synchrone, SAUF en mode différé :
+        # `__init__` enchaînait sur `_center_on_head`, qui a besoin du
+        # graphe. Vérifié, cette dépendance est douce — la méthode sort
+        # proprement sans état, et `_afficher_graphe` rappelle le centrage
+        # quand le graphe arrive.
         if self.graph is None:
+            if self._defer_graph:
+                self._premier_affichage = True
+                # `silencieux` : l'écran d'attente porte déjà une barre, et
+                # deux indicateurs pour une seule attente laissent croire à
+                # deux travaux distincts (signalé par l'utilisateur).
+                self.run_in_background(
+                    lire, afficher, "Construction du graphe…",
+                    silencieux=True,
+                )
+                return
             afficher(lire())
             return
 
@@ -416,6 +529,20 @@ class MainWindow(QMainWindow):
         if not self.run_in_background(lire, afficher, "Chargement du graphe…"):
             afficher(lire())
         return
+
+    def _centrer_au_premier_affichage(self) -> None:
+        """Centre sur HEAD la première fois que le graphe paraît.
+
+        En mode différé, le constructeur a appelé `_center_on_head` sans
+        état : il n'a rien fait. Le centrage doit donc suivre l'arrivée
+        du graphe, sans quoi la vue s'ouvrirait en haut d'un graphe de
+        plusieurs milliers de pixels.
+        """
+        if not getattr(self, "_premier_affichage", False):
+            return
+        self._premier_affichage = False
+        self._center_on_head()
+        self.graph_ready.emit()
 
     def _afficher_graphe(self, unpushed, defilement) -> None:
         """Pose le graphe dans la vue. **Fil principal uniquement** :
@@ -448,6 +575,9 @@ class MainWindow(QMainWindow):
         self._reselect_current_node()
         self.view.horizontalScrollBar().setValue(defilement[0])
         self.view.verticalScrollBar().setValue(defilement[1])
+        # APRÈS la restauration du défilement : en mode différé celle-ci
+        # vaut (0, 0), et centrer avant la laisserait l'écraser.
+        self._centrer_au_premier_affichage()
         self._update_status()
         self._update_push_action()
         self._update_fetch_action()
@@ -1077,7 +1207,9 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         self.view.setEnabled(actif)
         self.toolbar.setEnabled(actif)
 
-    def run_in_background(self, appelable, suite, libelle: str) -> bool:
+    def run_in_background(
+        self, appelable, suite, libelle: str, silencieux: bool = False
+    ) -> bool:
         """Exécute `appelable` hors du fil principal, puis appelle `suite`.
 
         Demandé par l'utilisateur : « à chaque fois qu'une action est
@@ -1098,7 +1230,11 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             return False
 
         self.progress.setRange(0, 0)     # indéterminé : durée inconnue
-        self.progress.show()
+        # `silencieux` ne masque QUE la barre : le libellé reste utile,
+        # et la barre resservira au prochain appel — il s'agit de la
+        # taire une fois, pas de la désactiver.
+        if not silencieux:
+            self.progress.show()
         self.statusBar().showMessage(libelle)
 
         def termine(resultat):
