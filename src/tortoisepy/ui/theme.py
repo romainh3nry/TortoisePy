@@ -130,6 +130,79 @@ def is_dark_theme() -> bool:
     return app.palette().color(QPalette.ColorRole.Base).lightness() < 128
 
 
+SYNTAX_CLAIR = {
+    "keyword": QColor(140, 40, 160),
+    "string": QColor(20, 110, 60),
+    "comment": QColor(100, 100, 100),
+    "number": QColor(30, 80, 180),
+    "name": QColor(30, 70, 160),
+}
+"""Couleurs de syntaxe, thème clair.
+
+**Mesurées sur les DEUX fonds de diff**, pas sur le fond de la fenêtre :
+une ligne colorée porte déjà un vert ou un rouge pâle, et c'est là que
+le texte doit rester lisible. Pire contraste de chaque teinte, sur fond
+de suppression :
+
+    keyword 5.9:1   string 5.2:1   number 6.0:1   name 7.1:1
+    comment 4.9:1
+
+Le commentaire est le plus discret des cinq, volontairement — il doit
+s'effacer — mais reste au-dessus du seuil WCAG AA de 4.5:1. Une première
+version à (110,110,110) tombait à 4.2:1.
+"""
+
+SYNTAX_SOMBRE = {
+    "keyword": QColor(220, 150, 240),
+    "string": QColor(140, 220, 170),
+    "comment": QColor(160, 160, 160),
+    "number": QColor(150, 190, 255),
+    "name": QColor(150, 195, 255),
+}
+"""Couleurs de syntaxe, thème sombre.
+
+Pire contraste sur fond d'ajout sombre :
+
+    keyword 5.8:1   string 7.7:1   number 6.6:1   name 6.9:1
+    comment 4.8:1
+"""
+
+
+TAB_EN_ESPACES = 4
+"""Largeur d'une tabulation, en espaces.
+
+Signalé par l'utilisateur : « des soucis d'indentation ». Qt place ses
+taquets à 80 px, soit 8,9 espaces dans la police du code (mesuré) —
+trois tabulations repoussaient le texte de 27 espaces, et un fichier PHP
+indenté par tabulations partait hors de l'écran.
+
+Quatre est la convention de PHP comme de Python. Le défaut précédait la
+coloration syntaxique ; elle l'a seulement rendu visible.
+"""
+
+
+def apply_tab_width(widget) -> None:
+    """Règle la largeur des tabulations sur la police du widget.
+
+    En pixels et non en caractères : `setTabStopDistance` n'accepte que
+    des pixels, et la largeur d'une espace dépend de la police.
+    """
+    metriques = QFontMetricsF(widget.font())
+    widget.setTabStopDistance(
+        TAB_EN_ESPACES * metriques.horizontalAdvance(" ")
+    )
+
+
+def syntax_colors() -> dict[str, QColor]:
+    """Couleurs de syntaxe adaptées au thème courant.
+
+    Cinq teintes seulement : dans un diff, l'information principale
+    reste « ajouté » ou « supprimé », et une palette plus riche la
+    noierait.
+    """
+    return SYNTAX_SOMBRE if is_dark_theme() else SYNTAX_CLAIR
+
+
 def diff_colors() -> dict[str, QColor | None]:
     """Couleurs du diff adaptées au thème courant.
 
