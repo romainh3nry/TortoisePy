@@ -24,6 +24,8 @@ from PySide6.QtWidgets import (
 from tortoisepy.ui import theme
 from tortoisepy.core.blame import BlameError, blame_file
 from tortoisepy.ui.tasks import BackgroundTask, CallableWorker
+from tortoisepy.core.syntax import language_for
+from tortoisepy.ui.code_delegate import CodeDelegate
 
 OID_ROLE = Qt.ItemDataRole.UserRole
 
@@ -74,6 +76,19 @@ class BlameWindow(QMainWindow):
         self._lines.itemActivated.connect(
             lambda item, _colonne: self._activate(item)
         )
+
+        # Coloration syntaxique de la colonne « Ligne » (demandé). Un
+        # `QTreeWidgetItem` ne porte qu'UNE couleur de texte par cellule :
+        # distinguer un mot-clé d'une chaîne demande de peindre
+        # soi-même, d'où le délégué.
+        #
+        # La référence est gardée : sans elle, le ramasse-miettes le
+        # détruirait et la coloration disparaîtrait.
+        self._langue = language_for(path)
+        self._delegue = CodeDelegate(
+            self._lines, language=self._langue, column=3
+        )
+        self._lines.setItemDelegate(self._delegue)
 
         # Le calcul part en arrière-plan : `blame_file` est l'opération
         # la plus coûteuse de git, et son prix suit le nombre de commits
@@ -189,6 +204,15 @@ class BlameWindow(QMainWindow):
                 item.setBackground(colonne, fond)
 
             self._lines.addTopLevelItem(item)
+
+    def is_syntax_highlighted(self) -> bool:
+        """Les lignes sont-elles colorées ?
+
+        Un délégué peint la cellule : son effet ne se lit pas dans le
+        format de l'item, contrairement à `DiffView`. On expose donc la
+        décision plutôt que de faire deviner les tests.
+        """
+        return self._langue is not None
 
     def _activate(self, item: QTreeWidgetItem | None) -> None:
         # `item` peut être `None` : un fichier binaire ou absent laisse la

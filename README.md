@@ -52,13 +52,13 @@ It is built on [pygit2](https://www.pygit2.org/) (libgit2) and
 **macOS and Linux**
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.9.0/scripts/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.10.0/scripts/install.sh | sh
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.9.0/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.10.0/scripts/install.ps1 | iex
 ```
 
 The script installs [uv](https://docs.astral.sh/uv/) if you don't have it,
@@ -75,7 +75,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh          # macOS / Linux
 winget install astral-sh.uv                              # Windows
 
 # 2. Install tortoisePy
-uv tool install git+https://github.com/romainh3nry/TortoisePy@v0.9.0
+uv tool install git+https://github.com/romainh3nry/TortoisePy@v0.10.0
 ```
 
 ### Why uv rather than pip
@@ -94,10 +94,10 @@ Re-run the install command — it always points at the latest released tag:
 
 ```bash
 # macOS / Linux
-curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.9.0/scripts/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.10.0/scripts/install.sh | sh
 
 # Windows
-irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.9.0/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.10.0/scripts/install.ps1 | iex
 ```
 
 > **`uv tool upgrade tortoisepy` will not work here.** The install pins an
@@ -154,6 +154,8 @@ Plus, outside the graph:
 - **Commit** — pick files, write a message, optionally amend the last commit
 - **Commit part of a file** — tick the hunks you want, like `git add -p`; the
   rest stays in your working tree for the next commit
+- **Word-level diff** — within a modified line, the words that actually changed
+  are shown in bold, so you don't compare two red-and-green lines by eye
 - **Search** — by message, author or SHA; matching nodes are highlighted and
   the commit list filters down
 - **File history** — every commit that touched a file, searchable, from the
@@ -180,7 +182,8 @@ Stated up front so you don't go looking:
 
 - **Interactive rebase** (`rebase -i`) — reordering and squashing commits is an
   application of its own
-- **Word-level diff** — changes are shown and staged by line, not by word
+- **Staging by word** — the changed words are highlighted within a line, but
+  you stage whole hunks, not fragments of a line
 - **Submodules, worktrees, LFS**
 
 ## Building from source

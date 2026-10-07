@@ -443,13 +443,20 @@ def _show_log(ctx: ActionContext) -> OperationResult | None:
     return succeeded("Show log", repository_changed=False)
 
 
-def _open_commit(ctx: ActionContext) -> OperationResult | None:
-    """Ouvre la fenêtre de commit. La fenêtre principale s'en charge."""
-    return None
+def _handled_by_the_window(ctx: ActionContext) -> OperationResult | None:
+    """Action prise en charge par la fenêtre, avant d'atteindre la table.
 
+    Trois actions ouvrent une fenêtre plutôt que d'écrire dans le
+    dépôt : `open_commit`, `compare_revisions` et
+    `show_log_of_differences`. `MainWindow._run_action` les intercepte —
+    les deux dernières y sont obligées, car elles portent sur DEUX
+    nœuds et `_selected_node()` rend `None` dans ce cas.
 
-def _not_available(ctx: ActionContext) -> OperationResult | None:
-    """Actions prévues par le menu mais hors périmètre v1 (§11)."""
+    Elles figurent quand même ici : le menu vérifie que toute action
+    proposée a un gestionnaire. Rendre `None` dit « rien à exécuter »,
+    pas « rien d'implémenté » — nuance que `_not_available` brouillait,
+    au point de laisser croire ces actions mortes.
+    """
     return None
 
 
@@ -516,10 +523,10 @@ ACTION_HANDLERS: dict[str, Callable[[ActionContext], OperationResult | None]] = 
     "copy_hash": _copy_hash,
     "copy_branch_name": _copy_branch_name,
     "show_log": _show_log,
-    "open_commit": _open_commit,
+    "open_commit": _handled_by_the_window,
     # Hors périmètre v1 : le diff visuel est délégué (§7.4, §11).
-    "compare_revisions": _not_available,
-    "show_log_of_differences": _not_available,
+    "compare_revisions": _handled_by_the_window,
+    "show_log_of_differences": _handled_by_the_window,
     "stash_changes": _stash_changes,
     "apply_stash": _apply_stash,
     "pop_stash": _pop_stash,

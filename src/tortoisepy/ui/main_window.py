@@ -10,8 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pygit2
-import shiboken6
-from PySide6.QtCore import QByteArray, Qt
+from PySide6.QtCore import QByteArray, Qt, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -55,6 +54,8 @@ from tortoisepy.ui.actions import ActionContext
 from tortoisepy.ui.settings_store import SettingsStore
 from tortoisepy.ui.commit_detail_window import CommitDetailWindow
 from tortoisepy.ui.log_window import LogWindow
+from tortoisepy.ui.compare_window import CompareWindow
+from tortoisepy.ui.child_windows import ChildWindows
 from tortoisepy.ui.commit_panel import CommitPanel
 from tortoisepy.ui.commit_window import CommitWindow
 from tortoisepy.ui.conflict_window import ConflictWindow
@@ -116,22 +117,37 @@ def _needs_authentication(result) -> bool:
     return any(marker in message for marker in _AUTH_MARKERS)
 
 
-def _still_alive(widget) -> bool:
-    """Le widget Qt existe-t-il encore côté C++ ?
-
-    Un wrapper Python peut survivre à l'objet C++ que Qt a détruit
-    (`WA_DeleteOnClose`) : y toucher lève alors un `RuntimeError` de
-    shiboken. `isValid` est le seul test fiable.
-    """
-    return shiboken6.isValid(widget)
-
-
 class MainWindow(QMainWindow):
     """Fenêtre du Revision Graph."""
 
+    graph_ready = Signal()
+    """Émis quand le graphe est posé dans la vue, au premier affichage.
+
+    L'écran d'attente s'en sert pour se retirer : le fermer dès que la
+    fenêtre paraît laisserait une fenêtre vide le temps du calcul, pire
+    que l'écran lui-même.
+    """
+
     def __init__(self, repository: pygit2.Repository, parent=None,
-                 settings: SettingsStore | None = None):
+                 settings: SettingsStore | None = None,
+                 on_progress=None,
+                 defer_graph: bool = False):
         super().__init__(parent)
+        # Démarrage différé : le graphe se construit en arrière-plan et la
+        # fenêtre paraît tout de suite. Mesuré sur un dépôt de 935 nœuds,
+        # `build_graph` coûte 1522 ms — pendant lesquelles rien ne
+        # s'affichait, pas même l'écran d'attente, faute de boucle Qt.
+        #
+        # **Non activé par défaut** : des centaines de tests comptent sur
+        # un graphe prêt à la construction, et les forcer à changer sans
+        # qu'aucun comportement utilisateur ne l'exige coûterait plus que
+        # le gain. Seul le démarrage réel le demande.
+        self._defer_graph = defer_graph
+        # Appelé entre les étapes coûteuses de la construction, pour que
+        # l'écran d'attente puisse se repeindre : le fil principal est
+        # occupé une seconde et demie sur un gros dépôt, et sa barre
+        # restait figée (signalé par l'utilisateur).
+        self._on_progress = on_progress or (lambda: None)
         self.repository = repository
         self.settings = settings or SettingsStore()
         self.measurer = QtMeasurer()
@@ -184,21 +200,35 @@ class MainWindow(QMainWindow):
         # Sur validation, pas à la frappe : chercher coûte ~325 ms sur
         # 3 000 commits (mesuré), ce qui rendrait la saisie inutilisable.
         self.search_field.returnPressed.connect(self.run_search)
-        self._detail_windows: list[CommitDetailWindow] = []
+        self._detail_windows = ChildWindows()
 
         # Les fenêtres de journal, retenues pour la même raison que les
         # détails : sans référence, le ramasse-miettes les fermerait
         # aussitôt ouvertes.
-        self._log_windows: list[LogWindow] = []
+        self._log_windows = ChildWindows()
+
+        # Les comparaisons ouvertes, retenues pour la même raison.
+        self._compare_windows = ChildWindows()
         # Chaque dépôt récent ouvert crée une nouvelle fenêtre : sans
         # garder une référence, le ramasse-miettes la détruirait aussitôt
         # (même piège que `_detail_windows`).
-        self._recent_windows: list[MainWindow] = []
+        self._recent_windows = ChildWindows()
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.splitter.addWidget(self.view)
         self.splitter.addWidget(self.commit_panel)
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 2)
+        # Tailles explicites en plus des facteurs : ceux-ci ne jouent que
+        # sur l'espace EXCÉDENTAIRE, et Qt part des tailles souhaitées des
+        # widgets. En démarrage différé, la vue est vide au premier
+        # `show()` : sa taille souhaitée est minuscule, et le panneau
+        # raflait presque tout — mesuré [90, 1306] au lieu de [976, 420]
+        # (signalé par l'utilisateur).
+        #
+        # En PROPORTION de la fenêtre, pas en pixels : une valeur absolue
+        # convenait à 1400 px de large et laissait le panneau déborder dès
+        # que la fenêtre s'élargissait (vérifié).
+        self._repartir_le_splitter()
 
         # Bandeau d'opération en cours — signalé par l'utilisateur : après
         # un rebase interrompu par un conflit, il avait résolu ses
@@ -264,14 +294,24 @@ class MainWindow(QMainWindow):
         self.conflict_window: ConflictWindow | None = None
 
         self.setWindowTitle(self._title())
-        self.resize(1400, 850)
+        self._taille_par_defaut()
+
+        # `restore_settings` AVANT le graphe : vérifié, il ne touche que
+        # le zoom et le splitter, donc rien qui en dépende. Le laisser
+        # après obligerait à l'attendre pour rien.
+        self.restore_settings()
+
         self.refresh()
+        self._on_progress()
         # Centré une seule fois, à l'ouverture : sur un graphe de
         # plusieurs milliers de pixels de haut, s'ouvrir ailleurs
         # obligerait à chercher où l'on se trouve. Les rafraîchissements
         # suivants respectent le déplacement de l'utilisateur.
+        #
+        # En mode différé, le graphe n'est pas encore là : `_center_on_head`
+        # sort proprement sans état, et c'est `_afficher_graphe` qui
+        # rappelle le centrage quand le graphe arrive.
         self._center_on_head()
-        self.restore_settings()
         self.settings.remember_repository(
             str(Path(repository.path).parent)
         )
@@ -287,6 +327,45 @@ class MainWindow(QMainWindow):
             if ecran.availableGeometry().intersects(geometry):
                 return True
         return False
+
+    def _repartir_le_splitter(self) -> None:
+        """Donne 60 % au graphe, 40 % au panneau.
+
+        La proportion suit les facteurs d'étirement déjà posés (3 contre
+        2). Elle est recalculée sur la largeur réelle de la fenêtre, et
+        reste donc juste quelle que soit la taille d'écran.
+        """
+        largeur = max(self.width(), 800)
+        self.splitter.setSizes(
+            [int(largeur * 0.6), largeur - int(largeur * 0.6)]
+        )
+
+    def _taille_par_defaut(self) -> None:
+        """Ouvre sur toute la largeur de l'écran (demandé).
+
+        1400 px en dur laissaient des bandes vides sur un écran large, et
+        le graphe est justement ce qui profite de la place.
+
+        `availableGeometry` et non `geometry` : la barre de menus et le
+        Dock de macOS ne sont pas de l'espace utilisable, et les ignorer
+        ferait passer la fenêtre dessous.
+
+        Cette taille ne vaut que pour une PREMIÈRE ouverture :
+        `restore_settings`, appelé juste après, réapplique la géométrie
+        mémorisée s'il y en a une. L'écraser rendrait le réglage inutile.
+        """
+        ecran = QGuiApplication.primaryScreen()
+        if ecran is None:
+            self.resize(1400, 850)
+            return
+
+        disponible = ecran.availableGeometry()
+        self.resize(disponible.width(), disponible.height())
+        self.move(disponible.topLeft())
+        # La répartition dépend de la largeur : la recalculer après le
+        # redimensionnement, sinon elle resterait celle de la taille
+        # posée à la construction du splitter.
+        self._repartir_le_splitter()
 
     def restore_settings(self) -> None:
         """Réapplique les réglages mémorisés, en se méfiant de chacun.
@@ -326,6 +405,15 @@ class MainWindow(QMainWindow):
         d'un `show()` ultérieur (ex. après une minimisation).
         """
         super().showEvent(event)
+
+        # La répartition est recalculée ici : à la construction, le
+        # splitter n'a pas encore sa largeur réelle, et la contrainte de
+        # largeur minimale du panneau tirait la proportion à 53/46 au
+        # lieu de 60/40 (mesuré sur 1440, 1920 et 2560 px).
+        if not getattr(self, "_splitter_reparti", False):
+            self._splitter_reparti = True
+            self._repartir_le_splitter()
+
         largeur = self._largeur_panneau_en_attente
         if largeur is not None:
             self._largeur_panneau_en_attente = None
@@ -382,13 +470,22 @@ class MainWindow(QMainWindow):
         options = self.graph_options()
 
         def lire():
-            """Les trois lectures coûteuses, hors du fil principal."""
+            """Les trois lectures coûteuses, hors du fil principal.
+
+            `_on_progress` rend la main à Qt entre elles : au PREMIER
+            rafraîchissement, cette fonction s'exécute sur le fil
+            principal (cf. plus bas), et sans ces reprises l'écran
+            d'attente reste figé pendant toute la construction.
+            """
+            self._on_progress()
             graphe = self._graph_cache.get(
                 self.repository,
                 lambda repo: build_graph(repo, options),
                 options_key=(options.show_tags,),
             )
+            self._on_progress()
             etat = read_state(self.repository)
+            self._on_progress()
             # Le nœud de travail est greffé APRÈS le cache : il dépend
             # de l'arbre de travail, qui change bien plus souvent que la
             # topologie. L'inclure dans le graphe mis en cache
@@ -406,12 +503,22 @@ class MainWindow(QMainWindow):
             self.graph, self.state, unpushed = resultat
             self._afficher_graphe(unpushed, defilement)
 
-        # Le PREMIER rafraîchissement est synchrone : `__init__` enchaîne
-        # sur `restore_settings` et `_center_on_head`, qui ont besoin du
-        # graphe. Une fenêtre qui s'ouvre sans graphe, même brièvement,
-        # est fragile — et c'est le seul appel où l'utilisateur attend
-        # déjà le démarrage.
+        # Le PREMIER rafraîchissement est synchrone, SAUF en mode différé :
+        # `__init__` enchaînait sur `_center_on_head`, qui a besoin du
+        # graphe. Vérifié, cette dépendance est douce — la méthode sort
+        # proprement sans état, et `_afficher_graphe` rappelle le centrage
+        # quand le graphe arrive.
         if self.graph is None:
+            if self._defer_graph:
+                self._premier_affichage = True
+                # `silencieux` : l'écran d'attente porte déjà une barre, et
+                # deux indicateurs pour une seule attente laissent croire à
+                # deux travaux distincts (signalé par l'utilisateur).
+                self.run_in_background(
+                    lire, afficher, "Construction du graphe…",
+                    silencieux=True,
+                )
+                return
             afficher(lire())
             return
 
@@ -422,6 +529,20 @@ class MainWindow(QMainWindow):
         if not self.run_in_background(lire, afficher, "Chargement du graphe…"):
             afficher(lire())
         return
+
+    def _centrer_au_premier_affichage(self) -> None:
+        """Centre sur HEAD la première fois que le graphe paraît.
+
+        En mode différé, le constructeur a appelé `_center_on_head` sans
+        état : il n'a rien fait. Le centrage doit donc suivre l'arrivée
+        du graphe, sans quoi la vue s'ouvrirait en haut d'un graphe de
+        plusieurs milliers de pixels.
+        """
+        if not getattr(self, "_premier_affichage", False):
+            return
+        self._premier_affichage = False
+        self._center_on_head()
+        self.graph_ready.emit()
 
     def _afficher_graphe(self, unpushed, defilement) -> None:
         """Pose le graphe dans la vue. **Fil principal uniquement** :
@@ -454,6 +575,9 @@ class MainWindow(QMainWindow):
         self._reselect_current_node()
         self.view.horizontalScrollBar().setValue(defilement[0])
         self.view.verticalScrollBar().setValue(defilement[1])
+        # APRÈS la restauration du défilement : en mode différé celle-ci
+        # vaut (0, 0), et centrer avant la laisserait l'écraser.
+        self._centrer_au_premier_affichage()
         self._update_status()
         self._update_push_action()
         self._update_fetch_action()
@@ -718,22 +842,9 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
 
         window = MainWindow(repository, settings=self.settings)
         window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        window.destroyed.connect(self._forget_recent_window)
-        self._recent_windows.append(window)
+        self._recent_windows.add(window)
         window.show()
 
-    def _forget_recent_window(self, window=None) -> None:
-        """Retire de la liste les fenêtres de dépôts récents déjà détruites.
-
-        Même précaution que `_forget_detail_window` : on filtre sur la
-        validité plutôt que de comparer `window` directement, car son
-        wrapper Python peut survivre à l'objet C++ détruit.
-        """
-        self._recent_windows = [
-            candidate
-            for candidate in self._recent_windows
-            if candidate is not window and _still_alive(candidate)
-        ]
 
     def find_branch(self) -> None:
         """Centre sur une branche correspondant au motif, puis cycle.
@@ -1096,7 +1207,9 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         self.view.setEnabled(actif)
         self.toolbar.setEnabled(actif)
 
-    def run_in_background(self, appelable, suite, libelle: str) -> bool:
+    def run_in_background(
+        self, appelable, suite, libelle: str, silencieux: bool = False
+    ) -> bool:
         """Exécute `appelable` hors du fil principal, puis appelle `suite`.
 
         Demandé par l'utilisateur : « à chaque fois qu'une action est
@@ -1117,7 +1230,11 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             return False
 
         self.progress.setRange(0, 0)     # indéterminé : durée inconnue
-        self.progress.show()
+        # `silencieux` ne masque QUE la barre : le libellé reste utile,
+        # et la barre resservira au prochain appel — il s'agit de la
+        # taire une fois, pas de la désactiver.
+        if not silencieux:
+            self.progress.show()
         self.statusBar().showMessage(libelle)
 
         def termine(resultat):
@@ -1337,7 +1454,56 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             return
         self.statusBar().showMessage(resultat.summary, 15000)
 
-    def open_log(self, *, ref: str | None = None, path: str | None = None) -> None:
+    def _deux_revisions(self) -> tuple[str, str] | None:
+        """Les deux révisions sélectionnées, dans l'ordre du graphe.
+
+        `None` s'il n'y en a pas exactement deux : ne rien faire vaut
+        mieux qu'ouvrir une fenêtre vide.
+        """
+        selection = self.view.selected_oids()
+        if len(selection) != 2:
+            return None
+        return selection[0], selection[1]
+
+    def compare_revisions(self) -> None:
+        """Ouvre le diff entre les deux nœuds sélectionnés.
+
+        L'entrée figurait au menu depuis le début, **active**, et son
+        gestionnaire était `_not_available` : elle ne faisait rien. Une
+        entrée qui ne répond pas apprend à se méfier de l'interface.
+        """
+        revisions = self._deux_revisions()
+        if revisions is None:
+            return
+
+        fenetre = CompareWindow(self.repository, *revisions, parent=self)
+        fenetre.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._compare_windows.add(fenetre)
+        fenetre.show()
+
+
+    def show_log_of_differences(self) -> None:
+        """Les commits qui séparent les deux nœuds — `git log A..B`.
+
+        Seconde entrée morte du menu de comparaison. Bornée par la
+        révision de départ : sans cela elle afficherait tout
+        l'historique, ce que « Show log » fait déjà, et les deux entrées
+        feraient la même chose.
+        """
+        revisions = self._deux_revisions()
+        if revisions is None:
+            return
+
+        base, cible = revisions
+        self.open_log(ref=cible, until=base)
+
+    def open_log(
+        self,
+        *,
+        ref: str | None = None,
+        path: str | None = None,
+        until: str | None = None,
+    ) -> None:
         """Ouvre le journal d'une branche et/ou d'un fichier.
 
         « Show log » figurait au menu contextuel depuis le début mais ne
@@ -1350,25 +1516,14 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         Plusieurs fenêtres sont permises : elles sont en lecture seule, et
         comparer l'histoire de deux fichiers est un usage légitime.
         """
-        window = LogWindow(self.repository, ref=ref, path=path, parent=self)
+        window = LogWindow(
+            self.repository, ref=ref, path=path, until=until, parent=self
+        )
         window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         window.commit_activated.connect(self.open_commit_detail)
-        window.destroyed.connect(self._forget_log_window)
-        self._log_windows.append(window)
+        self._log_windows.add(window)
         window.show()
 
-    def _forget_log_window(self, window=None) -> None:
-        """Retire les fenêtres de journal détruites, comme pour les détails.
-
-        Même précaution que `_forget_detail_window` : on ne vise pas
-        `window` directement, car son wrapper Python peut survivre à
-        l'objet C++ et le toucher lèverait un `RuntimeError` de shiboken.
-        """
-        self._log_windows = [
-            candidate
-            for candidate in self._log_windows
-            if candidate is not window and _still_alive(candidate)
-        ]
 
     def open_commit_detail(self, oid: str) -> None:
         """Ouvre les changements d'un commit.
@@ -1392,23 +1547,9 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         # `destroyed` porte l'objet détruit : le prendre en argument plutôt
         # que de capturer `window` dans la fermeture évite de garder une
         # référence forte sur ce qu'on veut justement laisser mourir.
-        window.destroyed.connect(self._forget_detail_window)
-        self._detail_windows.append(window)
+        self._detail_windows.add(window)
         window.show()
 
-    def _forget_detail_window(self, window=None) -> None:
-        """Retire de la liste les fenêtres de détail déjà détruites.
-
-        Ne pas viser `window` directement : son wrapper Python peut survivre
-        à l'objet C++, et le toucher lèverait alors un `RuntimeError` de
-        shiboken. On filtre donc sur la validité, ce qui reste correct même
-        si le signal arrive deux fois.
-        """
-        self._detail_windows = [
-            candidate
-            for candidate in self._detail_windows
-            if candidate is not window and _still_alive(candidate)
-        ]
 
     def _selected_node(self):
         """Le nœud sélectionné, ou None s'il n'y en a pas exactement un."""
@@ -1429,6 +1570,18 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         laisser le watcher réagir déclencherait une reconstruction de plus
         (§7.9).
         """
+        # Ces deux actions portent sur DEUX nœuds : `_selected_node()` rend
+        # `None` dans ce cas, donc la garde ci-dessous les écartait avant
+        # même de regarder l'action. C'est la raison profonde pour
+        # laquelle elles ne faisaient rien.
+        if action == "compare_revisions":
+            self.compare_revisions()
+            return
+
+        if action == "show_log_of_differences":
+            self.show_log_of_differences()
+            return
+
         if action is None or node is None or self.state is None:
             return
 

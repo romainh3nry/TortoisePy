@@ -46,6 +46,7 @@ def read_log(
     path: str | None = None,
     limit: int = DEFAULT_LIMIT,
     after: Oid | None = None,
+    until: Oid | None = None,
 ) -> tuple[CommitInfo, ...]:
     """Les commits de `ref`, du plus récent au plus vieux.
 
@@ -65,6 +66,16 @@ def read_log(
         walker = repo.walk(depart, pygit2.GIT_SORT_TOPOLOGICAL)
     except (pygit2.GitError, ValueError, KeyError):
         return ()
+
+    # `until` borne le parcours — « git log A..B » : les commits de B que
+    # A n'a pas. La borne elle-même est exclue, comme git.
+    #
+    # Une borne introuvable est ignorée plutôt que de vider le journal :
+    # rendre l'historique entier vaut mieux que de laisser croire qu'il
+    # n'y a rien à voir.
+    exclus: set[Oid] = set()
+    if until is not None:
+        exclus = _ancetres(repo, until)
 
     retenus: list[CommitInfo] = []
     # `after` est consommé pendant le parcours : on saute tout ce qui
@@ -86,6 +97,9 @@ def read_log(
                 en_attente = False
             continue
 
+        if oid in exclus:
+            continue
+
         if path is not None and not _touche(commit, path):
             continue
 
@@ -96,6 +110,26 @@ def read_log(
             break
 
     return tuple(retenus)
+
+
+def _ancetres(repo: pygit2.Repository, borne: Oid) -> set[Oid]:
+    """Tous les commits accessibles depuis `borne`, elle comprise.
+
+    Parcourt plutôt que de comparer les dates : deux branches peuvent
+    porter des horodatages trompeurs, et seule l'accessibilité dit ce
+    qu'une révision « a déjà ».
+    """
+    depart = _resoudre(repo, borne)
+    if depart is None:
+        return set()
+
+    try:
+        return {
+            str(commit.id)
+            for commit in repo.walk(depart, pygit2.GIT_SORT_TOPOLOGICAL)
+        }
+    except (pygit2.GitError, ValueError, KeyError):
+        return set()
 
 
 def _resoudre(repo: pygit2.Repository, ref: str | None):

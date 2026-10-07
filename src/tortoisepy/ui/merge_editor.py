@@ -36,6 +36,8 @@ from PySide6.QtWidgets import (
 )
 
 from tortoisepy.core.conflicts import read_versions, resolve_with_content
+from tortoisepy.core.syntax import language_for
+from tortoisepy.ui.highlighter import CodeHighlighter
 from tortoisepy.core.results import failed
 from tortoisepy.ui.dialogs import show_error
 from tortoisepy.ui import theme
@@ -66,6 +68,12 @@ class MergeEditor(QMainWindow):
         super().__init__(parent)
         self.repository = repository
         self.path = path
+
+        # Le langage une seule fois : les trois colonnes montrent le même
+        # fichier, et `get_lexer_for_filename` coûte plus que la
+        # coloration elle-même.
+        self._langue = language_for(path)
+        self._surligneurs: list = []
 
         versions = read_versions(repository, path)
         self._ours = versions.ours if versions else ""
@@ -294,7 +302,21 @@ class MergeEditor(QMainWindow):
         # source est porteuse de sens, et une police proportionnelle la
         # rend illisible.
         vue.setFont(QFont("Menlo", 11))
+        # Même largeur de tabulation que le diff : un fichier indenté par
+        # tabulations partait sinon hors de l'écran (signalé).
+        theme.apply_tab_width(vue)
         vue.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+
+        # Coloration syntaxique, comme dans le diff (demandé). Un
+        # `QSyntaxHighlighter` plutôt qu'un format posé une fois : la
+        # colonne du milieu s'édite, et un format figé laisserait le
+        # texte saisi incolore dès la première frappe.
+        #
+        # La référence est gardée : sans elle, le ramasse-miettes
+        # détruirait le surligneur et la coloration disparaîtrait.
+        surligneur = CodeHighlighter(vue.document(), self._langue)
+        self._surligneurs.append(surligneur)
+
         return vue
 
 
