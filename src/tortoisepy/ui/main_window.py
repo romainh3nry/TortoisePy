@@ -1072,14 +1072,21 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         if not entrees:
             return
 
+        # Le choix est retenu puis exécuté APRÈS la fermeture, comme pour
+        # le menu du graphe : une modale ouverte sous un menu vivant fait
+        # abandonner le processus sur macOS 27 (crash signalé).
+        choix: list = []
         menu = QMenu(self)
         for entree in entrees:
             action = menu.addAction(entree.label)
             action.triggered.connect(
                 lambda checked=False, nom=entree.action, cible=entree.oid:
-                self.run_panel_action(nom, cible)
+                choix.append((nom, cible))
             )
         menu.exec(position)
+
+        if choix:
+            self.run_panel_action(*choix[0])
 
     def run_panel_action(self, action: str, oid: str) -> None:
         """Exécute une action du panneau sur UN commit précis.
@@ -1173,8 +1180,31 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             return
 
         menu = QMenu(self)
+        self._choix_du_menu = None
         self._fill_menu(menu, entries)
         menu.exec(self.view.mapToGlobal(position))
+        # APRÈS la fermeture : le menu a rendu la main, sa boucle est
+        # terminée, et une modale peut s'ouvrir sans s'imbriquer.
+        self._executer_le_choix()
+
+    def _retenir_le_choix(self, action: str, branch: str | None) -> None:
+        """Mémorise l'entrée choisie sans rien exécuter.
+
+        `QMenu::exec` déclenche ses actions depuis sa propre boucle
+        d'événements : agir ici ouvrirait une modale par-dessus un menu
+        encore vivant, ce que macOS 27 refuse en abandonnant le
+        processus.
+        """
+        self._choix_du_menu = (action, branch)
+
+    def _executer_le_choix(self) -> None:
+        """Exécute l'entrée retenue, une fois le menu fermé."""
+        choix = getattr(self, "_choix_du_menu", None)
+        if choix is None:
+            return
+        self._choix_du_menu = None
+        action, branch = choix
+        self._run_action(action, self._selected_node(), branch)
 
     def _fill_menu(self, menu: QMenu, entries: tuple[MenuEntry, ...]) -> None:
         for entry in entries:
@@ -1189,10 +1219,17 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             else:
                 action = menu.addAction(entry.label)
                 action.setEnabled(entry.enabled)
+                # Le choix est RETENU, pas exécuté : `QMenu::exec` tourne
+                # sa propre boucle d'événements et déclenche ses actions
+                # depuis l'intérieur. Une confirmation s'ouvrait donc
+                # pendant que le menu vivait encore, et macOS 27
+                # abandonne le processus dans ce cas (crash signalé,
+                # pile : QMenu::exec -> QAction::activate ->
+                # QDialog::exec -> NSAlert runModal -> abort).
                 action.triggered.connect(
                     lambda checked=False, name=entry.action,
-                    branch=entry.branch: self._run_action(
-                        name, self._selected_node(), branch
+                    branch=entry.branch: self._retenir_le_choix(
+                        name, branch
                     )
                 )
 
