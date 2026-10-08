@@ -10,7 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFontMetrics, QGuiApplication
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QGuiApplication,
+    QPainter,
+    QPixmap,
+)
 
 
 def copy_to_clipboard(text: str) -> None:
@@ -547,17 +554,62 @@ def ask_credentials(parent, url: str) -> tuple[Credentials | None, bool]:
     return Credentials(username=name, password=secret), remember.isChecked()
 
 
-def confirm(parent, request: ConfirmationRequest) -> bool:
-    """Affiche la confirmation. Vrai si l'utilisateur accepte.
+def _pastille(couleur: QColor, symbole: str) -> QPixmap:
+    """Une icône dessinée par nous, jamais demandée au système.
 
-    Le bouton par défaut est « Annuler » : sur une action destructrice,
-    une validation réflexe ne doit pas suffire.
+    Signalé par l'utilisateur : l'application se fermait au checkout sur
+    un Mac sous macOS 27. La pile du rapport de crash est sans
+    ambiguïté :
+
+        QDialog::exec() -> -[NSAlert runModal]
+          -> CUINamedVectorGlyph _rasterizeImageUsingScaleFactor:
+            -> objc_exception_throw   ← abort()
+
+    `QMessageBox.setIcon` demande l'icône standard au système ; sur
+    macOS 27 son nouveau moteur de rendu (SwiftUI / RenderBox) lève une
+    exception Objective-C que personne ne rattrape, et le processus est
+    abandonné. Les quatre icônes se résolvent sur macOS 15 — d'où le
+    « ça marche chez moi ».
+
+    Un disque coloré portant un caractère suffit : il distingue
+    l'avertissement de la question sans dépendre du système.
+    """
+    taille = 48
+    image = QPixmap(taille, taille)
+    image.fill(Qt.GlobalColor.transparent)
+
+    peintre = QPainter(image)
+    peintre.setRenderHint(QPainter.RenderHint.Antialiasing)
+    peintre.setBrush(couleur)
+    peintre.setPen(Qt.PenStyle.NoPen)
+    peintre.drawEllipse(2, 2, taille - 4, taille - 4)
+
+    police = QFont()
+    police.setPointSize(26)
+    police.setBold(True)
+    peintre.setFont(police)
+    peintre.setPen(QColor(255, 255, 255))
+    peintre.drawText(
+        image.rect(), Qt.AlignmentFlag.AlignCenter, symbole
+    )
+    peintre.end()
+
+    return image
+
+
+def build_confirmation(parent, request: ConfirmationRequest) -> QMessageBox:
+    """Construit la boîte de confirmation, sans l'afficher.
+
+    Séparée de `confirm` pour qu'un test lise son icône et son bouton
+    par défaut sans ouvrir une modale que personne ne fermerait.
     """
     box = QMessageBox(parent)
-    box.setIcon(
-        QMessageBox.Icon.Warning
+    # Surtout PAS `setIcon` : il demande l'icône au système, qui plante
+    # sur macOS 27 (cf. `_pastille`).
+    box.setIconPixmap(
+        _pastille(QColor(200, 60, 40), "!")
         if request.destructive
-        else QMessageBox.Icon.Question
+        else _pastille(QColor(60, 110, 200), "?")
     )
     box.setWindowTitle(request.title)
     box.setText(request.title)
@@ -566,13 +618,26 @@ def confirm(parent, request: ConfirmationRequest) -> bool:
         QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
     )
     box.setDefaultButton(QMessageBox.StandardButton.Cancel)
-    return box.exec() == QMessageBox.StandardButton.Ok
+    return box
+
+
+def confirm(parent, request: ConfirmationRequest) -> bool:
+    """Affiche la confirmation. Vrai si l'utilisateur accepte.
+
+    Le bouton par défaut est « Annuler » : sur une action destructrice,
+    une validation réflexe ne doit pas suffire.
+    """
+    return build_confirmation(parent, request).exec() == (
+        QMessageBox.StandardButton.Ok
+    )
 
 
 def show_error(parent, result: OperationResult) -> None:
     title, body = error_text(result)
     box = QMessageBox(parent)
-    box.setIcon(QMessageBox.Icon.Critical)
+    # Même raison que `build_confirmation` : l'icône système plante sur
+    # macOS 27, et une erreur est justement ce qu'il ne faut pas rater.
+    box.setIconPixmap(_pastille(QColor(200, 60, 40), "!"))
     box.setWindowTitle(title)
     box.setText(title)
     box.setInformativeText(body)
@@ -580,4 +645,12 @@ def show_error(parent, result: OperationResult) -> None:
 
 
 def show_message(parent, title: str, message: str) -> None:
-    QMessageBox.information(parent, title, message)
+    """Information simple. `QMessageBox.information` poserait l'icône
+    système, qui plante sur macOS 27 (cf. `_pastille`)."""
+    box = QMessageBox(parent)
+    box.setIconPixmap(_pastille(QColor(60, 110, 200), "i"))
+    box.setWindowTitle(title)
+    box.setText(title)
+    box.setInformativeText(message)
+    box.setStandardButtons(QMessageBox.StandardButton.Ok)
+    box.exec()

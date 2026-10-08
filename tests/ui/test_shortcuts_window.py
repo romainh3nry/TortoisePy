@@ -117,8 +117,12 @@ def test_a_refused_capture_shows_the_reason_and_writes_nothing(
     def _fausse_boite(parent, titre, texte):
         boites.append(texte)
 
+    # `show_message` et non `QMessageBox.warning` : l'icône standard de
+    # Qt fait planter macOS 27 (cf. `dialogs._pastille`), et la fenêtre
+    # passe désormais par notre propre boîte. Remplacer l'ancienne
+    # laissait la vraie modale s'ouvrir, bloquant toute la suite.
     monkeypatch.setattr(
-        "tortoisepy.ui.shortcuts_window.QMessageBox.warning", _fausse_boite
+        "tortoisepy.ui.shortcuts_window.show_message", _fausse_boite
     )
 
     avant = window._store.resolved_shortcuts()["commit"]

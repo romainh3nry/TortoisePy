@@ -255,3 +255,97 @@ def test_rebasing_a_branch_onto_itself_is_refused(qtbot):
     f.set_replayed("main")
     f.set_target("main")
     assert f.is_valid() is False
+
+
+# --- icônes des boîtes de dialogue (crash macOS 27) ---------------------
+
+
+def test_no_dialog_uses_a_system_standard_icon(qtbot):
+    """Signalé : l'app se ferme au checkout sur un Mac sous macOS 27.
+
+    La pile du rapport de crash est sans ambiguïté :
+
+        QDialog::exec() -> -[NSAlert runModal]
+          -> CUINamedVectorGlyph _rasterizeImageUsingScaleFactor:
+            -> objc_exception_throw   ← abort()
+
+    Qt demande l'icône standard au système ; sur macOS 27 son nouveau
+    moteur de rendu (SwiftUI/RenderBox) lève une exception Objective-C
+    que personne ne rattrape, et le processus est abandonné.
+
+    Vérifié : les quatre icônes se résolvent sur macOS 15, d'où le
+    « ça marche chez moi ». On fournit donc la nôtre.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    from tortoisepy.ui.dialogs import ConfirmationRequest, build_confirmation
+
+    boite = build_confirmation(
+        None, ConfirmationRequest("Titre", "Message", destructive=False)
+    )
+    qtbot.addWidget(boite)
+
+    assert boite.icon() == QMessageBox.Icon.NoIcon, (
+        "une icône standard est demandée au système : elle fait planter "
+        "macOS 27"
+    )
+
+
+def test_the_dialog_still_shows_an_icon(qtbot):
+    """Retirer l'icône système ne doit pas laisser la boîte nue.
+
+    Le piège : corriger le crash en supprimant l'information. Un
+    avertissement destructeur doit rester reconnaissable d'un coup
+    d'œil.
+    """
+    from tortoisepy.ui.dialogs import ConfirmationRequest, build_confirmation
+
+    boite = build_confirmation(
+        None, ConfirmationRequest("Titre", "Message", destructive=True)
+    )
+    qtbot.addWidget(boite)
+
+    assert not boite.iconPixmap().isNull(), "la boîte n'a plus d'icône"
+
+
+def test_a_destructive_dialog_differs_from_a_question(qtbot):
+    """Les deux ne doivent pas se ressembler.
+
+    L'utilisateur doit distinguer « on va détruire » de « on demande
+    confirmation » sans lire.
+    """
+    from tortoisepy.ui.dialogs import ConfirmationRequest, build_confirmation
+
+    destructive = build_confirmation(
+        None, ConfirmationRequest("T", "M", destructive=True)
+    )
+    question = build_confirmation(
+        None, ConfirmationRequest("T", "M", destructive=False)
+    )
+    qtbot.addWidget(destructive)
+    qtbot.addWidget(question)
+
+    assert (
+        destructive.iconPixmap().toImage()
+        != question.iconPixmap().toImage()
+    )
+
+
+def test_cancel_remains_the_default(qtbot):
+    """Comportement d'origine à préserver (§7.5).
+
+    Sur une action destructrice, une validation réflexe ne doit pas
+    suffire.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    from tortoisepy.ui.dialogs import ConfirmationRequest, build_confirmation
+
+    boite = build_confirmation(
+        None, ConfirmationRequest("T", "M", destructive=True)
+    )
+    qtbot.addWidget(boite)
+
+    assert boite.defaultButton() == boite.button(
+        QMessageBox.StandardButton.Cancel
+    )
