@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from tortoisepy.core.shortcuts import CATALOGUE, spec_for, validate
+from tortoisepy.ui.dialogs import show_message
 from tortoisepy.ui.settings_store import SettingsStore
 
 
@@ -177,4 +178,6 @@ class ShortcutsWindow(QDialog):
 
         motif = self.try_assign(action_id, sequence)
         if motif is not None:
-            QMessageBox.warning(self, "Shortcut refused", motif)
+            # `QMessageBox.warning` poserait l'icône système, qui fait
+            # planter macOS 27 (cf. `dialogs._pastille`).
+            show_message(self, "Shortcut refused", motif)
