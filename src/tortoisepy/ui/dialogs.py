@@ -42,10 +42,11 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
-    QMessageBox,
+    QVBoxLayout,
 )
 
 from tortoisepy.core.credentials import Credentials
@@ -557,22 +558,11 @@ def ask_credentials(parent, url: str) -> tuple[Credentials | None, bool]:
 def _pastille(couleur: QColor, symbole: str) -> QPixmap:
     """Une icône dessinée par nous, jamais demandée au système.
 
-    Signalé par l'utilisateur : l'application se fermait au checkout sur
-    un Mac sous macOS 27. La pile du rapport de crash est sans
-    ambiguïté :
-
-        QDialog::exec() -> -[NSAlert runModal]
-          -> CUINamedVectorGlyph _rasterizeImageUsingScaleFactor:
-            -> objc_exception_throw   ← abort()
-
-    `QMessageBox.setIcon` demande l'icône standard au système ; sur
-    macOS 27 son nouveau moteur de rendu (SwiftUI / RenderBox) lève une
-    exception Objective-C que personne ne rattrape, et le processus est
-    abandonné. Les quatre icônes se résolvent sur macOS 15 — d'où le
-    « ça marche chez moi ».
-
-    Un disque coloré portant un caractère suffit : il distingue
-    l'avertissement de la question sans dépendre du système.
+    Les icônes standard (`QMessageBox.Icon`) sont résolues par macOS.
+    On ne les utilise plus : la boîte n'est plus un `QMessageBox` du
+    tout (cf. `_BoiteSimple`), et un disque coloré portant un caractère
+    distingue l'avertissement de la question sans rien demander au
+    système.
     """
     taille = 48
     image = QPixmap(taille, taille)
@@ -597,28 +587,119 @@ def _pastille(couleur: QColor, symbole: str) -> QPixmap:
     return image
 
 
-def build_confirmation(parent, request: ConfirmationRequest) -> QMessageBox:
+class _BoiteSimple(QDialog):
+    """Une boîte de dialogue dessinée par Qt, jamais par le système.
+
+    Signalé trois fois par l'utilisateur : l'application se ferme au
+    checkout sur macOS 27. Le dernier rapport de crash tranche — plus
+    aucun `QMenu` dans la pile, et le plantage part d'un simple
+    minuteur :
+
+        QSingleShotTimerFunctor::operator()()
+          QDialog::exec()
+            -[NSAlert runModal]
+              CA::Transaction::flush()
+                CUINamedVectorGlyph _rasterizeImageUsingScaleFactor:
+                  objc_exception_throw   ← abort()
+
+    Qt traduit un `QMessageBox` aux boutons standard en `NSAlert`
+    natif. C'est donc le rendu d'Apple lui-même qui lève une exception
+    Objective-C que personne ne rattrape. Les deux corrections
+    précédentes — fournir notre propre icône, puis différer l'action
+    hors du menu — visaient à côté : elles ont retiré `QMenu` de la
+    pile mais pas `NSAlert`.
+
+    Plutôt que de chercher quel détail déclenche le bogue d'Apple, on
+    évite `NSAlert` entièrement : un `QDialog` ordinaire, composé de
+    `QLabel` et de `QPushButton`, que Qt dessine lui-même (vérifié).
+    """
+
+    def __init__(self, parent, titre: str, message: str,
+                 pastille: QPixmap, *, annulable: bool) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(titre)
+        self._pastille = pastille
+
+        icone = QLabel()
+        icone.setPixmap(pastille)
+        icone.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter
+        )
+
+        entete = QLabel(titre)
+        police = entete.font()
+        police.setBold(True)
+        entete.setFont(police)
+        entete.setWordWrap(True)
+
+        corps = QLabel(message)
+        corps.setWordWrap(True)
+        # Un message d'erreur de libgit2 se recopie : `QMessageBox` le
+        # permettait, et le perdre serait une régression.
+        corps.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+
+        boutons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+            if annulable
+            else QDialogButtonBox.StandardButton.Ok
+        )
+        boutons.accepted.connect(self.accept)
+        boutons.rejected.connect(self.reject)
+        if annulable:
+            # §7.5 : sur une action destructrice, « Entrée » doit
+            # annuler. `setDefault` ne suffit pas : `QDialogButtonBox`
+            # repose le défaut sur « OK » à l'affichage, par
+            # `autoDefault`. Mesuré — la capture montrait « OK » en bleu
+            # alors que `isDefault()` lu avant `show()` disait
+            # « Annuler ». Il faut donc d'abord couper l'automatisme.
+            valider = boutons.button(QDialogButtonBox.StandardButton.Ok)
+            annuler = boutons.button(QDialogButtonBox.StandardButton.Cancel)
+            valider.setAutoDefault(False)
+            valider.setDefault(False)
+            annuler.setAutoDefault(True)
+            annuler.setDefault(True)
+
+        textes = QVBoxLayout()
+        textes.addWidget(entete)
+        textes.addWidget(corps)
+        textes.addStretch(1)
+
+        haut = QHBoxLayout()
+        haut.addWidget(icone)
+        haut.addSpacing(12)
+        haut.addLayout(textes, 1)
+
+        tout = QVBoxLayout(self)
+        tout.addLayout(haut)
+        tout.addWidget(boutons)
+        # Assez large pour qu'une commande git ne se coupe pas, sans
+        # imposer une fenêtre démesurée à un message court.
+        self.setMinimumWidth(420)
+
+    def icon_pixmap(self) -> QPixmap:
+        """L'icône affichée. Nommée comme chez `QMessageBox` pour que
+        les tests de distinction destructeur / question la lisent."""
+        return self._pastille
+
+
+def build_confirmation(parent, request: ConfirmationRequest) -> _BoiteSimple:
     """Construit la boîte de confirmation, sans l'afficher.
 
     Séparée de `confirm` pour qu'un test lise son icône et son bouton
     par défaut sans ouvrir une modale que personne ne fermerait.
     """
-    box = QMessageBox(parent)
-    # Surtout PAS `setIcon` : il demande l'icône au système, qui plante
-    # sur macOS 27 (cf. `_pastille`).
-    box.setIconPixmap(
+    return _BoiteSimple(
+        parent,
+        request.title,
+        request.message,
         _pastille(QColor(200, 60, 40), "!")
         if request.destructive
-        else _pastille(QColor(60, 110, 200), "?")
+        else _pastille(QColor(60, 110, 200), "?"),
+        annulable=True,
     )
-    box.setWindowTitle(request.title)
-    box.setText(request.title)
-    box.setInformativeText(request.message)
-    box.setStandardButtons(
-        QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
-    )
-    box.setDefaultButton(QMessageBox.StandardButton.Cancel)
-    return box
 
 
 def confirm(parent, request: ConfirmationRequest) -> bool:
@@ -626,31 +707,28 @@ def confirm(parent, request: ConfirmationRequest) -> bool:
 
     Le bouton par défaut est « Annuler » : sur une action destructrice,
     une validation réflexe ne doit pas suffire.
+
+    L'égalité avec `Accepted` est stricte : fermer la fenêtre par la
+    croix rend 0, et un test « différent de Rejected » ferait passer la
+    fermeture pour un oui.
     """
     return build_confirmation(parent, request).exec() == (
-        QMessageBox.StandardButton.Ok
+        QDialog.DialogCode.Accepted.value
     )
 
 
 def show_error(parent, result: OperationResult) -> None:
     title, body = error_text(result)
-    box = QMessageBox(parent)
-    # Même raison que `build_confirmation` : l'icône système plante sur
-    # macOS 27, et une erreur est justement ce qu'il ne faut pas rater.
-    box.setIconPixmap(_pastille(QColor(200, 60, 40), "!"))
-    box.setWindowTitle(title)
-    box.setText(title)
-    box.setInformativeText(body)
-    box.exec()
+    _BoiteSimple(
+        parent, title, body, _pastille(QColor(200, 60, 40), "!"),
+        annulable=False,
+    ).exec()
 
 
 def show_message(parent, title: str, message: str) -> None:
-    """Information simple. `QMessageBox.information` poserait l'icône
-    système, qui plante sur macOS 27 (cf. `_pastille`)."""
-    box = QMessageBox(parent)
-    box.setIconPixmap(_pastille(QColor(60, 110, 200), "i"))
-    box.setWindowTitle(title)
-    box.setText(title)
-    box.setInformativeText(message)
-    box.setStandardButtons(QMessageBox.StandardButton.Ok)
-    box.exec()
+    """Information simple, même boîte que les autres : aucune modale de
+    l'application ne passe par `NSAlert` (cf. `_BoiteSimple`)."""
+    _BoiteSimple(
+        parent, title, message, _pastille(QColor(60, 110, 200), "i"),
+        annulable=False,
+    ).exec()

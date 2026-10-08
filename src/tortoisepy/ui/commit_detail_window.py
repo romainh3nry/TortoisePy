@@ -7,7 +7,7 @@ lecture seule : ce commit existe, il n'y a rien à stager ni à valider.
 from __future__ import annotations
 
 import pygit2
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QLabel,
@@ -188,7 +188,9 @@ class CommitDetailWindow(QMainWindow):
         }
         geste = gestes.get(choix[0])
         if geste is not None:
-            geste(index)
+            # Au tour suivant : ces entrées ouvrent des fenêtres, et le
+            # NSMenu natif n'a pas fini son démontage dans cette pile.
+            QTimer.singleShot(0, lambda: geste(index))
 
     def blame_row(self, index: int) -> None:
         """Ouvre le blâme du fichier de la ligne `index`.

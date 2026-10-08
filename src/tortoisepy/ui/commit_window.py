@@ -8,7 +8,7 @@ le message juste (D6).
 from __future__ import annotations
 
 import pygit2
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -364,7 +364,9 @@ class CommitWindow(QMainWindow):
         menu.exec(self._files.viewport().mapToGlobal(position))
 
         if choix and choix[0] == "Copy path":
-            self.copy_path_row(index)
+            # Au tour suivant : le NSMenu natif de macOS n'a pas fini son
+            # démontage dans cette pile (cf. `main_window`).
+            QTimer.singleShot(0, lambda: self.copy_path_row(index))
 
     def _lancer_en_fond(self, appelable, suite) -> None:
         """Exécute `appelable` hors du fil principal, puis `suite` dessus.

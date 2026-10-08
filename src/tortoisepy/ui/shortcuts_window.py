@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QKeySequenceEdit,
     QLabel,
-    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -178,6 +177,6 @@ class ShortcutsWindow(QDialog):
 
         motif = self.try_assign(action_id, sequence)
         if motif is not None:
-            # `QMessageBox.warning` poserait l'icône système, qui fait
-            # planter macOS 27 (cf. `dialogs._pastille`).
+            # Jamais un `QMessageBox` : Qt le traduit en `NSAlert`
+            # natif, qui plante macOS 27 (cf. `dialogs._BoiteSimple`).
             show_message(self, "Shortcut refused", motif)

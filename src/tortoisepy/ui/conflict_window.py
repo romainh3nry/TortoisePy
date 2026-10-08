@@ -10,7 +10,7 @@ from __future__ import annotations
 import pathlib
 
 import pygit2
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -260,7 +260,7 @@ class ConflictWindow(QMainWindow):
         menu.exec(self._files.viewport().mapToGlobal(position))
 
         if choix and choix[0] == "Copy path":
-            self.copy_path_row(index)
+            QTimer.singleShot(0, lambda: self.copy_path_row(index))
 
     def edit_conflict(self) -> None:
         """Ouvre l'éditeur à trois colonnes sur le fichier sélectionné.
