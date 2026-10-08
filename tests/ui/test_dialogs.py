@@ -349,3 +349,132 @@ def test_cancel_remains_the_default(qtbot):
     assert boite.defaultButton() == boite.button(
         QMessageBox.StandardButton.Cancel
     )
+
+
+# --- l'action ne doit pas s'exécuter pendant que le menu vit -----------
+
+def test_a_menu_action_runs_after_the_menu_closes(qtbot, tmp_path):
+    """Le crash de macOS 27, cause réelle : modale ouverte SOUS un menu.
+
+    La pile du rapport montre l'imbrication :
+
+        QMenu::exec()              ← le menu tourne sa propre boucle
+          QAction::activate()      ← l'action part de L'INTÉRIEUR
+            QDialog::exec()        ← la modale s'ouvre par-dessus
+              -[NSAlert runModal]  ← macOS plante ici
+
+    `QMenu::exec` déclenche ses actions depuis sa propre boucle
+    d'événements : la confirmation s'ouvrait donc pendant que le menu
+    vivait encore. macOS 27 ne le supporte pas.
+
+    Remplacer l'icône n'avait pas suffi — c'est l'imbrication qui
+    fâche, pas le dessin.
+    """
+    import subprocess
+
+    import pygit2
+
+    from tortoisepy.ui.main_window import MainWindow
+
+    w = tmp_path / "w"
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main", str(w)], check=True,
+        capture_output=True,
+    )
+    (w / "a.txt").write_text("a\n")
+    env = {
+        "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@t",
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+    }
+    for args in (["add", "."], ["commit", "-qm", "base"]):
+        subprocess.run(
+            ["git", "-C", str(w), *args], check=True, capture_output=True,
+            env=env,
+        )
+
+    fenetre = MainWindow(pygit2.Repository(str(w)))
+    qtbot.addWidget(fenetre)
+
+    # Déclencher une action du menu ne doit RIEN exécuter : le menu se
+    # contente de retenir le choix, que l'appelant traite une fois le
+    # menu fermé.
+    from PySide6.QtWidgets import QMenu
+
+    from tortoisepy.ui.context_menu import build_menu_model
+
+    noeud = fenetre.graph.nodes[0]
+    menu = QMenu(fenetre)
+    qtbot.addWidget(menu)
+    fenetre._fill_menu(menu, build_menu_model((noeud,), fenetre.state))
+
+    executees = []
+    vrai = fenetre._run_action
+    fenetre._run_action = lambda *a, **k: executees.append(a)
+
+    try:
+        for action in menu.actions():
+            if action.isSeparator() or action.menu() is not None:
+                continue
+            action.trigger()
+    finally:
+        fenetre._run_action = vrai
+
+    assert executees == [], (
+        "une action s'exécute depuis la boucle du menu : une modale s'y "
+        "ouvrirait par-dessus, ce que macOS 27 refuse"
+    )
+
+
+def test_the_retained_choice_is_executed_afterwards(qtbot, tmp_path):
+    """Différer ne doit pas revenir à ne rien faire.
+
+    Le piège du correctif : couper le lien entre le menu et l'action,
+    et obtenir un menu décoratif.
+    """
+    import subprocess
+
+    import pygit2
+    from PySide6.QtWidgets import QMenu
+
+    from tortoisepy.ui.context_menu import build_menu_model
+    from tortoisepy.ui.main_window import MainWindow
+
+    w = tmp_path / "w2"
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main", str(w)], check=True,
+        capture_output=True,
+    )
+    (w / "a.txt").write_text("a\n")
+    env = {
+        "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@t",
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+    }
+    for args in (["add", "."], ["commit", "-qm", "base"]):
+        subprocess.run(
+            ["git", "-C", str(w), *args], check=True, capture_output=True,
+            env=env,
+        )
+
+    fenetre = MainWindow(pygit2.Repository(str(w)))
+    qtbot.addWidget(fenetre)
+
+    menu = QMenu(fenetre)
+    qtbot.addWidget(menu)
+    fenetre._fill_menu(
+        menu, build_menu_model((fenetre.graph.nodes[0],), fenetre.state)
+    )
+
+    executees = []
+    fenetre._run_action = lambda *a, **k: executees.append(a[0])
+
+    premiere = next(
+        a for a in menu.actions()
+        if not a.isSeparator() and a.menu() is None and a.isEnabled()
+    )
+    premiere.trigger()
+    assert executees == [], "exécuté trop tôt"
+
+    fenetre._executer_le_choix()
+    assert executees, "le choix retenu n'a jamais été exécuté"

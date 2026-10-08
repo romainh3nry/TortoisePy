@@ -167,21 +167,28 @@ class CommitDetailWindow(QMainWindow):
             return
 
         menu = QMenu(self)
+        # Le choix est retenu puis exécuté APRÈS la fermeture : ces
+        # entrées ouvrent des fenêtres, et les ouvrir depuis la boucle du
+        # menu les poserait par-dessus un menu encore vivant — ce que
+        # macOS 27 refuse en abandonnant le processus (crash signalé).
+        choix: list = []
         for entry in entries:
             action = menu.addAction(entry)
-            if entry == "Blame":
-                action.triggered.connect(
-                    lambda checked=False, i=index: self.blame_row(i)
-                )
-            elif entry == "File history":
-                action.triggered.connect(
-                    lambda checked=False, i=index: self.log_row(i)
-                )
-            elif entry == "Copy path":
-                action.triggered.connect(
-                    lambda checked=False, i=index: self.copy_path_row(i)
-                )
+            action.triggered.connect(
+                lambda checked=False, e=entry: choix.append(e)
+            )
         menu.exec(self._files.viewport().mapToGlobal(position))
+
+        if not choix:
+            return
+        gestes = {
+            "Blame": self.blame_row,
+            "File history": self.log_row,
+            "Copy path": self.copy_path_row,
+        }
+        geste = gestes.get(choix[0])
+        if geste is not None:
+            geste(index)
 
     def blame_row(self, index: int) -> None:
         """Ouvre le blâme du fichier de la ligne `index`.

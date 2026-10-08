@@ -249,14 +249,18 @@ class ConflictWindow(QMainWindow):
         if not entrees:
             return
 
+        # Idem : retenu, puis exécuté une fois le menu fermé.
+        choix: list = []
         menu = QMenu(self)
         for entree in entrees:
             action = menu.addAction(entree)
-            if entree == "Copy path":
-                action.triggered.connect(
-                    lambda checked=False, i=index: self.copy_path_row(i)
-                )
+            action.triggered.connect(
+                lambda checked=False, e=entree: choix.append(e)
+            )
         menu.exec(self._files.viewport().mapToGlobal(position))
+
+        if choix and choix[0] == "Copy path":
+            self.copy_path_row(index)
 
     def edit_conflict(self) -> None:
         """Ouvre l'éditeur à trois colonnes sur le fichier sélectionné.

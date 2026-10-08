@@ -351,14 +351,20 @@ class CommitWindow(QMainWindow):
         if not entrees:
             return
 
+        # Le choix est retenu puis exécuté APRÈS la fermeture : agir
+        # depuis la boucle du menu ouvrirait toute fenêtre par-dessus un
+        # menu encore vivant, ce que macOS 27 refuse (crash signalé).
+        choix: list = []
         menu = QMenu(self)
         for entree in entrees:
             action = menu.addAction(entree)
-            if entree == "Copy path":
-                action.triggered.connect(
-                    lambda checked=False, i=index: self.copy_path_row(i)
-                )
+            action.triggered.connect(
+                lambda checked=False, e=entree: choix.append(e)
+            )
         menu.exec(self._files.viewport().mapToGlobal(position))
+
+        if choix and choix[0] == "Copy path":
+            self.copy_path_row(index)
 
     def _lancer_en_fond(self, appelable, suite) -> None:
         """Exécute `appelable` hors du fil principal, puis `suite` dessus.
