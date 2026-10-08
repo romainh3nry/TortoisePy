@@ -82,3 +82,40 @@ def test_ui_never_calls_pygit2_directly_for_operations():
     assert not offenders, (
         "ui/ doit passer par core.operations : " + "; ".join(offenders)
     )
+
+
+def test_no_module_uses_qmessagebox():
+    """Aucune boîte de l'application ne doit être un `QMessageBox`.
+
+    Signalé trois fois : l'app se ferme au checkout sur macOS 27. Qt
+    traduit un `QMessageBox` aux boutons standard en `NSAlert` natif
+    (mesuré : il crée un `_NSAlertPanel`, là où un `QDialog` ordinaire
+    n'en crée pas), et le rendu d'Apple y lève une exception
+    Objective-C que personne ne rattrape :
+
+        QDialog::exec() -> -[NSAlert runModal]
+          -> CUINamedVectorGlyph _rasterizeImageUsingScaleFactor:
+            -> objc_exception_throw   ← abort()
+
+    Deux corrections ont visé à côté avant celle-ci — l'icône système,
+    puis la modale ouverte sous un menu. Ce garde empêche qu'un
+    `QMessageBox.information` réapparaisse un jour par commodité : il
+    rouvrirait le crash loin d'ici, sur une machine que nous n'avons
+    pas.
+
+    `dialogs.py` fournit `confirm`, `show_error` et `show_message`.
+    """
+    fautifs = [
+        f"{chemin.relative_to(SRC)}:{numero}"
+        for chemin in SRC.rglob("*.py")
+        for numero, ligne in enumerate(
+            chemin.read_text().splitlines(), start=1
+        )
+        if "QMessageBox" in ligne and not ligne.lstrip().startswith("#")
+        and '"""' not in ligne and "`QMessageBox" not in ligne
+    ]
+    assert not fautifs, (
+        "QMessageBox devient un NSAlert natif, qui plante macOS 27 ; "
+        "utiliser dialogs.confirm / show_error / show_message : "
+        + "; ".join(fautifs)
+    )

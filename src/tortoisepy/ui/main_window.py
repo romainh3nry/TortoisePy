@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pygit2
-from PySide6.QtCore import QByteArray, Qt, Signal
+from PySide6.QtCore import QByteArray, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -1086,7 +1086,10 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         menu.exec(position)
 
         if choix:
-            self.run_panel_action(*choix[0])
+            # Au tour SUIVANT, comme pour le menu du graphe : le NSMenu
+            # natif n'a pas fini son démontage dans cette pile.
+            nom, cible = choix[0]
+            QTimer.singleShot(0, lambda: self.run_panel_action(nom, cible))
 
     def run_panel_action(self, action: str, oid: str) -> None:
         """Exécute une action du panneau sur UN commit précis.
@@ -1198,13 +1201,28 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         self._choix_du_menu = (action, branch)
 
     def _executer_le_choix(self) -> None:
-        """Exécute l'entrée retenue, une fois le menu fermé."""
+        """Exécute l'entrée retenue, au tour SUIVANT de la boucle.
+
+        Attention à la lecture de l'historique : ce report visait le
+        crash de macOS 27, et **ne l'a pas corrigé** — la cause était
+        `NSAlert` (cf. `dialogs._BoiteSimple`). On le garde malgré tout,
+        pour une raison qui tient d'elle-même : une entrée de menu ouvre
+        une fenêtre ou une modale, et la lancer depuis la pile de
+        `_show_context_menu` — elle-même appelée en plein traitement
+        d'un événement souris, avant que le `NSMenu` natif ait fini de
+        se démonter — reste une imbrication qu'il vaut mieux éviter.
+
+        `singleShot(0)` rend la main à la boucle : l'action part quand
+        plus rien du menu ne subsiste.
+        """
         choix = getattr(self, "_choix_du_menu", None)
         if choix is None:
             return
         self._choix_du_menu = None
         action, branch = choix
-        self._run_action(action, self._selected_node(), branch)
+        QTimer.singleShot(
+            0, lambda: self._run_action(action, self._selected_node(), branch)
+        )
 
     def _fill_menu(self, menu: QMenu, entries: tuple[MenuEntry, ...]) -> None:
         for entry in entries:
