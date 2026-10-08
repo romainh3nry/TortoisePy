@@ -52,13 +52,13 @@ It is built on [pygit2](https://www.pygit2.org/) (libgit2) and
 **macOS and Linux**
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.12.0/scripts/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.13.0/scripts/install.sh | sh
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.12.0/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.13.0/scripts/install.ps1 | iex
 ```
 
 The script installs [uv](https://docs.astral.sh/uv/) if you don't have it,
@@ -75,7 +75,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh          # macOS / Linux
 winget install astral-sh.uv                              # Windows
 
 # 2. Install tortoisePy
-uv tool install git+https://github.com/romainh3nry/TortoisePy@v0.12.0
+uv tool install git+https://github.com/romainh3nry/TortoisePy@v0.13.0
 ```
 
 ### Why uv rather than pip
@@ -94,10 +94,10 @@ Re-run the install command — it always points at the latest released tag:
 
 ```bash
 # macOS / Linux
-curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.12.0/scripts/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.13.0/scripts/install.sh | sh
 
 # Windows
-irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.12.0/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.13.0/scripts/install.ps1 | iex
 ```
 
 > **`uv tool upgrade tortoisepy` will not work here.** The install pins an
@@ -156,6 +156,9 @@ Plus, outside the graph:
   rest stays in your working tree for the next commit
 - **Word-level diff** — within a modified line, the words that actually changed
   are shown in bold, so you don't compare two red-and-green lines by eye
+- **Syntax highlighting** — wherever code is shown (diffs, blame, the conflict
+  editor, file history), keywords, strings and comments are coloured as in an
+  editor; the diff's red and green backgrounds still carry added and removed
 - **Search** — by message, author or SHA; matching nodes are highlighted and
   the commit list filters down
 - **File history** — every commit that touched a file, searchable, from the
