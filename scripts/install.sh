@@ -6,7 +6,7 @@
 # l'interpréteur au besoin. L'utilisateur n'a donc pas à installer
 # Python 3.13 lui-même, ce qui est le vrai obstacle.
 #
-#   curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.13.0/scripts/install.sh | sh
+#   curl -LsSf https://raw.githubusercontent.com/romainh3nry/TortoisePy/main/scripts/install.sh | sh
 
 set -euo pipefail
 

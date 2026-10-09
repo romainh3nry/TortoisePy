@@ -5,7 +5,7 @@
 # l'interpréteur au besoin. L'utilisateur n'a donc pas à installer
 # Python 3.13 lui-même, ce qui est le vrai obstacle.
 #
-#   irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/v0.13.0/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/romainh3nry/TortoisePy/main/scripts/install.ps1 | iex
 #
 # `irm | iex` et non `curl | sh` : il n'existe pas de `sh` sous Windows,
 # et `curl` y est un alias d'`Invoke-WebRequest`, qui n'accepte pas
