@@ -13,7 +13,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$Version = "v0.13.0"
+$Version = "v0.14.0"
 $Depot = "git+https://github.com/romainh3nry/TortoisePy@$Version"
 
 Write-Host "tortoisePy $Version"
