@@ -19,6 +19,9 @@ DEFAULTS: dict[str, object] = {
     # Demandé par l'utilisateur : masquer la liste latérale. Faux par
     # défaut — le panneau révèle ce que la compression masque (§4.2.1).
     "view/panel_hidden": False,
+    # Demandé par l'utilisateur : le dossier de projets choisi une
+    # fois, qui doit rester d'un lancement à l'autre.
+    "view/workdir": "",
     "recent/repositories": (),
 }
 
@@ -67,6 +70,21 @@ def _vers_entier(raw: object, defaut: object) -> object:
         return defaut
 
 
+def _vers_chemin(raw: object, defaut: object) -> object:
+    """Un chemin lu des préférences, ou le défaut s'il est inexploitable.
+
+    `QSettings` peut rendre autre chose qu'une chaîne (une liste, si le
+    chemin contenait une virgule et a été écrit par une version
+    antérieure). On ne vérifie PAS que le dossier existe : il peut être
+    sur un disque externe débranché, et l'oublier silencieusement
+    perdrait le réglage de l'utilisateur. C'est à l'affichage de dire
+    qu'il est introuvable.
+    """
+    if isinstance(raw, str):
+        return raw
+    return defaut
+
+
 def _vers_liste(raw: object, defaut: object) -> object:
     if isinstance(raw, (list, tuple)):
         return tuple(str(element) for element in raw)
@@ -80,6 +98,7 @@ _COERCITIONS = {
     "view/panel_width": _vers_entier,
     "view/show_tags": _vers_booleen,
     "view/panel_hidden": _vers_booleen,
+    "view/workdir": _vers_chemin,
     "recent/repositories": _vers_liste,
 }
 

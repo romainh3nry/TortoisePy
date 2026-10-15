@@ -13,6 +13,7 @@ import pygit2
 from PySide6.QtCore import QByteArray, QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -35,6 +36,7 @@ from tortoisepy.core.graph import build_graph
 from tortoisepy.core.graph_cache import GraphCache, repo_fingerprint
 from tortoisepy.core.credentials import is_https, remember
 from tortoisepy.core.options import GraphOptions
+from tortoisepy.core.projects import find_projects
 from tortoisepy.core.pull import (
     PullKind,
     analyse_pull,
@@ -1033,6 +1035,22 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         self.recent_button.setMenu(recent_menu)
         toolbar.addWidget(self.recent_button)
 
+        # Demandé par l'utilisateur : choisir un dossier de projets une
+        # fois, puis y retrouver tout ce qu'il contient. « Open Recent »
+        # ne liste que ce qui a DÉJÀ été ouvert ; ouvrir un projet neuf
+        # imposait jusqu'ici la ligne de commande.
+        self.workdir_button = QToolButton(self)
+        self.workdir_button.setText("Open Project")
+        self.workdir_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        workdir_menu = QMenu(self.workdir_button)
+        # Repeuplé à chaque ouverture, comme le menu voisin : un projet
+        # cloné entre deux affichages doit apparaître.
+        workdir_menu.aboutToShow.connect(self._populate_workdir_menu)
+        self.workdir_button.setMenu(workdir_menu)
+        toolbar.addWidget(self.workdir_button)
+
         return toolbar
 
     def _populate_recent_menu(self) -> None:
@@ -1076,6 +1094,108 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         self._recent_windows.add(window)
         window.show()
 
+
+    # --- le dossier de projets -----------------------------------------
+
+    def current_workdir(self) -> str:
+        """Le dossier de projets choisi, « » si aucun."""
+        return str(self.settings.value("view/workdir") or "")
+
+    def set_workdir(self, chemin: str) -> None:
+        """Mémorise le dossier de projets.
+
+        Demandé par l'utilisateur : « une fois sélectionné, le réglage
+        doit rester à chaque fois, à part s'il est re-modifié ».
+        L'écriture suffit : `current_workdir` relit les réglages, donc
+        rien à tenir en mémoire qui pourrait diverger.
+        """
+        self.settings.set_value("view/workdir", chemin)
+
+    def choose_workdir(self) -> None:
+        """Ouvre le sélecteur de dossier et retient le choix.
+
+        Pré-rempli sur le dossier courant : on en change plus souvent
+        qu'on n'en choisit un pour la première fois.
+        """
+        chemin = QFileDialog.getExistingDirectory(
+            self, "Choose a projects folder", self.current_workdir()
+        )
+        if chemin:
+            self.set_workdir(chemin)
+
+    def _populate_workdir_menu(self) -> None:
+        """Reconstruit le menu des projets à chaque ouverture.
+
+        Le scan relit le disque : un projet cloné depuis le dernier
+        affichage doit apparaître, et un projet supprimé disparaître.
+        """
+        menu = self.workdir_button.menu()
+        menu.clear()
+
+        choisir = menu.addAction("Choose folder…")
+        choisir.triggered.connect(self.choose_workdir)
+        menu.addSeparator()
+
+        workdir = self.current_workdir()
+        if not workdir:
+            vide = menu.addAction("No folder chosen")
+            vide.setEnabled(False)
+            return
+
+        if not Path(workdir).is_dir():
+            # Un disque externe débranché, un dossier renommé : le dire
+            # plutôt que de laisser un menu vide, qui ferait croire à
+            # un dossier sans projets et chercher au mauvais endroit.
+            absent = menu.addAction(f"Folder not found: {workdir}")
+            absent.setEnabled(False)
+            return
+
+        projets = find_projects(workdir)
+        if not projets:
+            vide = menu.addAction("No Git project in this folder")
+            vide.setEnabled(False)
+            return
+
+        for projet in projets:
+            action = menu.addAction(projet.name)
+            # `chemin=` fige la valeur : sans ça, toutes les actions
+            # partageraient la dernière valeur de la boucle (piège
+            # classique des fermetures dans une boucle Python/Qt).
+            action.triggered.connect(
+                lambda checked=False, chemin=projet.path: self.open_project(
+                    chemin
+                )
+            )
+
+    def open_project(self, chemin: str) -> None:
+        """Ouvre le projet dans une NOUVELLE fenêtre.
+
+        Comme « Open Recent », et pour la même raison : deux boutons
+        voisins qui se comporteraient différemment surprendraient.
+
+        Le menu ne liste que des dépôts, mais le projet a pu être
+        supprimé ou déplacé entre le scan et le clic — c'est le message
+        d'erreur demandé par l'utilisateur. Il nomme le projet (§9) :
+        « impossible d'ouvrir » sans contexte ne dirait pas lequel.
+        """
+        nom = Path(chemin).name or chemin
+        if not (Path(chemin) / ".git").exists():
+            self.statusBar().showMessage(
+                f"{nom} is not a Git repository", 15000
+            )
+            return
+
+        repository = find_repository(chemin)
+        if repository is None:
+            self.statusBar().showMessage(
+                f"Could not open {nom}", 15000
+            )
+            return
+
+        window = MainWindow(repository, settings=self.settings)
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._recent_windows.add(window)
+        window.show()
 
     def find_branch(self) -> None:
         """Centre sur une branche correspondant au motif, puis cycle.

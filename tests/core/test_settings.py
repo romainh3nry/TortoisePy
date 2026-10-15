@@ -14,6 +14,7 @@ def test_defaults_cover_every_persisted_key():
         "view/zoom",
         "view/panel_width",
         "view/panel_hidden",
+        "view/workdir",
         "view/show_tags",
         "recent/repositories",
     }
@@ -53,6 +54,22 @@ def test_the_hidden_panel_flag_is_a_real_boolean():
     # Et par défaut la liste s'affiche (demandé par l'utilisateur).
     assert DEFAULTS["view/panel_hidden"] is False
     assert coerce("view/panel_hidden", "abîmé") is False
+
+
+def test_the_workdir_survives_a_bad_value():
+    """Le dossier de projets choisi par l'utilisateur.
+
+    On ne vérifie pas qu'il existe : il peut être sur un disque
+    externe débranché, et l'oublier en silence perdrait le réglage.
+    C'est à l'affichage de signaler qu'il est introuvable.
+    """
+    assert coerce("view/workdir", "/Users/x/Projets") == "/Users/x/Projets"
+    assert coerce("view/workdir", "/disque/absent") == "/disque/absent"
+    # Une valeur d'un autre type ne doit pas se propager comme chemin.
+    assert coerce("view/workdir", ["a", "b"]) == DEFAULTS["view/workdir"]
+    assert coerce("view/workdir", None) == DEFAULTS["view/workdir"]
+    # Aucun dossier choisi : le cas du premier lancement.
+    assert DEFAULTS["view/workdir"] == ""
 
 
 def test_an_absurd_zoom_is_refused():
