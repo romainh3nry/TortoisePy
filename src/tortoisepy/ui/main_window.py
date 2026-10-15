@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pygit2
-from PySide6.QtCore import QByteArray, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -213,11 +213,74 @@ class MainWindow(QMainWindow):
         # garder une référence, le ramasse-miettes la détruirait aussitôt
         # (même piège que `_detail_windows`).
         self._recent_windows = ChildWindows()
+        # Poignée de repli, au bord de la liste — demandé par
+        # l'utilisateur : « une sorte de flèche au niveau de la liste,
+        # pas en haut ». Une entrée dans la barre d'outils se perdait
+        # parmi quinze autres et ne disait pas ce qu'elle replierait.
+        self.toggle_panel_action = QAction("Commit list", self)
+        self.toggle_panel_action.setCheckable(True)
+        # `SettingsStore` coercit via le schéma : la valeur relue est un
+        # vrai booléen, jamais la chaîne « false » — qui serait vraie en
+        # Python et masquerait le panneau de tout le monde.
+        self.toggle_panel_action.setChecked(
+            not self.settings.value("view/panel_hidden")
+        )
+        self.toggle_panel_action.toggled.connect(self._on_panel_toggled)
+
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.splitter.addWidget(self.view)
         self.splitter.addWidget(self.commit_panel)
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 2)
+
+        # Enfant du splitter et placé à la main, PAS un troisième widget
+        # dans sa mise en page : signalé par l'utilisateur, « la bordure
+        # est trop épaisse ». Une colonne de 18 px s'intercalait entre le
+        # graphe et la liste et se lisait comme une large bande grise,
+        # là où il n'y avait avant qu'une fine barre de séparation.
+        # En superposition, la poignée ne prend aucune place : la
+        # séparation redevient celle d'avant, avec le bouton par-dessus.
+        # Parenté à la FENÊTRE et non au splitter : `QSplitter` adopte
+        # tout enfant comme widget géré, et la poignée y redeviendrait
+        # une colonne — c'est exactement la bordure épaisse signalée.
+        # Vérifié par un test.
+        self.panel_handle = QToolButton(self)
+        self.panel_handle.setCheckable(True)
+        self.panel_handle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # Courte et centrée (demandé) : une bande pleine hauteur se
+        # lisait comme une troisième colonne.
+        self.panel_handle.setFixedSize(16, 48)
+        # Un contour, et non un simple fond : replié, le bouton se
+        # retrouve contre le graphe, dont le fond est clair. Sans lui,
+        # il devenait introuvable (constaté sur capture) — et la liste
+        # n'aurait plus eu de moyen de revenir.
+        self.panel_handle.setStyleSheet(
+            "QToolButton {"
+            "  border: 1px solid palette(mid);"
+            "  border-radius: 4px;"
+            "  background: palette(button);"
+            "  color: palette(button-text);"
+            "  font-size: 12px;"
+            "  font-weight: bold;"
+            "}"
+            "QToolButton:hover {"
+            "  background: palette(highlight);"
+            "  color: palette(highlighted-text);"
+            "}"
+        )
+        self.panel_handle.setDefaultAction(self.toggle_panel_action)
+        self.panel_handle.raise_()
+        self._mettre_a_jour_la_poignee(
+            self.toggle_panel_action.isChecked()
+        )
+        # Le splitter déplace sa barre : la poignée doit suivre.
+        self.splitter.splitterMoved.connect(
+            lambda *_: self._placer_la_poignee()
+        )
+        # Le splitter se remet en page sans prévenir — notamment au
+        # démarrage, une fois la liste remplie. Son `Resize` est le
+        # seul signal qui couvre tous les cas (cf. `eventFilter`).
+        self.splitter.installEventFilter(self)
         # Tailles explicites en plus des facteurs : ceux-ci ne jouent que
         # sur l'espace EXCÉDENTAIRE, et Qt part des tailles souhaitées des
         # widgets. En démarrage différé, la vue est vide au premier
@@ -328,6 +391,124 @@ class MainWindow(QMainWindow):
                 return True
         return False
 
+    # Le splitter porte deux widgets : le graphe et le panneau. La
+    # poignée est posée PAR-DESSUS (cf. `_placer_la_poignee`) et ne
+    # compte pas ici. Les index sont nommés pour qu'un widget ajouté
+    # demain ne laisse pas des `sizes()[1]` faux disséminés.
+    _I_GRAPHE, _I_PANNEAU = 0, 1
+
+    def _largeur_du_panneau(self) -> int:
+        """Largeur courante de la liste, 0 si elle est repliée."""
+        tailles = self.splitter.sizes()
+        if len(tailles) <= self._I_PANNEAU:
+            return 0
+        return tailles[self._I_PANNEAU]
+
+    def _poser_la_largeur_du_panneau(self, largeur: int) -> None:
+        """Donne `largeur` à la liste, le reste au graphe."""
+        tailles = self.splitter.sizes()
+        if len(tailles) <= self._I_PANNEAU:
+            return
+        total = sum(tailles)
+        if total > largeur:
+            self.splitter.setSizes([total - largeur, largeur])
+            # `setSizes` ne redimensionne pas le splitter : aucun
+            # `Resize` n'est émis, et le filtre d'événements ne voit
+            # rien passer. La poignée doit donc être replacée ici
+            # explicitement — sans quoi elle reste sur l'ancienne
+            # séparation (mesuré : 39 px d'écart).
+            self._placer_la_poignee()
+
+    def _placer_la_poignee(self) -> None:
+        """Colle la poignée à la séparation, à mi-hauteur.
+
+        Elle est posée en superposition plutôt qu'insérée dans le
+        splitter : signalé par l'utilisateur, une colonne dédiée
+        épaississait la bordure entre le graphe et la liste. Sans place
+        réservée, il faut donc la positionner nous-mêmes à chaque
+        changement de taille.
+        """
+        poignee = getattr(self, "panel_handle", None)
+        if poignee is None:
+            return
+
+        barre = self.splitter.handle(self._I_PANNEAU)
+        if barre is None:
+            return
+
+        # Coordonnées du splitter traduites dans celles de la fenêtre :
+        # la poignée est parentée à la fenêtre, pas au splitter.
+        origine = self.splitter.mapTo(self, self.splitter.rect().topLeft())
+
+        # On lit la position RÉELLE de la barre de séparation, et non
+        # `sizes()[0]`. Signalé deux fois par l'utilisateur : le bouton
+        # restait « légèrement décalé ». La cause, mesurée : `sizes()`
+        # rend la largeur des WIDGETS, à laquelle il faut encore
+        # ajouter la barre elle-même (7 px ici, et sa valeur dépend du
+        # style, donc de la plateforme). Le centre tombait 3 px à
+        # gauche — exactement l'aspect signalé.
+        #
+        # `handle()` donne la géométrie que Qt a réellement posée : il
+        # n'y a plus rien à recalculer, donc plus rien à décaler.
+        if self.toggle_panel_action.isChecked():
+            centre = barre.x() + barre.width() // 2
+            x = origine.x() + centre - poignee.width() // 2
+        else:
+            # Repliée, la barre est au ras du bord droit : on garde la
+            # poignée entièrement dans la fenêtre.
+            x = origine.x() + self.splitter.width() - poignee.width() - 2
+        y = origine.y() + (self.splitter.height() - poignee.height()) // 2
+        poignee.move(max(0, x), max(0, y))
+        poignee.raise_()
+
+    def resizeEvent(self, event) -> None:
+        """La poignée n'a pas de place réservée : on la replace."""
+        super().resizeEvent(event)
+        self._placer_la_poignee()
+
+    def eventFilter(self, objet, event) -> bool:
+        """Replace la poignée dès que le splitter se remet en page.
+
+        Signalé par l'utilisateur : « au premier démarrage le bouton
+        est légèrement décalé, et une fois qu'on replie/déplie il se
+        cale bien ».
+
+        Les trois déclencheurs posés jusqu'ici — barre déplacée à la
+        main, fenêtre redimensionnée, panneau basculé — ne couvraient
+        pas le cas du démarrage : le splitter se remet en page tout
+        seul une fois la liste remplie (mesuré : il passe par
+        `[46, 46]` avant d'atteindre sa vraie répartition), et aucun
+        de ces trois signaux n'est émis. La poignée restait donc sur
+        une position calculée trop tôt, jusqu'à la première bascule.
+
+        Surveiller le `Resize` du splitter couvre tous les cas d'un
+        coup, y compris ceux qu'on n'a pas prévus.
+
+        Honnêteté sur ce filet : le défaut mesurable était le
+        `setSizes` sans `Resize`, corrigé dans
+        `_poser_la_largeur_du_panneau` et tenu par un test. Retirer ce
+        filtre ne fait échouer aucun test ni reproduire le décalage
+        sur les dépôts d'essai (jusqu'à 40 commits). Il est conservé
+        parce que le symptôme a été signalé sur un dépôt de 500+
+        commits, où la liste se remplit par étapes — un cas que ces
+        essais n'atteignent pas. S'il gêne un jour, le retirer est
+        sans risque : les tests disent ce qui compte vraiment.
+        """
+        if objet is self.splitter and event.type() == QEvent.Type.Resize:
+            self._placer_la_poignee()
+        return super().eventFilter(objet, event)
+
+    def _mettre_a_jour_la_poignee(self, visible: bool) -> None:
+        """La flèche pointe vers ce que le clic va faire.
+
+        Panneau ouvert : « › », on le replie vers la droite. Replié :
+        « ‹ », on le ramène. Une flèche figée laisserait deviner.
+        """
+        self.toggle_panel_action.setText("\u203a" if visible else "\u2039")
+        self.toggle_panel_action.setToolTip(
+            "Hide the commit list" if visible else "Show the commit list"
+        )
+
     def _repartir_le_splitter(self) -> None:
         """Donne 60 % au graphe, 40 % au panneau.
 
@@ -417,9 +598,19 @@ class MainWindow(QMainWindow):
         largeur = self._largeur_panneau_en_attente
         if largeur is not None:
             self._largeur_panneau_en_attente = None
-            total = sum(self.splitter.sizes())
-            if total > largeur:
-                self.splitter.setSizes([total - largeur, largeur])
+            self._largeur_panneau_retenue = largeur
+            self._poser_la_largeur_du_panneau(largeur)
+
+        # Le panneau masqué à la session précédente le reste. Appliqué
+        # ici et non à la construction : `hide()` avant le premier
+        # `show()` serait annulé par celui-ci, qui rend visibles les
+        # enfants de la fenêtre.
+        if not self.toggle_panel_action.isChecked():
+            self.commit_panel.hide()
+
+        # La poignée n'a pas de place réservée dans la mise en page :
+        # elle se positionne une fois les tailles réelles connues.
+        self._placer_la_poignee()
 
     def save_settings(self) -> None:
         """Mémorise l'état courant. Appelé à la fermeture."""
@@ -427,9 +618,16 @@ class MainWindow(QMainWindow):
             "window/geometry", bytes(self.saveGeometry())
         )
         self.settings.set_value("view/zoom", self.view.current_zoom())
-        tailles = self.splitter.sizes()
-        if len(tailles) > 1:
-            self.settings.set_value("view/panel_width", tailles[1])
+        largeur = self._largeur_du_panneau()
+        # Panneau masqué, le splitter rend 0 : enregistrer cette valeur
+        # ferait revenir le panneau écrasé à la réouverture. On garde
+        # alors la largeur retenue au moment du masquage.
+        if largeur > 0:
+            self.settings.set_value("view/panel_width", largeur)
+        else:
+            retenue = getattr(self, "_largeur_panneau_retenue", None)
+            if retenue:
+                self.settings.set_value("view/panel_width", retenue)
 
     def closeEvent(self, event) -> None:
         self.save_settings()
@@ -446,6 +644,39 @@ class MainWindow(QMainWindow):
     def _on_tags_toggled(self, checked: bool) -> None:
         self.settings.set_value("view/show_tags", checked)
         self.refresh()
+
+    def _on_panel_toggled(self, visible: bool) -> None:
+        """Masque ou réaffiche la liste latérale des commits.
+
+        Demandé par l'utilisateur. Deux précautions, chacune tenue par
+        un test :
+
+        La largeur est retenue AVANT de masquer. `splitter.sizes()`
+        rend 0 pour un widget caché, et `save_settings` mémorise
+        justement cette valeur : fermer l'application panneau masqué
+        enregistrerait une largeur nulle, et le panneau reviendrait
+        écrasé — un réglage perdu sans que rien ne le signale.
+
+        `setSizes` à la réapparition : cacher puis remontrer un widget
+        dans un `QSplitter` ne lui rend pas sa colonne, Qt la
+        redistribue. Sans cela, le panneau reviendrait à une largeur
+        arbitraire et le redimensionnement de l'utilisateur serait
+        effacé à chaque bascule.
+        """
+        if not visible:
+            largeur = self._largeur_du_panneau()
+            if largeur > 0:
+                self._largeur_panneau_retenue = largeur
+            self.commit_panel.hide()
+        else:
+            self.commit_panel.show()
+            largeur = getattr(self, "_largeur_panneau_retenue", None)
+            if largeur:
+                self._poser_la_largeur_du_panneau(largeur)
+
+        self._mettre_a_jour_la_poignee(visible)
+        self._placer_la_poignee()
+        self.settings.set_value("view/panel_hidden", not visible)
 
     def refresh(self) -> None:
         """Reconstruit le graphe et relit l'état (§7.6, §7.9)."""

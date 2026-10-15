@@ -13,6 +13,7 @@ def test_defaults_cover_every_persisted_key():
     assert set(DEFAULTS) == {
         "view/zoom",
         "view/panel_width",
+        "view/panel_hidden",
         "view/show_tags",
         "recent/repositories",
     }
@@ -35,6 +36,23 @@ def test_a_corrupt_value_falls_back_to_the_default():
     assert coerce("view/zoom", "pas-un-nombre") == DEFAULTS["view/zoom"]
     assert coerce("view/zoom", None) == DEFAULTS["view/zoom"]
     assert coerce("view/panel_width", []) == DEFAULTS["view/panel_width"]
+
+
+def test_the_hidden_panel_flag_is_a_real_boolean():
+    """`QSettings` rend « false », qui est VRAI en Python.
+
+    Sans coercition, un panneau explicitement affiché reviendrait
+    masqué au lancement suivant — et la liste des commits
+    disparaîtrait pour qui n'a rien demandé. Le défaut le plus
+    coûteux de ce réglage, puisqu'il se déclenche tout seul.
+    """
+    assert coerce("view/panel_hidden", "false") is False
+    assert coerce("view/panel_hidden", "0") is False
+    assert coerce("view/panel_hidden", "true") is True
+    assert coerce("view/panel_hidden", "1") is True
+    # Et par défaut la liste s'affiche (demandé par l'utilisateur).
+    assert DEFAULTS["view/panel_hidden"] is False
+    assert coerce("view/panel_hidden", "abîmé") is False
 
 
 def test_an_absurd_zoom_is_refused():

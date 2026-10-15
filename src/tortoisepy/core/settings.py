@@ -16,6 +16,9 @@ DEFAULTS: dict[str, object] = {
     "view/zoom": 1.0,
     "view/panel_width": 0,          # 0 = laisser le splitter décider
     "view/show_tags": True,
+    # Demandé par l'utilisateur : masquer la liste latérale. Faux par
+    # défaut — le panneau révèle ce que la compression masque (§4.2.1).
+    "view/panel_hidden": False,
     "recent/repositories": (),
 }
 
@@ -76,6 +79,7 @@ _COERCITIONS = {
     "view/zoom": _vers_zoom,
     "view/panel_width": _vers_entier,
     "view/show_tags": _vers_booleen,
+    "view/panel_hidden": _vers_booleen,
     "recent/repositories": _vers_liste,
 }
 
