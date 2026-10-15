@@ -68,41 +68,85 @@ def test_the_script_installs_from_the_repository(nom):
     assert "git+https://github.com/romainh3nry/TortoisePy" in contenu
 
 
-def test_the_version_references_agree():
-    """D34, et le piège du tag : deux endroits, une seule version.
+def test_the_download_urls_point_at_a_stable_branch():
+    """Les URL de téléchargement ne portent plus de version.
 
-    Figer l'URL du README sans figer le `@tag` du script ne fige **rien** :
-    le script prendrait la branche par défaut. Et c'est l'oubli invisible,
-    puisque le README, lui, a l'air juste.
+    Demandé par l'utilisateur : « que l'URL d'installation pointe
+    toujours vers la dernière version sans spécifier le numéro ».
+
+    Avant, chaque URL citait le tag (`…/v0.13.0/scripts/install.sh`) :
+    toute version obligeait à réécrire le README, et une URL copiée
+    dans un wiki ou un message périmait en silence. `main` est servie
+    par GitHub comme n'importe quelle référence, et c'est la branche
+    de production du projet — elle ne reçoit que du publié.
+
+    Attention à ce que ce test NE dit pas : la référence *installée*
+    reste un tag figé (cf. `test_the_scripts_install_a_pinned_tag`).
+    Seul le chemin de téléchargement devient stable.
     """
     readme = (RACINE / "README.md").read_text()
-    dans_url = set(re.findall(r"TortoisePy/(v[\d.]+)/scripts/", readme))
-    assert dans_url, "aucun tag dans les URL du README"
+
+    versionnees = re.findall(r"TortoisePy/v[\d.]+/scripts/", readme)
+    assert not versionnees, (
+        f"des URL portent encore un tag : {set(versionnees)}"
+    )
+
+    assert "TortoisePy/main/scripts/install.sh" in readme
+    assert "TortoisePy/main/scripts/install.ps1" in readme
+
+    # Les deux installeurs citent leur propre URL en en-tête : elle doit
+    # suivre, sinon un lecteur copierait la forme périmée.
+    for nom in SCRIPTS:
+        contenu = (RACINE / "scripts" / nom).read_text()
+        entete = [l for l in contenu.splitlines() if "raw.githubusercontent" in l]
+        assert entete, f"{nom} ne cite plus son URL d'installation"
+        for ligne in entete:
+            assert "/main/scripts/" in ligne, (
+                f"{nom} cite une URL versionnée : {ligne.strip()}"
+            )
+
+
+def test_the_scripts_install_a_pinned_tag():
+    """Ce que le script INSTALLE reste épinglé, et suit le paquet.
+
+    C'est la moitié du contrat que le changement d'URL ne doit pas
+    emporter. Un script servi depuis `main` qui installerait aussi
+    `main` livrerait du code non publié à quiconque lance la commande —
+    et `topy --version` annoncerait une version qui n'existe pas.
+    """
+    import tomllib
+
+    config = tomllib.loads((RACINE / "pyproject.toml").read_text())
+    attendu = {f"v{config['project']['version']}"}
 
     for nom in SCRIPTS:
         contenu = (RACINE / "scripts" / nom).read_text()
-        # Les scripts composent l'URL depuis une variable de version :
-        # chercher « TortoisePy@v0.1.0» littéralement échouerait alors que
-        # le script est juste. C'est la variable qu'on éprouve.
-        declarees = set(re.findall(r'(?:VERSION|\$Version)\s*=\s*"(v[\d.]+)"', contenu))
+        declarees = set(
+            re.findall(r'(?:VERSION|\$Version)\s*=\s*"(v[\d.]+)"', contenu)
+        )
         assert declarees, f"{nom} n'épingle aucune version"
-        assert declarees == dans_url, (
-            f"{nom} installe {declarees}, le README annonce {dans_url}"
+        assert declarees == attendu, (
+            f"{nom} installe {declarees}, le paquet est en {attendu}"
         )
         assert "TortoisePy@" in contenu, (
-            f"{nom} doit viser le tag, pas la branche par défaut"
+            f"{nom} doit viser une référence explicite, pas la branche "
+            "par défaut"
         )
 
 
-def test_the_readme_version_matches_the_package():
-    """Un README qui annonce une version que le paquet n'a pas mentirait."""
+def test_the_readme_install_command_matches_the_package():
+    """Le README cite `uv tool install …@vX.Y.Z` : il doit suivre.
+
+    Cette commande-là garde son tag — c'est l'installation manuelle,
+    où l'on veut savoir ce qu'on pose.
+    """
     import tomllib
 
     config = tomllib.loads((RACINE / "pyproject.toml").read_text())
     version = config["project"]["version"]
 
     readme = (RACINE / "README.md").read_text()
-    tags = set(re.findall(r"TortoisePy/v([\d.]+)/scripts/", readme))
+    tags = set(re.findall(r"TortoisePy@v([\d.]+)", readme))
     assert tags == {version}, f"README annonce {tags}, le paquet est en {version}"
 
 
@@ -203,6 +247,44 @@ def test_the_version_script_covers_every_file_that_holds_it(tmp_path):
             f"{nom} porte encore {ancienne} : le script l'a oublié"
         )
         assert "7.8.9" in contenu, f"{nom} n'a pas reçu la nouvelle version"
+
+
+def test_a_version_bump_leaves_the_download_urls_alone(tmp_path):
+    """Monter de version ne doit pas reversionner les URL de `main`.
+
+    `set-version.py` remplace tout `vX.Y.Z` par expression régulière.
+    Le jour où quelqu'un élargit ce motif, les URL repasseraient en
+    `…/v1.2.3/scripts/…` sans que rien ne le dise — et la corvée que ce
+    changement supprime reviendrait en silence.
+
+    On travaille sur une COPIE : le dépôt réel n'est jamais modifié.
+    """
+    import shutil
+
+    fichiers = ("pyproject.toml", "README.md",
+                "scripts/install.sh", "scripts/install.ps1")
+
+    racine = tmp_path / "depot"
+    (racine / "scripts").mkdir(parents=True)
+    for nom in fichiers:
+        shutil.copy2(RACINE / nom, racine / nom)
+    shutil.copy2(
+        RACINE / "scripts" / "set-version.py",
+        racine / "scripts" / "set-version.py",
+    )
+
+    _charger_set_version(racine).poser("9.9.9")
+
+    for nom in fichiers:
+        contenu = (racine / nom).read_text()
+        assert not re.search(r"TortoisePy/v[\d.]+/scripts/", contenu), (
+            f"{nom} : une URL de téléchargement a été reversionnée"
+        )
+
+    readme = (racine / "README.md").read_text()
+    assert "TortoisePy/main/scripts/install.sh" in readme
+    # Et la référence installée, elle, a bien suivi.
+    assert "TortoisePy@v9.9.9" in readme
 
 
 def test_every_version_in_the_repository_is_reachable_by_the_script():
