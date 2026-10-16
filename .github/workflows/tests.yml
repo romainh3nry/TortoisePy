@@ -327,8 +327,22 @@ jobs:
           # `|| true` : si la fusion automatique est refusée (réglage
           # du dépôt désactivé), la PR reste ouverte et se fusionne à
           # la main. Un confort perdu ne doit pas faire rougir la CI.
-          if gh pr merge --auto --merge; then
-            echo "::notice::Fusion automatique armée"
-          else
-            echo "::warning::Fusion automatique indisponible — à fusionner à la main"
+          # Le résultat est VÉRIFIÉ, et non supposé : `gh pr merge`
+          # peut rendre un code d'erreur sans que personne ne lise le
+          # journal. Constaté sur la PR #24 — `auto_merge` valait
+          # `None`, la PR restait ouverte, et le job affichait vert.
+          if ! gh pr merge --auto --merge 2>/tmp/merge.err; then
+            echo "::error::Fusion automatique refusée : $(cat /tmp/merge.err)"
+            echo "::error::Vérifiez Settings → Pull Requests → Allow auto-merge"
+            exit 1
           fi
+
+          # Et on s'assure qu'elle est réellement armée côté GitHub :
+          # un code de retour nul ne suffit pas à le prouver.
+          arme=$(gh pr view --json autoMergeRequest --jq '.autoMergeRequest')
+          if [ "$arme" = "null" ] || [ -z "$arme" ]; then
+            echo "::error::La fusion automatique n'est pas armée sur la PR"
+            echo "::error::Vérifiez Settings → Pull Requests → Allow auto-merge"
+            exit 1
+          fi
+          echo "::notice::Fusion automatique armée"
