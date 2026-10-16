@@ -232,6 +232,17 @@ Branch protection requires the test suite to pass before `main` can be
 merged into, which is what makes the automatic tag safe: nothing
 reaches `main` untested.
 
+One local step remains. An editable install points at the sources, so
+code changes apply at once — but its *metadata*, version included, is
+frozen at install time, and that is what `topy --version` reads. After
+bumping the version, refresh it:
+
+```bash
+./scripts/refresh-venv.sh
+```
+
+The test suite tells you when this is needed, and names the script.
+
 ## Licence
 
 [MIT](LICENSE) — do what you like with it, keep the copyright notice, and
