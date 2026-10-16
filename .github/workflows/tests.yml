@@ -20,7 +20,7 @@ name: tests
 on:
   pull_request:
   push:
-    branches: [main, develop]
+    branches: [main]
 
 # Une PR poussée plusieurs fois d'affilée n'a pas besoin de ses
 # exécutions précédentes : on annule, et on n'occupe pas la file.
@@ -76,6 +76,21 @@ jobs:
     # Inutile de lancer dix minutes de tests sur une version qui sera
     # refusée au moment de taguer.
     needs: check_version
+    # Le nom `pytest` est le contrôle EXIGÉ par la protection de
+    # `main`. Un job du même nom déclaré « skipped » sur un push
+    # satisfait cette exigence : GitHub traite « skipped » comme
+    # neutre, et neutre vaut réussi.
+    #
+    # Constaté sur la PR #25 : un `pytest (push)` terminé à 12:51:14,
+    # AVANT même la création de la pull request, a laissé fusionner à
+    # 12:51:27 — les vrais tests ne finissaient qu'à 12:53:26. Deux
+    # minutes de code non vérifié en production.
+    #
+    # La correction tient en deux temps : ce job ne s'exécute que sur
+    # une pull request (ci-dessous), et le workflow entier n'est plus
+    # déclenché par un push sur `develop` — sans quoi les jobs
+    # existeraient quand même, « skipped », et le piège demeurerait.
+    # `open_pr` vit désormais dans son propre fichier.
     # Pas sur `push: main` : ce commit a déjà été testé sur la PR, au
     # contenu près (vérifié avec `git diff` entre les deux).
     if: github.event_name == 'pull_request'
@@ -243,106 +258,3 @@ jobs:
 
           git push origin develop
           echo "::notice::develop remis à niveau sur main"
-
-  # Ouvre la pull request quand la VERSION change sur `develop`.
-  # Demandé par l'utilisateur, avec cette précision : détecter la
-  # ligne et non le fichier.
-  #
-  # Mesuré sur l'historique : deux commits ont modifié
-  # `pyproject.toml` sans toucher la version — l'ajout de PyYAML, et
-  # une dépendance pour la coloration syntaxique. Un déclencheur sur
-  # le fichier seul aurait ouvert deux pull requests inutiles.
-  open_pr:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Ouvrir la PR si la version a changé
-        env:
-          # Un jeton PERSONNEL, et non `github.token` : GitHub refuse
-          # d'enchaîner les workflows déclenchés par un bot, pour
-          # éviter les boucles infinies. Avec le jeton par défaut, la
-          # pull request s'ouvre mais `check_version` et `pytest`
-          # restent « awaiting approval » — et la fusion automatique
-          # attend des contrôles qui ne partiront jamais seuls
-          # (constaté).
-          #
-          # Le repli sur `github.token` garde le job fonctionnel tant
-          # que le secret n'existe pas : la PR s'ouvre, et il reste à
-          # approuver les contrôles à la main.
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
-          AVANT: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          version=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
-
-          # L'état AVANT le push, et non `HEAD^` : un push peut porter
-          # plusieurs commits, et la montée de version pourrait être
-          # dans le premier d'entre eux.
-          #
-          # Le `0000…` est la valeur que GitHub donne à la création
-          # d'une branche : il n'y a alors rien à comparer.
-          if [ -z "${AVANT:-}" ] || [ "$AVANT" = "0000000000000000000000000000000000000000" ]; then
-            echo "Pas d'état antérieur : rien à comparer."
-            exit 0
-          fi
-
-          precedente=$(git show "$AVANT:pyproject.toml" 2>/dev/null \
-            | grep -m1 '^version' | cut -d'"' -f2 || true)
-
-          if [ "$version" = "$precedente" ]; then
-            echo "Version inchangée ($version) : pas de pull request."
-            exit 0
-          fi
-
-          # Une PR déjà ouverte se met à jour toute seule quand on
-          # pousse : en ouvrir une seconde échouerait.
-          if [ -n "$(gh pr list --base main --head develop --state open --json number --jq '.[].number')" ]; then
-            echo "Une pull request est déjà ouverte."
-            exit 0
-          fi
-
-          gh pr create \
-            --base main --head develop \
-            --title "v$version" \
-            --body "Version $precedente → $version. Fusion automatique dès que la CI est verte, puis tag et release."
-          echo "::notice::Pull request ouverte pour la v$version"
-
-          # Fusion automatique, demandée par l'utilisateur : monter la
-          # version sur `develop` VAUT décision de publier.
-          #
-          # `--auto` ne fusionne pas tout de suite : GitHub attend que
-          # les contrôles exigés passent. Un échec de `check_version`
-          # ou de `pytest` laisse donc la pull request ouverte, et
-          # rien ne part. C'est la protection de branche qui tient la
-          # garantie, pas ce job.
-          #
-          # `|| true` : si la fusion automatique est refusée (réglage
-          # du dépôt désactivé), la PR reste ouverte et se fusionne à
-          # la main. Un confort perdu ne doit pas faire rougir la CI.
-          # Le résultat est VÉRIFIÉ, et non supposé : `gh pr merge`
-          # peut rendre un code d'erreur sans que personne ne lise le
-          # journal. Constaté sur la PR #24 — `auto_merge` valait
-          # `None`, la PR restait ouverte, et le job affichait vert.
-          if ! gh pr merge --auto --merge 2>/tmp/merge.err; then
-            echo "::error::Fusion automatique refusée : $(cat /tmp/merge.err)"
-            echo "::error::Vérifiez Settings → Pull Requests → Allow auto-merge"
-            exit 1
-          fi
-
-          # Et on s'assure qu'elle est réellement armée côté GitHub :
-          # un code de retour nul ne suffit pas à le prouver.
-          arme=$(gh pr view --json autoMergeRequest --jq '.autoMergeRequest')
-          if [ "$arme" = "null" ] || [ -z "$arme" ]; then
-            echo "::error::La fusion automatique n'est pas armée sur la PR"
-            echo "::error::Vérifiez Settings → Pull Requests → Allow auto-merge"
-            exit 1
-          fi
-          echo "::notice::Fusion automatique armée"
