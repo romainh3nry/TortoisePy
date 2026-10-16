@@ -481,18 +481,48 @@ def test_the_merge_is_armed_automatically(workflow):
     )
 
 
-def test_an_unavailable_auto_merge_does_not_fail_the_job(workflow):
-    """Le réglage « Allow auto-merge » peut être désactivé.
+def test_an_unavailable_auto_merge_is_reported_loudly(workflow):
+    """Un échec silencieux est pire qu'un échec bruyant.
 
-    La PR reste alors ouverte et se fusionne à la main : un confort
-    perdu ne doit pas faire rougir la CI, ni masquer le fait que la
-    pull request a bien été créée.
+    Première version de ce job : un refus de fusion automatique
+    n'émettait qu'un `::warning::`, le job restait vert, et la pull
+    request attendait indéfiniment. Constaté sur la PR #24 —
+    `auto_merge` valait `None` et personne n'en était averti ;
+    l'utilisateur l'a découvert en regardant l'écran.
+
+    Le raisonnement d'origine — « un confort perdu ne doit pas faire
+    rougir la CI » — était mauvais : une automatisation qui ne
+    marche pas et qui se tait coûte plus qu'une croix rouge.
     """
     commandes = _commandes(workflow, "open_pr")
-    bloc = commandes[commandes.index("gh pr merge"):]
 
-    assert "else" in bloc and "::warning::" in bloc, (
-        "un refus de fusion automatique ferait échouer le job"
+    # Le bloc QUI SUIT immédiatement l'appel, et non le reste du
+    # script : la vérification d'état plus bas contient elle aussi
+    # `::error::` et `exit 1`. Trouvé par mutation — remplacer ce
+    # bloc-ci par un simple `::warning::` laissait le test passer.
+    debut = commandes.index("gh pr merge")
+    bloc = commandes[debut:commandes.index("autoMergeRequest")]
+
+    assert "::error::" in bloc, (
+        f"un refus de fusion passerait inaperçu : {bloc[:160]}"
+    )
+    assert "exit 1" in bloc, "le job resterait vert malgré l'échec"
+    assert "Allow auto-merge" in commandes, (
+        "aucun message ne dit quel réglage vérifier"
+    )
+
+
+def test_the_auto_merge_is_verified_not_assumed(workflow):
+    """Un code de retour nul ne prouve pas que la fusion est armée.
+
+    On interroge donc `autoMergeRequest` sur la pull request :
+    c'est le seul état qui compte, et c'est lui qui valait `None`
+    alors que le job se croyait en succès.
+    """
+    commandes = _commandes(workflow, "open_pr")
+
+    assert "autoMergeRequest" in commandes, (
+        "le job suppose que la fusion est armée sans le vérifier"
     )
 
 
