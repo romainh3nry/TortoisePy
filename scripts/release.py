@@ -212,9 +212,19 @@ def taguer(lanceur=git, version: str = "") -> None:
             f"{version} sur du code qui s'annonce {declaree}."
         )
 
-    lanceur("tag", f"v{version}")
+    # `origin/main` EXPLICITEMENT, et non `git tag v…` seul : sans
+    # cible, Git tague `HEAD`. Constaté en l'utilisant sur la 0.15.0 —
+    # le tag s'est posé sur le dernier commit de `develop`, hors de
+    # `main`, embarquant un commit non fusionné. Les quatorze tags
+    # précédents du dépôt pointent tous sur un commit de fusion.
+    lanceur("tag", f"v{version}", f"origin/{CIBLE}")
     lanceur("push", "origin", f"v{version}")
-    print(f"\n  Tag v{version} posé sur {CIBLE}.\n")
+
+    # Le message nomme le commit réellement tagué : « posé sur main »
+    # était affiché alors que le tag était ailleurs, ce qui a masqué
+    # l'erreur jusqu'à l'échec de l'installation.
+    pose = lanceur("rev-parse", "--short", f"v{version}")
+    print(f"\n  Tag v{version} posé sur {CIBLE} ({pose}).\n")
 
 
 # --- enchaînement ------------------------------------------------------

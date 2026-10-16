@@ -267,6 +267,30 @@ def test_it_tags_when_main_is_up_to_date(release):
     assert git.a_fait("push", "v0.15.0")
 
 
+def test_the_tag_lands_on_main_not_on_head(release):
+    """Le tag doit viser `origin/main`, pas la branche courante.
+
+    Constaté en l'utilisant pour de vrai, sur la 0.15.0 : `git tag v…`
+    sans cible tague `HEAD`. Le tag s'est posé sur le dernier commit
+    de `develop`, hors de `main`, et embarquait donc un commit non
+    fusionné — alors que les quatorze tags précédents du dépôt
+    pointent tous sur un commit de fusion.
+
+    Le script affichait pourtant « posé sur main ». Un message qui ne
+    décrit pas ce qui s'est passé est pire que pas de message.
+    """
+    git = FauxGit({"show origin/main:pyproject.toml": 'version = "0.15.0"'})
+
+    release.taguer(git, "0.15.0")
+
+    poses = [a for a in git.appels if a and a[0] == "tag"]
+    assert poses, "aucun tag posé"
+    for appel in poses:
+        assert "origin/main" in appel, (
+            f"le tag ne vise pas main : {appel} — il tombera sur HEAD"
+        )
+
+
 def test_the_tag_carries_the_v_prefix(release):
     """Les quatorze tags du dépôt sont nommés `vX.Y.Z`.
 
