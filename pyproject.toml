@@ -29,7 +29,9 @@ Homepage = "https://github.com/romainh3nry/TortoisePy"
 Issues = "https://github.com/romainh3nry/TortoisePy/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-qt>=4.4"]
+# PyYAML : relire le workflow de CI, dont les conditions ne se
+# vérifient autrement qu en production.
+dev = ["pytest>=8.0", "pytest-qt>=4.4", "PyYAML>=6.0"]
 
 [project.scripts]
 topy = "tortoisepy.cli:main"

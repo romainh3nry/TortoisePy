@@ -63,3 +63,53 @@ jobs:
       # `QT_QPA_PLATFORM` est déjà posé par `tests/conftest.py`, avant
       # le premier import de PySide6 ; on ne le répète pas ici.
       - run: pytest -q
+
+  # Le tag est posé par la CI, et non depuis un poste de travail :
+  # `needs: pytest` le rend incapable de taguer du code qui n'a pas
+  # passé les tests. C'est la garantie qu'un script local n'aura
+  # jamais.
+  #
+  # Il lit la version dans `pyproject.toml`, source unique : c'est elle
+  # que `importlib.metadata` sert à `topy --version`, et elle
+  # qu'installent pip et uv. Un fichier de version séparé en ferait une
+  # seconde, et le jour où les deux divergent, le tag annoncerait
+  # autre chose que le paquet.
+  tag:
+    needs: pytest
+    # Uniquement sur `main`, et seulement après une fusion — jamais
+    # depuis une pull request, où le code n'est pas encore en
+    # production.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # sans quoi la poussée du tag est refusée
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Les tags doivent être connus pour savoir si celui-ci
+          # existe déjà ; un clone superficiel ne les rapporte pas.
+          fetch-depth: 0
+
+      - name: Taguer si la version est nouvelle
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+
+          if [ -z "$version" ]; then
+            echo "::error::version introuvable dans pyproject.toml"
+            exit 1
+          fi
+
+          # Trois fusions sur huit ne changent pas la version (mesuré
+          # sur l'historique) : une correction, une synchronisation.
+          # L'existence du tag est le signal — pas besoin d'un fichier
+          # dédié pour dire « ceci est une version ».
+          if git rev-parse "v$version" >/dev/null 2>&1; then
+            echo "v$version existe déjà : fusion sans changement de version."
+            exit 0
+          fi
+
+          git tag "v$version"
+          git push origin "v$version"
+          echo "::notice::Tag v$version posé sur $(git rev-parse --short HEAD)"

@@ -5,7 +5,13 @@ Demandé par l'utilisateur : « une commande unique permettant de set la
 version, merge develop dans main, créer le tag ».
 
     python scripts/release.py 0.15.0     # prépare la version
-    python scripts/release.py --tag      # tague, une fois la PR fusionnée
+    python scripts/release.py --tag      # SECOURS : tague à la main
+
+Le tag est normalement posé par la CI, dans le job `tag` de
+`.github/workflows/tests.yml`, qui ne part qu'après des tests verts —
+une garantie qu'un script local ne peut pas offrir. `--tag` reste
+disponible si la CI est indisponible, ou pour rattraper une version
+que le job aurait manquée.
 
 Pourquoi DEUX commandes et non une. Le script s'arrête avant la fusion,
 délibérément : la pull request est le seul moment où quelqu'un regarde
@@ -179,8 +185,10 @@ def annoncer_la_pr(version: str) -> None:
     print("  Ouvrez la pull request :")
     print(f"      {DEPOT}/compare/{CIBLE}...{BRANCHE}?expand=1")
     print()
-    print("  La CI se lance à l'ouverture (12 à 20 min). Une fois la")
-    print("  PR fusionnée :")
+    print("  La CI se lance à l'ouverture. Une fois la PR fusionnée,")
+    print("  elle pose le tag elle-même — rien d'autre à faire.")
+    print()
+    print("  En secours, si la CI est indisponible :")
     print("      python scripts/release.py --tag")
     print()
 
