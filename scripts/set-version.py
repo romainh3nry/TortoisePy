@@ -95,19 +95,43 @@ def rafraichir_venv() -> bool:
     if not python.exists():
         return False
 
-    resultat = subprocess.run(
+    # Deux essais, car un venv créé par `uv venv` n'embarque PAS `pip`.
+    # Signalé par l'utilisateur : après une montée en 0.15.0, les
+    # quatre fichiers étaient justes mais `topy --version` répondait
+    # encore 0.14.0 — la réinstallation avait échoué sans que cela se
+    # voie, et on croit alors que le script entier n'a rien fait.
+    essais = (
         [str(python), "-m", "pip", "install", "-e", str(RACINE),
          "--no-deps", "-q"],
-        capture_output=True,
-        text=True,
+        ["uv", "pip", "install", "-e", str(RACINE), "--no-deps", "-q",
+         "--python", str(python)],
     )
-    if resultat.returncode != 0:
-        print(
-            f"  (venv non rafraîchi : {resultat.stderr.strip()[:120]})",
-            file=sys.stderr,
-        )
-        return False
-    return True
+
+    dernier = ""
+    for commande in essais:
+        try:
+            resultat = subprocess.run(
+                commande, capture_output=True, text=True,
+            )
+        except FileNotFoundError:
+            # `uv` n'est pas installé : on passe à la suite, ou on sort.
+            dernier = f"{commande[0]} introuvable"
+            continue
+        if resultat.returncode == 0:
+            return True
+        dernier = resultat.stderr.strip()[:120]
+
+    # Dire CE QUI sera faux, et non seulement que quelque chose a raté :
+    # la version des fichiers est bien posée, c'est la commande
+    # installée qui reste en arrière.
+    print(
+        f"  (venv non rafraîchi : {dernier})\n"
+        "  La version est posée dans les fichiers, mais "
+        "`topy --version` annoncera encore l'ancienne.\n"
+        "  Pour corriger : uv pip install -e . --no-deps",
+        file=sys.stderr,
+    )
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:

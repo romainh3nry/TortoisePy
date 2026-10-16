@@ -390,6 +390,77 @@ def test_no_venv_is_not_an_error(tmp_path, monkeypatch):
     assert lances == [], "une réinstallation a été tentée sans venv"
 
 
+class _Echoue:
+    """Un `pip` absent : exactement ce que rend un venv créé par `uv`."""
+
+    returncode = 1
+    stdout = ""
+    stderr = "No module named pip"
+
+
+def test_it_falls_back_to_uv_when_pip_is_missing(tmp_path, monkeypatch):
+    """Un venv créé par `uv` n'embarque pas `pip`.
+
+    Signalé par l'utilisateur : après `release.py 0.15.0`, les quatre
+    fichiers portaient bien 0.15.0 mais `topy --version` répondait
+    encore 0.14.0. La réinstallation échouait en silence, et un
+    avertissement sur stderr ne suffit pas — on croit que le script
+    n'a rien fait.
+
+    Un venv éditable pointe sur les sources, mais sa VERSION est figée
+    à l'installation : sans réinstallation, la commande ment.
+    """
+    module = _charger_set_version()
+    module.RACINE = tmp_path
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    (tmp_path / ".venv" / "bin" / "python").write_text("")
+
+    lances = []
+
+    def faux_run(commande, **kw):
+        lances.append(commande)
+        # Distinguer sur le PREMIER élément, et non sur la présence de
+        # « pip » : la commande `uv` contient elle aussi ce mot
+        # (`uv pip install`), et le test échouait sur sa propre ruse.
+        return _Echoue() if commande[0] != "uv" else _Termine()
+
+    monkeypatch.setattr(module.subprocess, "run", faux_run)
+
+    assert module.rafraichir_venv() is True, (
+        "le repli sur `uv` n'a pas été tenté"
+    )
+    assert len(lances) >= 2, f"un seul essai : {lances}"
+    assert any("uv" in c[0] for c in lances), (
+        f"`uv` n'a jamais été appelé : {lances}"
+    )
+
+
+def test_a_total_failure_is_reported_not_silent(tmp_path, monkeypatch,
+                                                capsys):
+    """Si NI pip NI uv ne marchent, il faut le dire clairement.
+
+    Le piège que l'utilisateur a rencontré : un échec discret laisse
+    croire que le script entier n'a rien fait, alors qu'il a bien posé
+    la version.
+    """
+    module = _charger_set_version()
+    module.RACINE = tmp_path
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    (tmp_path / ".venv" / "bin" / "python").write_text("")
+
+    monkeypatch.setattr(
+        module.subprocess, "run", lambda commande, **kw: _Echoue()
+    )
+
+    assert module.rafraichir_venv() is False
+
+    message = capsys.readouterr().err
+    assert "venv" in message.lower()
+    assert "topy --version" in message, (
+        "le message ne dit pas CE QUI sera faux : la version annoncée"
+    )
+
+
 def test_setting_a_version_also_refreshes(tmp_path, monkeypatch):
     """Le bout de la chaîne : poser une version rafraîchit le venv."""
     import shutil
