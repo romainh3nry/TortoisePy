@@ -461,3 +461,50 @@ def test_the_pr_job_may_write_pull_requests(workflow):
     permissions = workflow["jobs"]["open_pr"].get("permissions", {})
 
     assert permissions.get("pull-requests") == "write", permissions
+
+
+# --- fusion automatique -------------------------------------------------
+
+
+def test_the_merge_is_armed_automatically(workflow):
+    """Demandé par l'utilisateur : monter la version VAUT décision
+    de publier.
+
+    `--auto` ne fusionne pas sur-le-champ : GitHub attend que les
+    contrôles exigés passent. Un échec de `check_version` ou de
+    `pytest` laisse la pull request ouverte, et rien ne part.
+    """
+    commandes = _commandes(workflow, "open_pr")
+
+    assert "gh pr merge --auto" in commandes, (
+        "la fusion n'est pas armée automatiquement"
+    )
+
+
+def test_an_unavailable_auto_merge_does_not_fail_the_job(workflow):
+    """Le réglage « Allow auto-merge » peut être désactivé.
+
+    La PR reste alors ouverte et se fusionne à la main : un confort
+    perdu ne doit pas faire rougir la CI, ni masquer le fait que la
+    pull request a bien été créée.
+    """
+    commandes = _commandes(workflow, "open_pr")
+    bloc = commandes[commandes.index("gh pr merge"):]
+
+    assert "else" in bloc and "::warning::" in bloc, (
+        "un refus de fusion automatique ferait échouer le job"
+    )
+
+
+def test_the_auto_merge_never_bypasses_the_checks(workflow):
+    """Ni `--admin` ni aucun contournement.
+
+    `gh pr merge --admin` passe OUTRE la protection de branche :
+    il fusionnerait même avec des tests rouges, ce qui annulerait
+    toute la chaîne.
+    """
+    commandes = _commandes(workflow, "open_pr")
+
+    assert "--admin" not in commandes, (
+        "la fusion contourne la protection de branche"
+    )
