@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-VERSION="v0.14.0"
+VERSION="v0.15.0"
 DEPOT="git+https://github.com/romainh3nry/TortoisePy@${VERSION}"
 
 echo "tortoisePy ${VERSION}"
