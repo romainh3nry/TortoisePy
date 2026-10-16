@@ -153,15 +153,32 @@ def test_capture_dialog_reports_portable_text_not_native(qtbot):
 
     Seul endroit où la conversion portable/natif peut casser sans qu'aucun
     test ne le voie : les autres tests contournent le dialogue.
+
+    La comparaison porte sur le FORMAT demandé, et non sur « le résultat
+    diffère du natif ». Cette seconde formulation passait sur macOS par
+    accident de plateforme — natif y vaut « ⌘J » — et échouait sur Linux,
+    où natif et portable valent tous deux « Ctrl+J ». Elle ne prouvait donc
+    rien là où elle passait, et criait au loup là où tout allait bien
+    (relevé par la CI au premier passage).
+
+    Ce qui compte réellement : la méthode demande `PortableText`. On
+    l'éprouve avec une séquence dont les deux formats divergent sur
+    macOS et coïncident ailleurs — dans les deux cas, le résultat doit
+    être le portable.
     """
     from tortoisepy.ui.shortcuts_window import _CaptureDialog
 
     dialogue = _CaptureDialog("commit")
     qtbot.addWidget(dialogue)
-    dialogue.editeur.setKeySequence(QKeySequence("Ctrl+J"))
 
-    assert dialogue.sequence_portable() == "Ctrl+J"
-    natif = QKeySequence("Ctrl+J").toString(QKeySequence.SequenceFormat.NativeText)
-    assert dialogue.sequence_portable() != natif, (
-        "le dialogue rend du texte natif : illisible sur une autre plateforme"
-    )
+    for sequence in ("Ctrl+J", "Ctrl+Shift+S", "Meta+K"):
+        attendu = QKeySequence(sequence).toString(
+            QKeySequence.SequenceFormat.PortableText
+        )
+        dialogue.editeur.setKeySequence(QKeySequence(sequence))
+
+        assert dialogue.sequence_portable() == attendu, (
+            f"« {sequence} » rendu « {dialogue.sequence_portable()} » "
+            f"au lieu de « {attendu} » : le dialogue ne demande pas "
+            "le format portable"
+        )
