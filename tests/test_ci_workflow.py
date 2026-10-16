@@ -379,3 +379,85 @@ def test_the_sync_is_idempotent(workflow):
     assert "merge-base --is-ancestor" in commandes, (
         "le job ne vérifie pas si develop contient déjà main"
     )
+
+
+# --- la pull request ouverte sur changement de version -----------------
+
+
+def test_the_pr_opens_only_on_develop(workflow):
+    """Demandé par l'utilisateur : « on peut push sur develop sans
+    trigger la MR si le fichier n'est pas modifié »."""
+    condition = workflow["jobs"]["open_pr"]["if"]
+
+    assert "refs/heads/develop" in condition, condition
+    assert "push" in condition, condition
+
+
+def test_the_pr_opens_on_a_version_change_not_a_file_change(workflow):
+    """La précision demandée : détecter la LIGNE, pas le fichier.
+
+    Mesuré sur l'historique : deux commits ont modifié
+    `pyproject.toml` sans toucher la version — l'ajout de PyYAML, et
+    une dépendance pour la coloration syntaxique. Un déclencheur
+    `paths: pyproject.toml` aurait ouvert deux pull requests
+    inutiles.
+
+    Le job compare donc la version AVANT et APRÈS le push.
+    """
+    commandes = _commandes(workflow, "open_pr")
+
+    assert 'if [ "$version" = "$precedente" ]' in commandes, (
+        "le job n'oppose pas la version nouvelle à l'ancienne"
+    )
+
+
+def test_the_comparison_uses_the_state_before_the_push(workflow):
+    """`github.event.before`, et non `HEAD^`.
+
+    Un push peut porter plusieurs commits : si la montée de version
+    est dans le premier, comparer au commit parent la manquerait.
+    """
+    etapes = workflow["jobs"]["open_pr"]["steps"]
+    avec_env = [e for e in etapes if "AVANT" in str(e.get("env", {}))]
+
+    assert avec_env, "le job ne lit pas l'état antérieur au push"
+    assert "github.event.before" in str(avec_env[0]["env"]["AVANT"])
+
+
+def test_a_new_branch_is_not_a_version_change(workflow):
+    """À la création d'une branche, GitHub donne `0000…` comme état
+    antérieur : il n'y a rien à comparer, et tenter le ferait
+    échouer."""
+    commandes = _commandes(workflow, "open_pr")
+
+    assert "0000000000000000000000000000000000000000" in commandes, (
+        "la création de branche n'est pas traitée"
+    )
+
+
+def test_it_does_not_open_a_second_pr(workflow):
+    """Une PR ouverte se met à jour seule quand on pousse.
+
+    En ouvrir une seconde échouerait, et ferait rougir la CI sans
+    raison valable.
+    """
+    commandes = _commandes(workflow, "open_pr")
+
+    # La condition ENTIÈRE, et non le seul `gh pr list` : une
+    # vérification dont le résultat n'est pas testé ne protège rien.
+    # Trouvé par mutation — remplacer `-n` par `-z` laissait le test
+    # passer tout en inversant le sens du garde.
+    assert 'if [ -n "$(gh pr list' in commandes, (
+        "le job ne branche pas sur la présence d'une pull request : "
+        f"{commandes[:200]}"
+    )
+    assert "--state open" in commandes, (
+        "une pull request fermée compterait comme ouverte"
+    )
+
+
+def test_the_pr_job_may_write_pull_requests(workflow):
+    """Sans ce droit, `gh pr create` échoue sur un refus d'accès."""
+    permissions = workflow["jobs"]["open_pr"].get("permissions", {})
+
+    assert permissions.get("pull-requests") == "write", permissions
