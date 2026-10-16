@@ -1,0 +1,65 @@
+# Suite de tests sur chaque pull request et sur les deux branches
+# longues. Gratuit : le dépôt est public, et GitHub n'y facture pas
+# les runners hébergés.
+#
+# Le but n'est pas d'informer mais de BLOQUER : la protection de
+# `main` (Settings → Branches) exige ce job avant toute fusion. Sans
+# elle, la CI afficherait une croix que rien n'empêcherait d'ignorer.
+
+name: tests
+
+# `pull_request` SEULEMENT, et non `push` : sinon une seule version
+# déclencherait trois exécutions — le push sur `develop`, la PR, puis
+# le push de fusion sur `main` — dont deux sur exactement le même
+# code. La PR est le moment utile : c'est elle que la protection de
+# branche bloque.
+on:
+  pull_request:
+  # Filet pour les commits qui atterrissent sur une branche longue
+  # sans passer par une PR (correction directe, fusion en local).
+  push:
+    branches: [main]
+
+# Une PR poussée plusieurs fois d'affilée n'a pas besoin de ses
+# exécutions précédentes : on annule, et on n'occupe pas la file.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    # La suite tourne en ~9 min localement ; un runner est plus lent.
+    # La limite évite qu'un test bloqué occupe une heure entière.
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # PySide6 réclame ces bibliothèques même en mode offscreen :
+      # sans elles, l'import échoue sur `libEGL.so.1` introuvable, et
+      # le message ne nomme pas la cause.
+      - name: Dépendances système de Qt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libxkbcommon-x11-0 libdbus-1-3
+
+      # Les tests lancent `git` en sous-processus. Ils fournissent tous
+      # une identité par variables d'environnement, mais `git init`
+      # avertirait encore sur la branche par défaut.
+      - name: Identité Git
+        run: |
+          git config --global init.defaultBranch main
+          git config --global user.name "CI"
+          git config --global user.email "ci@example.invalid"
+
+      - run: pip install -e ".[dev]"
+
+      # `QT_QPA_PLATFORM` est déjà posé par `tests/conftest.py`, avant
+      # le premier import de PySide6 ; on ne le répète pas ici.
+      - run: pytest -q
