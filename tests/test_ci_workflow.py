@@ -229,3 +229,153 @@ def test_the_release_comes_after_the_tag(workflow):
     }
 
     assert rangs["tag"] < rangs["release"], rangs
+
+
+# --- la version, vérifiée avant les tests -------------------------------
+
+
+def _commandes(workflow, job) -> str:
+    return " ".join(e.get("run", "") for e in workflow["jobs"][job]["steps"])
+
+
+def test_the_version_is_checked_before_the_tests(workflow):
+    """Échouer en quinze secondes, pas en dix minutes.
+
+    Avant, une version déjà taguée passait toute la suite puis
+    échouait dans le job `tag` — dix minutes pour apprendre une chose
+    vérifiable d'emblée.
+    """
+    assert workflow["jobs"]["pytest"].get("needs") == "check_version", (
+        "les tests ne dépendent pas de la vérification de version"
+    )
+
+
+def test_it_refuses_an_existing_tag(workflow):
+    """La version doit être libre.
+
+    Sans ce contrôle, le job `tag` échouerait après coup sur
+    « tag already exists », et la PR aurait été fusionnée entre-temps.
+    """
+    assert "rev-parse" in _commandes(workflow, "check_version")
+
+
+def test_it_compares_versions_numerically(workflow):
+    """`sort -V` et non un tri de chaînes.
+
+    En ordre alphabétique, « 0.9.0 » passe pour supérieur à
+    « 0.14.0 » : une version qui recule serait acceptée, et les
+    gestionnaires de paquets ne la proposeraient jamais comme mise à
+    jour.
+    """
+    commandes = _commandes(workflow, "check_version")
+
+    assert "sort -V" in commandes, (
+        "comparaison de versions sans tri naturel"
+    )
+
+
+def test_the_check_reads_pyproject(workflow):
+    """Source unique : la version ne s'écrit plus qu'à cet endroit."""
+    assert "pyproject.toml" in _commandes(workflow, "check_version")
+
+
+def test_the_check_fetches_the_tags(workflow):
+    """Un clone superficiel ne rapporte pas les tags.
+
+    Sans eux, la vérification répondrait toujours « version libre »,
+    et le contrôle ne contrôlerait rien.
+    """
+    etapes = workflow["jobs"]["check_version"]["steps"]
+    checkout = [e for e in etapes if "checkout" in str(e.get("uses", ""))]
+
+    assert checkout and checkout[0].get("with", {}).get("fetch-depth") == 0, (
+        f"les tags ne seront pas connus : {checkout}"
+    )
+
+
+# --- develop remis à niveau après la release ----------------------------
+
+
+def test_develop_is_synced_after_the_release(workflow):
+    """Demandé par l'utilisateur, et fait trois fois à la main.
+
+    Sans cette remise à niveau, la pull request suivante affiche
+    « This branch is out-of-date with the base branch » : la
+    protection exige d'avoir intégré `main` avant de fusionner.
+    """
+    sync = workflow["jobs"]["sync_develop"]
+
+    assert sync.get("needs") == "tag", (
+        f"la synchronisation ne suit pas le tag : needs={sync.get('needs')}"
+    )
+
+
+def test_the_sync_checks_out_develop(workflow):
+    """Le défaut invisible : sans `ref`, on récupère `main`.
+
+    Le job fusionnerait alors `main` dans `main`, ne verrait rien à
+    faire, et rapporterait un succès — `develop` resterait en arrière
+    sans que rien ne le signale.
+    """
+    etapes = workflow["jobs"]["sync_develop"]["steps"]
+    checkout = [e for e in etapes if "checkout" in str(e.get("uses", ""))]
+
+    assert checkout, "le job ne récupère pas le dépôt"
+    assert checkout[0].get("with", {}).get("ref") == "develop", (
+        f"la branche récupérée n'est pas develop : {checkout[0].get('with')}"
+    )
+
+
+def test_the_sync_can_push(workflow):
+    """Sans ce droit, la poussée échoue à la dernière ligne."""
+    permissions = workflow["jobs"]["sync_develop"].get("permissions", {})
+
+    assert permissions.get("contents") == "write", permissions
+
+
+def test_a_conflict_aborts_instead_of_half_merging(workflow):
+    """Une fusion en conflit ne doit rien laisser à moitié appliqué.
+
+    Le piège : un `git merge` qui échoue laisse l'index en état de
+    conflit. Pousser ensuite, ou laisser la branche ainsi, demanderait
+    un rattrapage que personne n'attend d'un job automatique.
+    """
+    commandes = _commandes(workflow, "sync_develop")
+
+    assert "merge --abort" in commandes, (
+        "un conflit laisserait develop à moitié fusionné"
+    )
+
+
+def test_the_sync_never_rewrites_develop(workflow):
+    """Ni rebase ni force : `develop` est partagé.
+
+    Le réécrire casserait les clones des autres postes — et
+    l'utilisateur travaille depuis plusieurs machines.
+    """
+    # Les lignes de COMMENTAIRE sont écartées : celle qui explique
+    # pourquoi on n'utilise pas de rebase contient le mot, et le test
+    # échouait sur sa propre justification.
+    lignes = [
+        ligne.strip()
+        for ligne in _commandes(workflow, "sync_develop").splitlines()
+        if ligne.strip() and not ligne.strip().startswith("#")
+    ]
+    code = " ".join(lignes)
+
+    assert "git rebase" not in code, code
+    assert "--force" not in code, code
+
+
+def test_the_sync_is_idempotent(workflow):
+    """Rejouer le job ne doit pas créer une fusion vide.
+
+    Le job tourne à chaque poussée sur `main`, y compris celles qui ne
+    changent pas la version : sans ce garde-fou, chacune ajouterait un
+    commit de fusion sans contenu.
+    """
+    commandes = _commandes(workflow, "sync_develop")
+
+    assert "merge-base --is-ancestor" in commandes, (
+        "le job ne vérifie pas si develop contient déjà main"
+    )

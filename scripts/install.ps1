@@ -13,10 +13,11 @@
 
 $ErrorActionPreference = "Stop"
 
-$Version = "v0.17.0"
-$Depot = "git+https://github.com/romainh3nry/TortoisePy@$Version"
+# `@main` et non un tag figé : la version ne s'écrit plus qu'à UN
+# endroit, `pyproject.toml` (cf. `install.sh`).
+$Depot = "git+https://github.com/romainh3nry/TortoisePy@main"
 
-Write-Host "tortoisePy $Version"
+Write-Host "tortoisePy"
 Write-Host ""
 
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {

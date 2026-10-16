@@ -75,7 +75,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh          # macOS / Linux
 winget install astral-sh.uv                              # Windows
 
 # 2. Install tortoisePy
-uv tool install git+https://github.com/romainh3nry/TortoisePy@v0.17.0
+uv tool install git+https://github.com/romainh3nry/TortoisePy@main
 ```
 
 ### Why uv rather than pip
@@ -213,29 +213,24 @@ start:
 
 ## Releasing
 
-The version lives in **one place**: the `version` field of `pyproject.toml`.
-Everything else — the install URLs in this README, the `VERSION` variable in
-both installers — is a copy, and one script rewrites them all:
+The version lives in **one place**: the `version` field of
+`pyproject.toml`. Nothing else holds a copy — the installers and the
+commands above all point at `main`, so they never go stale.
 
-```bash
-python scripts/set-version.py X.Y.Z
-```
+To release:
 
-It prints what it changed, refreshes your local `.venv` so
-`topy --version` keeps up, and leaves Git alone. Commit, then tag:
+1. Edit `version` in `pyproject.toml`, commit, open a pull request.
+2. CI checks the version is new and moves forward, then runs the suite.
+3. Merge. CI tags the merge commit and publishes the release.
 
-```bash
-git tag vX.Y.Z && git push origin vX.Y.Z
-```
+That is the whole process. The tag and the GitHub release are created
+by the `tag` job in `.github/workflows/tests.yml`, which reads the
+version straight from `pyproject.toml` — so the tag, the installed
+package and `topy --version` cannot disagree.
 
-The tag matters: the install commands above point at it, so a release without
-one gives a 404.
-
-Why copies rather than a single value read at runtime: both installers run
-*before* anything is cloned, so `pyproject.toml` does not yet exist on the
-user's machine when `curl … | sh` starts. Their version has to be written in.
-Three tests keep the copies honest — one of them fails if a new file ever
-pins the version without being declared in the script.
+Branch protection requires the test suite to pass before `main` can be
+merged into, which is what makes the automatic tag safe: nothing
+reaches `main` untested.
 
 ## Licence
 

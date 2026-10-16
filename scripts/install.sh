@@ -10,10 +10,15 @@
 
 set -euo pipefail
 
-VERSION="v0.17.0"
-DEPOT="git+https://github.com/romainh3nry/TortoisePy@${VERSION}"
+# `@main` et non un tag figé : la version ne s'écrit plus qu'à UN
+# endroit, `pyproject.toml`. Avant, quatre fichiers la portaient, et
+# en oublier un publiait un installeur qui posait la précédente.
+#
+# `main` est la production de ce projet : rien n'y entre sans pull
+# request verte, et le job de la CI y pose tag et release.
+DEPOT="git+https://github.com/romainh3nry/TortoisePy@main"
 
-echo "tortoisePy ${VERSION}"
+echo "tortoisePy"
 echo
 
 if ! command -v uv >/dev/null 2>&1; then
