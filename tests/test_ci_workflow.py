@@ -17,6 +17,7 @@ import pytest
 
 RACINE = Path(__file__).resolve().parent.parent
 WORKFLOW = RACINE / ".github" / "workflows" / "tests.yml"
+OUVERTURE = RACINE / ".github" / "workflows" / "open-pr.yml"
 
 
 @pytest.fixture
@@ -25,6 +26,18 @@ def workflow():
         "yaml", reason="pyyaml absent : `uv pip install pyyaml`"
     )
     return yaml.safe_load(WORKFLOW.read_text())
+
+
+@pytest.fixture
+def ouverture():
+    """Le workflow qui ouvre la pull request.
+
+    Séparé de `tests.yml` pour que les contrôles de celui-ci
+    n'existent que sur une pull request — voir
+    `test_no_check_exists_on_a_develop_push`.
+    """
+    yaml = pytest.importorskip("yaml")
+    return yaml.safe_load(OUVERTURE.read_text())
 
 
 def test_the_workflow_exists():
@@ -384,16 +397,16 @@ def test_the_sync_is_idempotent(workflow):
 # --- la pull request ouverte sur changement de version -----------------
 
 
-def test_the_pr_opens_only_on_develop(workflow):
+def test_the_pr_opens_only_on_develop(ouverture):
     """Demandé par l'utilisateur : « on peut push sur develop sans
     trigger la MR si le fichier n'est pas modifié »."""
-    condition = workflow["jobs"]["open_pr"]["if"]
+    condition = ouverture["jobs"]["open_pr"]["if"]
 
     assert "refs/heads/develop" in condition, condition
     assert "push" in condition, condition
 
 
-def test_the_pr_opens_on_a_version_change_not_a_file_change(workflow):
+def test_the_pr_opens_on_a_version_change_not_a_file_change(ouverture):
     """La précision demandée : détecter la LIGNE, pas le fichier.
 
     Mesuré sur l'historique : deux commits ont modifié
@@ -404,44 +417,44 @@ def test_the_pr_opens_on_a_version_change_not_a_file_change(workflow):
 
     Le job compare donc la version AVANT et APRÈS le push.
     """
-    commandes = _commandes(workflow, "open_pr")
+    commandes = _commandes(ouverture, "open_pr")
 
     assert 'if [ "$version" = "$precedente" ]' in commandes, (
         "le job n'oppose pas la version nouvelle à l'ancienne"
     )
 
 
-def test_the_comparison_uses_the_state_before_the_push(workflow):
+def test_the_comparison_uses_the_state_before_the_push(ouverture):
     """`github.event.before`, et non `HEAD^`.
 
     Un push peut porter plusieurs commits : si la montée de version
     est dans le premier, comparer au commit parent la manquerait.
     """
-    etapes = workflow["jobs"]["open_pr"]["steps"]
+    etapes = ouverture["jobs"]["open_pr"]["steps"]
     avec_env = [e for e in etapes if "AVANT" in str(e.get("env", {}))]
 
     assert avec_env, "le job ne lit pas l'état antérieur au push"
     assert "github.event.before" in str(avec_env[0]["env"]["AVANT"])
 
 
-def test_a_new_branch_is_not_a_version_change(workflow):
+def test_a_new_branch_is_not_a_version_change(ouverture):
     """À la création d'une branche, GitHub donne `0000…` comme état
     antérieur : il n'y a rien à comparer, et tenter le ferait
     échouer."""
-    commandes = _commandes(workflow, "open_pr")
+    commandes = _commandes(ouverture, "open_pr")
 
     assert "0000000000000000000000000000000000000000" in commandes, (
         "la création de branche n'est pas traitée"
     )
 
 
-def test_it_does_not_open_a_second_pr(workflow):
+def test_it_does_not_open_a_second_pr(ouverture):
     """Une PR ouverte se met à jour seule quand on pousse.
 
     En ouvrir une seconde échouerait, et ferait rougir la CI sans
     raison valable.
     """
-    commandes = _commandes(workflow, "open_pr")
+    commandes = _commandes(ouverture, "open_pr")
 
     # La condition ENTIÈRE, et non le seul `gh pr list` : une
     # vérification dont le résultat n'est pas testé ne protège rien.
@@ -456,9 +469,9 @@ def test_it_does_not_open_a_second_pr(workflow):
     )
 
 
-def test_the_pr_job_may_write_pull_requests(workflow):
+def test_the_pr_job_may_write_pull_requests(ouverture):
     """Sans ce droit, `gh pr create` échoue sur un refus d'accès."""
-    permissions = workflow["jobs"]["open_pr"].get("permissions", {})
+    permissions = ouverture["jobs"]["open_pr"].get("permissions", {})
 
     assert permissions.get("pull-requests") == "write", permissions
 
@@ -466,7 +479,7 @@ def test_the_pr_job_may_write_pull_requests(workflow):
 # --- fusion automatique -------------------------------------------------
 
 
-def test_the_merge_is_armed_automatically(workflow):
+def test_the_merge_is_armed_automatically(ouverture):
     """Demandé par l'utilisateur : monter la version VAUT décision
     de publier.
 
@@ -474,14 +487,14 @@ def test_the_merge_is_armed_automatically(workflow):
     contrôles exigés passent. Un échec de `check_version` ou de
     `pytest` laisse la pull request ouverte, et rien ne part.
     """
-    commandes = _commandes(workflow, "open_pr")
+    commandes = _commandes(ouverture, "open_pr")
 
     assert "gh pr merge --auto" in commandes, (
         "la fusion n'est pas armée automatiquement"
     )
 
 
-def test_an_unavailable_auto_merge_is_reported_loudly(workflow):
+def test_an_unavailable_auto_merge_is_reported_loudly(ouverture):
     """Un échec silencieux est pire qu'un échec bruyant.
 
     Première version de ce job : un refus de fusion automatique
@@ -494,7 +507,7 @@ def test_an_unavailable_auto_merge_is_reported_loudly(workflow):
     rougir la CI » — était mauvais : une automatisation qui ne
     marche pas et qui se tait coûte plus qu'une croix rouge.
     """
-    commandes = _commandes(workflow, "open_pr")
+    commandes = _commandes(ouverture, "open_pr")
 
     # Le bloc QUI SUIT immédiatement l'appel, et non le reste du
     # script : la vérification d'état plus bas contient elle aussi
@@ -512,29 +525,77 @@ def test_an_unavailable_auto_merge_is_reported_loudly(workflow):
     )
 
 
-def test_the_auto_merge_is_verified_not_assumed(workflow):
+def test_the_auto_merge_is_verified_not_assumed(ouverture):
     """Un code de retour nul ne prouve pas que la fusion est armée.
 
     On interroge donc `autoMergeRequest` sur la pull request :
     c'est le seul état qui compte, et c'est lui qui valait `None`
     alors que le job se croyait en succès.
     """
-    commandes = _commandes(workflow, "open_pr")
+    commandes = _commandes(ouverture, "open_pr")
 
     assert "autoMergeRequest" in commandes, (
         "le job suppose que la fusion est armée sans le vérifier"
     )
 
 
-def test_the_auto_merge_never_bypasses_the_checks(workflow):
+def test_the_auto_merge_never_bypasses_the_checks(ouverture):
     """Ni `--admin` ni aucun contournement.
 
     `gh pr merge --admin` passe OUTRE la protection de branche :
     il fusionnerait même avec des tests rouges, ce qui annulerait
     toute la chaîne.
     """
-    commandes = _commandes(workflow, "open_pr")
+    commandes = _commandes(ouverture, "open_pr")
 
     assert "--admin" not in commandes, (
         "la fusion contourne la protection de branche"
+    )
+
+
+# --- le contrôle exigé ne doit avoir aucun homonyme --------------------
+
+
+def test_no_check_exists_on_a_develop_push(workflow):
+    """LE défaut qui a laissé fusionner du code non testé.
+
+    Chronologie de la PR #25, relevée sur l'API :
+
+        12:51:22  pull request créée
+        12:51:26  les tests démarrent
+        12:51:27  PULL REQUEST FUSIONNÉE
+        12:53:26  les tests finissent
+
+    La protection exige le contrôle nommé `pytest`. Or un push sur
+    `develop` déclenchait le workflow entier : `pytest` y était
+    déclaré « skipped », terminé à 12:51:14 — avant même que la
+    pull request n'existe. GitHub traite « skipped » comme neutre,
+    neutre satisfait l'exigence, et la fusion est passée.
+
+    La correction : `tests.yml` n'est plus déclenché par un push sur
+    `develop`. Ses jobs n'existent donc plus comme contrôles à ce
+    moment-là, et aucun homonyme ne peut satisfaire la protection à
+    la place du vrai.
+    """
+    declencheurs = workflow[True] if True in workflow else workflow["on"]
+    push = declencheurs.get("push") or {}
+
+    assert "develop" not in push.get("branches", []), (
+        "un push sur develop créerait des contrôles « skipped » "
+        "portant les mêmes noms que ceux exigés par la protection"
+    )
+
+
+def test_the_pr_opener_lives_in_its_own_workflow(ouverture):
+    """Et c'est la raison de la séparation.
+
+    Garder `open_pr` dans `tests.yml` imposerait d'y déclencher le
+    push sur `develop` — ce que le test précédent interdit.
+    """
+    declencheurs = ouverture[True] if True in ouverture else ouverture["on"]
+
+    assert list(declencheurs) == ["push"], declencheurs
+    assert declencheurs["push"]["branches"] == ["develop"], declencheurs
+    assert list(ouverture["jobs"]) == ["open_pr"], (
+        "ce workflow ne doit porter que l'ouverture de la PR"
     )
