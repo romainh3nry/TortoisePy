@@ -8,15 +8,17 @@
 
 name: tests
 
-# `pull_request` SEULEMENT, et non `push` : sinon une seule version
-# déclencherait trois exécutions — le push sur `develop`, la PR, puis
-# le push de fusion sur `main` — dont deux sur exactement le même
-# code. La PR est le moment utile : c'est elle que la protection de
-# branche bloque.
+# `pull_request` seulement pour les TESTS. Mesuré : le commit de
+# fusion dans `main` a un contenu rigoureusement identique à celui
+# déjà testé sur la PR — « Update branch » y a intégré `main` avant
+# la fusion, et la protection de branche l'exige. Les relancer
+# coûtait dix minutes pour refaire le même travail, et retardait
+# d'autant la pose du tag.
+#
+# Le job `tag`, lui, se déclenche sur `push: main` : voir sa propre
+# note.
 on:
   pull_request:
-  # Filet pour les commits qui atterrissent sur une branche longue
-  # sans passer par une PR (correction directe, fusion en local).
   push:
     branches: [main]
 
@@ -28,6 +30,9 @@ concurrency:
 
 jobs:
   pytest:
+    # Pas sur `push: main` : ce commit a déjà été testé sur la PR, au
+    # contenu près (vérifié avec `git diff` entre les deux).
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     # La suite tourne en ~9 min localement ; un runner est plus lent.
     # La limite évite qu'un test bloqué occupe une heure entière.
@@ -65,9 +70,16 @@ jobs:
       - run: pytest -q
 
   # Le tag est posé par la CI, et non depuis un poste de travail :
-  # `needs: pytest` le rend incapable de taguer du code qui n'a pas
-  # passé les tests. C'est la garantie qu'un script local n'aura
-  # jamais.
+  # il lit la version dans le code RÉELLEMENT fusionné, donc aucun
+  # écart n'est possible entre ce que le tag annonce et ce que le
+  # paquet contient. C'est la garantie qu'un script local n'a pas —
+  # deux incidents de tag mal placé l'ont montré.
+  #
+  # Pas de `needs: pytest` : sur `main`, les tests ne tournent plus
+  # (ils l'ont fait sur la PR, au contenu identique). La protection
+  # de branche exige déjà `pytest` vert ET la branche à jour avant
+  # toute fusion — rien ne peut donc atteindre `main` sans avoir été
+  # éprouvé.
   #
   # Il lit la version dans `pyproject.toml`, source unique : c'est elle
   # que `importlib.metadata` sert à `topy --version`, et elle
@@ -75,7 +87,6 @@ jobs:
   # seconde, et le jour où les deux divergent, le tag annoncerait
   # autre chose que le paquet.
   tag:
-    needs: pytest
     # Uniquement sur `main`, et seulement après une fusion — jamais
     # depuis une pull request, où le code n'est pas encore en
     # production.
@@ -113,3 +124,32 @@ jobs:
           git tag "v$version"
           git push origin "v$version"
           echo "::notice::Tag v$version posé sur $(git rev-parse --short HEAD)"
+
+      - name: Publier la release
+        # Dans le MÊME job que le tag : un job séparé devrait
+        # récupérer le dépôt à nouveau pour une seule commande, et
+        # pourrait s'exécuter alors que le tag a échoué.
+        #
+        # Un tag suffit à installer — `curl | sh` ne lit que lui —
+        # mais la release est ce qu'affiche l'onglet du dépôt et le
+        # fil des personnes qui le suivent. Les quatorze premières
+        # versions en avaient une ; les trois suivantes, posées par
+        # script, n'en ont pas, et l'historique semblait s'arrêter.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "Release v$version déjà publiée."
+            exit 0
+          fi
+
+          # `--generate-notes` rédige les notes depuis les commits et
+          # les PR fusionnées : rien à écrire à la main, et le contenu
+          # suit ce qui a réellement changé.
+          gh release create "v$version" \
+            --title "v$version" \
+            --generate-notes
+          echo "::notice::Release v$version publiée"
