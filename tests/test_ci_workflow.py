@@ -31,17 +31,42 @@ def test_the_workflow_exists():
     assert WORKFLOW.is_file()
 
 
-def test_the_tag_job_waits_for_the_tests(workflow):
-    """LA propriété qui justifie de taguer depuis la CI.
+def test_the_tests_do_not_run_twice_on_the_same_code(workflow):
+    """Les tests ne tournent que sur la pull request.
 
-    Sans `needs`, GitHub lance les deux jobs en parallèle : un tag
-    pourrait être posé sur du code dont les tests échouent, et
-    l'utilisateur l'installerait.
+    Relevé par l'utilisateur : « les tests on les a déjà faits
+    avant ». Vérifié par `git diff` entre le dernier commit de la PR
+    et le commit de fusion — contenu rigoureusement identique, parce
+    que la protection de branche exige d'avoir intégré `main` avant
+    de fusionner.
+
+    Les relancer coûtait dix minutes pour refaire le même travail, et
+    retardait d'autant la pose du tag.
     """
-    tag = workflow["jobs"]["tag"]
+    pytest_job = workflow["jobs"]["pytest"]
 
-    assert tag.get("needs") == "pytest", (
-        f"le job `tag` ne dépend pas des tests : needs={tag.get('needs')}"
+    assert pytest_job.get("if") == "github.event_name == 'pull_request'", (
+        f"les tests tournent hors PR : if={pytest_job.get('if')}"
+    )
+
+
+def test_nothing_reaches_main_untested(workflow):
+    """Ce qui remplace `needs: pytest`, et le vaut.
+
+    Le job `tag` n'attend plus les tests, puisqu'ils ne tournent plus
+    sur `main`. La garantie vient désormais de la protection de
+    branche : elle exige `pytest` vert ET la branche à jour avant
+    toute fusion.
+
+    Ce test ne peut pas vérifier un réglage GitHub. Il épingle
+    l'autre moitié du contrat : les tests DOIVENT tourner sur chaque
+    pull request, sans quoi la protection n'aurait rien à exiger.
+    """
+    declencheurs = workflow[True] if True in workflow else workflow["on"]
+
+    assert "pull_request" in declencheurs, (
+        "aucun test sur les PR : la protection de branche ne peut "
+        "plus rien exiger, et du code non testé atteindrait `main`"
     )
 
 
@@ -126,3 +151,81 @@ def test_the_tag_job_fetches_the_history(workflow):
     assert checkout[0].get("with", {}).get("fetch-depth") == 0, (
         f"les tags ne seront pas connus : {checkout[0]}"
     )
+
+
+# --- la release, au-delà du tag -----------------------------------------
+
+
+def _commandes_du_job_tag(workflow) -> str:
+    return " ".join(
+        etape.get("run", "") for etape in workflow["jobs"]["tag"]["steps"]
+    )
+
+
+def test_a_release_is_published(workflow):
+    """Un tag suffit à installer, pas à se voir.
+
+    Signalé par l'utilisateur : les nouveaux tags n'apparaissaient pas
+    dans l'onglet « Releases ». Un tag est une référence Git ; une
+    release est un objet GitHub par-dessus, seul affiché dans l'onglet
+    et dans le fil des personnes qui suivent le dépôt.
+
+    Mesuré au moment du signalement : quatorze releases publiées, mais
+    trois tags récents sans release — l'historique semblait s'arrêter
+    à la v0.14.0.
+    """
+    assert "gh release create" in _commandes_du_job_tag(workflow)
+
+
+def test_the_release_is_skipped_when_it_exists(workflow):
+    """Même raison que pour le tag : trois fusions sur huit ne
+    changent pas la version, et une CI qui rougit à tort est une CI
+    qu'on apprend à ignorer."""
+    commandes = _commandes_du_job_tag(workflow)
+
+    assert "gh release view" in commandes, (
+        "le job ne vérifie pas si la release existe déjà"
+    )
+
+
+def test_the_release_notes_are_generated(workflow):
+    """Des notes écrites à la main seraient vite abandonnées.
+
+    `--generate-notes` les tire des commits et des PR fusionnées :
+    rien à rédiger, et le contenu suit ce qui a réellement changé.
+    """
+    assert "--generate-notes" in _commandes_du_job_tag(workflow)
+
+
+def test_the_release_step_has_a_token(workflow):
+    """Sans `GH_TOKEN`, `gh` échoue sur « not authenticated ».
+
+    Le piège : l'étape semble correcte, et n'échoue qu'à l'exécution.
+    """
+    etapes = workflow["jobs"]["tag"]["steps"]
+    release = [e for e in etapes if "gh release" in e.get("run", "")]
+
+    assert release, "aucune étape ne publie de release"
+    assert "GH_TOKEN" in release[0].get("env", {}), (
+        f"jeton absent : {release[0].get('env')}"
+    )
+
+
+def test_the_release_comes_after_the_tag(workflow):
+    """Une release sans son tag n'a rien à pointer.
+
+    L'ordre des étapes est la seule chose qui le garantit, puisque
+    les deux vivent dans le même job.
+    """
+    etapes = workflow["jobs"]["tag"]["steps"]
+    rangs = {
+        "tag": next(
+            i for i, e in enumerate(etapes) if "git tag" in e.get("run", "")
+        ),
+        "release": next(
+            i for i, e in enumerate(etapes)
+            if "gh release create" in e.get("run", "")
+        ),
+    }
+
+    assert rangs["tag"] < rangs["release"], rangs
