@@ -215,11 +215,91 @@ def test_the_reported_version_follows_the_package():
         f"{declaree}.\n"
         "Si vous venez de monter la version dans pyproject.toml, le "
         "venv local est resté en arrière :\n"
-        "    uv pip install -e . --no-deps\n"
+        "    ./scripts/refresh-venv.sh\n"
         "La CI ne connaît pas ce cas — elle installe le paquet à "
         "chaque exécution. Depuis la suppression de `set-version.py`, "
         "qui rafraîchissait le venv, c'est à faire à la main."
     )
+
+
+def test_the_refresh_script_exists_and_is_executable():
+    """Le geste orphelin a son outil.
+
+    Un venv éditable pointe sur les sources, mais ses MÉTADONNÉES —
+    dont la version — sont figées à l'installation. Monter la version
+    exige donc une réinstallation ; aucune autre modification ne le
+    demande.
+
+    `set-version.py` s'en chargeait avant d'être supprimé. Le geste
+    est resté orphelin, et
+    `test_the_reported_version_follows_the_package` a échoué deux
+    fois pour cette raison le 2026-10-16.
+    """
+    import os
+
+    script = RACINE / "scripts" / "refresh-venv.sh"
+
+    assert script.is_file(), "le script de rafraîchissement manque"
+    assert os.access(script, os.X_OK), "chmod +x manquant"
+
+
+def test_the_failure_message_names_the_script():
+    """Un message qui dit QUOI lancer vaut mieux qu'un qui décrit.
+
+    Sans cela, on retrouve la commande en cherchant dans
+    l'historique — ce qui est exactement ce que le script évite.
+    """
+    source = (RACINE / "tests" / "test_install_scripts.py").read_text()
+
+    assert "refresh-venv.sh" in source, (
+        "le message d'échec ne nomme pas le script qui corrige"
+    )
+
+
+def test_the_refresh_script_tries_uv_first():
+    """Le venv de ce projet n'embarque pas `pip`.
+
+    Il a été reconstruit avec `uv venv` le 2026-10-14, après
+    qu'Homebrew eut supprimé le Python 3.13 sur lequel pointait
+    l'ancien. Un script qui n'essaierait que `pip` échouerait
+    d'emblée.
+    """
+    contenu = (RACINE / "scripts" / "refresh-venv.sh").read_text()
+    code = [
+        ligne for ligne in contenu.splitlines()
+        if ligne.strip() and not ligne.strip().startswith("#")
+    ]
+    rang_uv = next(i for i, l in enumerate(code) if "uv pip install" in l)
+    rang_pip = next(
+        (i for i, l in enumerate(code) if "-m pip install" in l), 10**6
+    )
+
+    assert rang_uv < rang_pip, "`pip` est tenté avant `uv`"
+
+
+def test_the_refresh_script_checks_its_own_result():
+    """Une réinstallation peut réussir sans corriger la version.
+
+    Le piège : `uv pip install` rend 0, et `topy --version` reste en
+    arrière — c'est précisément ce qui s'est produit quand `pip`
+    manquait au venv. Le script doit éprouver son résultat.
+    """
+    contenu = (RACINE / "scripts" / "refresh-venv.sh").read_text()
+    code = [
+        ligne for ligne in contenu.splitlines()
+        if ligne.strip() and not ligne.strip().startswith("#")
+    ]
+
+    # La LECTURE puis la COMPARAISON : chercher « topy --version »
+    # dans le texte ne suffit pas, la chaîne figure aussi dans les
+    # commentaires et le message d'erreur. Trouvé par mutation —
+    # remplacer la lecture par `obtenue="$attendue"` laissait le test
+    # passer tout en désarmant la vérification.
+    lit = any("topy --version" in l and "obtenue=" in l for l in code)
+    compare = any('"$obtenue" != "$attendue"' in l for l in code)
+
+    assert lit, "le script ne lit pas la version réellement installée"
+    assert compare, "le script ne compare pas ce qu'il a obtenu"
 
 
 def test_the_readme_does_not_promise_uv_tool_upgrade():
