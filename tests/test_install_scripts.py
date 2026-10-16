@@ -211,7 +211,14 @@ def test_the_reported_version_follows_the_package():
     declaree = config["project"]["version"]
 
     assert __version__ == declaree, (
-        f"`topy --version` dit {__version__}, le paquet est en {declaree}"
+        f"`topy --version` dit {__version__}, le paquet est en "
+        f"{declaree}.\n"
+        "Si vous venez de monter la version dans pyproject.toml, le "
+        "venv local est resté en arrière :\n"
+        "    uv pip install -e . --no-deps\n"
+        "La CI ne connaît pas ce cas — elle installe le paquet à "
+        "chaque exécution. Depuis la suppression de `set-version.py`, "
+        "qui rafraîchissait le venv, c'est à faire à la main."
     )
 
 

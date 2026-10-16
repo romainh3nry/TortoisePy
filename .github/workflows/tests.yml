@@ -301,5 +301,23 @@ jobs:
           gh pr create \
             --base main --head develop \
             --title "v$version" \
-            --body "Version $precedente → $version. La CI vérifie la version, lance la suite, puis pose le tag et publie la release à la fusion."
+            --body "Version $precedente → $version. Fusion automatique dès que la CI est verte, puis tag et release."
           echo "::notice::Pull request ouverte pour la v$version"
+
+          # Fusion automatique, demandée par l'utilisateur : monter la
+          # version sur `develop` VAUT décision de publier.
+          #
+          # `--auto` ne fusionne pas tout de suite : GitHub attend que
+          # les contrôles exigés passent. Un échec de `check_version`
+          # ou de `pytest` laisse donc la pull request ouverte, et
+          # rien ne part. C'est la protection de branche qui tient la
+          # garantie, pas ce job.
+          #
+          # `|| true` : si la fusion automatique est refusée (réglage
+          # du dépôt désactivé), la PR reste ouverte et se fusionne à
+          # la main. Un confort perdu ne doit pas faire rougir la CI.
+          if gh pr merge --auto --merge; then
+            echo "::notice::Fusion automatique armée"
+          else
+            echo "::warning::Fusion automatique indisponible — à fusionner à la main"
+          fi
