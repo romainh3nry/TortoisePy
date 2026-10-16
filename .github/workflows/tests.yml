@@ -20,7 +20,7 @@ name: tests
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, develop]
 
 # Une PR poussée plusieurs fois d'affilée n'a pas besoin de ses
 # exécutions précédentes : on annule, et on n'occupe pas la file.
@@ -243,3 +243,63 @@ jobs:
 
           git push origin develop
           echo "::notice::develop remis à niveau sur main"
+
+  # Ouvre la pull request quand la VERSION change sur `develop`.
+  # Demandé par l'utilisateur, avec cette précision : détecter la
+  # ligne et non le fichier.
+  #
+  # Mesuré sur l'historique : deux commits ont modifié
+  # `pyproject.toml` sans toucher la version — l'ajout de PyYAML, et
+  # une dépendance pour la coloration syntaxique. Un déclencheur sur
+  # le fichier seul aurait ouvert deux pull requests inutiles.
+  open_pr:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ouvrir la PR si la version a changé
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AVANT: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+
+          # L'état AVANT le push, et non `HEAD^` : un push peut porter
+          # plusieurs commits, et la montée de version pourrait être
+          # dans le premier d'entre eux.
+          #
+          # Le `0000…` est la valeur que GitHub donne à la création
+          # d'une branche : il n'y a alors rien à comparer.
+          if [ -z "${AVANT:-}" ] || [ "$AVANT" = "0000000000000000000000000000000000000000" ]; then
+            echo "Pas d'état antérieur : rien à comparer."
+            exit 0
+          fi
+
+          precedente=$(git show "$AVANT:pyproject.toml" 2>/dev/null \
+            | grep -m1 '^version' | cut -d'"' -f2 || true)
+
+          if [ "$version" = "$precedente" ]; then
+            echo "Version inchangée ($version) : pas de pull request."
+            exit 0
+          fi
+
+          # Une PR déjà ouverte se met à jour toute seule quand on
+          # pousse : en ouvrir une seconde échouerait.
+          if [ -n "$(gh pr list --base main --head develop --state open --json number --jq '.[].number')" ]; then
+            echo "Une pull request est déjà ouverte."
+            exit 0
+          fi
+
+          gh pr create \
+            --base main --head develop \
+            --title "v$version" \
+            --body "Version $precedente → $version. La CI vérifie la version, lance la suite, puis pose le tag et publie la release à la fusion."
+          echo "::notice::Pull request ouverte pour la v$version"
