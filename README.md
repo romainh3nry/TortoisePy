@@ -75,7 +75,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh          # macOS / Linux
 winget install astral-sh.uv                              # Windows
 
 # 2. Install tortoisePy
-uv tool install git+https://github.com/romainh3nry/TortoisePy@v0.15.1
+uv tool install git+https://github.com/romainh3nry/TortoisePy@v0.16.0
 ```
 
 ### Why uv rather than pip
