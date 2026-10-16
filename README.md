@@ -65,19 +65,6 @@ The script installs [uv](https://docs.astral.sh/uv/) if you don't have it,
 then tortoisePy, then checks that the `topy` command actually answers — and
 tells you what to do if your `PATH` needs a line added.
 
-### If you'd rather not pipe a script into your shell
-
-That is a reasonable thing to refuse. Two steps instead:
-
-```bash
-# 1. Install uv — see https://docs.astral.sh/uv/getting-started/installation/
-curl -LsSf https://astral.sh/uv/install.sh | sh          # macOS / Linux
-winget install astral-sh.uv                              # Windows
-
-# 2. Install tortoisePy
-uv tool install git+https://github.com/romainh3nry/TortoisePy@main
-```
-
 ### Why uv rather than pip
 
 `uv tool install` puts tortoisePy in its own isolated environment, so it
@@ -170,6 +157,11 @@ Plus, outside the graph:
   next to each other
 - **Ahead / behind** — the status bar shows how far you have diverged from the
   server, as of your last fetch
+- **Open Project** — point it at the folder where you keep your projects, once;
+  the menu then lists every Git repository inside, two levels deep, and opens
+  one in its own window. The folder is remembered between launches
+- **Collapse the commit list** — a small arrow on the panel's edge folds it
+  away and gives the width back to the graph, which is what benefits from it
 
 ### On destructive operations
 
