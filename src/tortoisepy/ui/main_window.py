@@ -13,6 +13,7 @@ import pygit2
 from PySide6.QtCore import QByteArray, QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -747,10 +748,20 @@ class MainWindow(QMainWindow):
                 # `silencieux` : l'écran d'attente porte déjà une barre, et
                 # deux indicateurs pour une seule attente laissent croire à
                 # deux travaux distincts (signalé par l'utilisateur).
-                self.run_in_background(
+                # Le résultat est LU : `run_in_background` rend `False`
+                # quand le verrou d'opération est déjà pris. Signalé
+                # par l'utilisateur — le graphe n'était alors jamais
+                # construit, `graph_ready` jamais émis, et l'écran
+                # d'attente restait affiché pour toujours au-dessus
+                # d'une fenêtre vide.
+                if self.run_in_background(
                     lire, afficher, "Construction du graphe…",
                     silencieux=True,
-                )
+                ):
+                    return
+                # Le repli synchrone : mieux vaut un gel d'une seconde
+                # qu'un écran bloqué.
+                afficher(lire())
                 return
             afficher(lire())
             return
@@ -1089,10 +1100,7 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             )
             return
 
-        window = MainWindow(repository, settings=self.settings)
-        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self._recent_windows.add(window)
-        window.show()
+        self._ouvrir_dans_une_fenetre(repository)
 
 
     # --- le dossier de projets -----------------------------------------
@@ -1192,10 +1200,70 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             )
             return
 
-        window = MainWindow(repository, settings=self.settings)
+        self._ouvrir_dans_une_fenetre(repository)
+
+    def _ouvrir_dans_une_fenetre(self, repository) -> None:
+        """Ouvre `repository` à côté, avec écran d'attente si besoin.
+
+        Signalé par l'utilisateur : « l'app freeze quelques secondes le
+        temps d'ouvrir le projet, pourquoi le splash n'apparaît pas ? »
+
+        Parce que tout le mécanisme — `StartupSplash`, `defer_graph`,
+        `on_progress`, le signal `graph_ready` — vivait dans `cli.py`
+        et ne servait qu'au lancement en ligne de commande. Les deux
+        entrées de l'interface construisaient une `MainWindow` nue :
+        `build_graph` tournait sur le fil principal, et rien ne
+        s'affichait pendant ce temps. Mesuré ailleurs dans le projet :
+        1522 ms sur un dépôt de 935 nœuds.
+
+        Partagée par « Open Project » et « Open Recent » : deux boutons
+        voisins qui se comporteraient différemment surprendraient, et
+        le gel touchait les deux.
+        """
+        from tortoisepy.ui.splash import StartupSplash, should_show_splash
+
+        ecran = None
+        if should_show_splash(repository):
+            ecran = StartupSplash(Path(repository.workdir or ".").name)
+            ecran.show()
+            # Sans cela l'écran est créé mais jamais peint : la boucle
+            # d'événements ne reprend qu'après cette méthode.
+            QApplication.processEvents()
+
+        try:
+            # `defer_graph` seulement quand l'écran est montré : sur un
+            # petit dépôt, le mode synchrone évite un aller-retour
+            # entre fils pour 17 ms (cf. `cli.py`).
+            window = MainWindow(
+                repository,
+                settings=self.settings,
+                on_progress=ecran.pump if ecran is not None else None,
+                defer_graph=ecran is not None,
+            )
+        except Exception:
+            # Un écran orphelin resterait affiché pour toujours.
+            if ecran is not None:
+                ecran.finish()
+            raise
+
         window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._recent_windows.add(window)
         window.show()
+
+        if ecran is not None:
+            if window.graph is not None:
+                # Le graphe est DÉJÀ là : la construction s'est faite
+                # sur le fil principal, parce que le report en arrière-
+                # plan n'a pas pu démarrer (verrou pris). `graph_ready`
+                # a donc été émis dans le constructeur, avant cette
+                # connexion — s'y abonner maintenant laisserait l'écran
+                # pour toujours (signalé par l'utilisateur).
+                ecran.finish()
+            else:
+                # L'écran se retire quand le graphe est posé, pas après
+                # un délai : la construction dure une seconde ou dix
+                # selon le dépôt.
+                window.graph_ready.connect(ecran.finish)
 
     def find_branch(self) -> None:
         """Centre sur une branche correspondant au motif, puis cycle.
