@@ -106,48 +106,94 @@ def test_the_download_urls_point_at_a_stable_branch():
             )
 
 
-def test_the_scripts_install_a_pinned_tag():
-    """Ce que le script INSTALLE reste épinglé, et suit le paquet.
+def test_the_scripts_install_from_main():
+    """Les installeurs ne portent plus aucun numéro de version.
 
-    C'est la moitié du contrat que le changement d'URL ne doit pas
-    emporter. Un script servi depuis `main` qui installerait aussi
-    `main` livrerait du code non publié à quiconque lance la commande —
-    et `topy --version` annoncerait une version qui n'existe pas.
+    Choix de l'utilisateur. Avant, `VERSION="v0.17.0"` était écrit en
+    dur dans les deux scripts et dans le README : quatre fichiers à
+    maintenir d'accord, et une version oubliée publiait un installeur
+    qui posait la précédente.
+
+    `@main` supprime la synchronisation plutôt que de l'automatiser.
+    `pyproject.toml` reste le seul endroit où la version s'écrit, et
+    c'est lui que lit `importlib.metadata` pour `topy --version`.
+
+    Le compromis, assumé : l'installation suit `main` et non un tag
+    figé. Chez ce projet, `main` est la production et rien n'y entre
+    sans pull request verte.
     """
-    import tomllib
-
-    config = tomllib.loads((RACINE / "pyproject.toml").read_text())
-    attendu = {f"v{config['project']['version']}"}
-
     for nom in SCRIPTS:
         contenu = (RACINE / "scripts" / nom).read_text()
-        declarees = set(
-            re.findall(r'(?:VERSION|\$Version)\s*=\s*"(v[\d.]+)"', contenu)
+
+        assert "TortoisePy@main" in contenu, (
+            f"{nom} n'installe pas depuis `main`"
         )
-        assert declarees, f"{nom} n'épingle aucune version"
-        assert declarees == attendu, (
-            f"{nom} installe {declarees}, le paquet est en {attendu}"
+        epinglees = re.findall(
+            r'(?:VERSION|\$Version)\s*=\s*"v[\d.]+"', contenu
         )
-        assert "TortoisePy@" in contenu, (
-            f"{nom} doit viser une référence explicite, pas la branche "
-            "par défaut"
+        assert not epinglees, (
+            f"{nom} épingle encore une version : {epinglees}"
         )
 
 
-def test_the_readme_install_command_matches_the_package():
-    """Le README cite `uv tool install …@vX.Y.Z` : il doit suivre.
+def test_the_readme_holds_no_version():
+    """Le README cite des commandes à copier : aucune ne doit vieillir.
 
-    Cette commande-là garde son tag — c'est l'installation manuelle,
-    où l'on veut savoir ce qu'on pose.
+    Une commande qui nomme `v0.17.0` devient fausse à la version
+    suivante, et personne ne s'en aperçoit avant qu'un utilisateur
+    installe du code périmé.
+    """
+    readme = (RACINE / "README.md").read_text()
+
+    versionnees = re.findall(r"TortoisePy[@/]v[\d.]+", readme)
+    assert not versionnees, (
+        f"le README épingle des versions : {set(versionnees)}"
+    )
+
+
+def test_pyproject_is_the_only_place_a_version_is_written():
+    """Une seule source, et le reste la déduit.
+
+    Ce test est le garde-fou du choix : si quelqu'un réintroduit un
+    numéro ailleurs demain, la synchronisation manuelle revient avec
+    lui — et c'est exactement ce qu'on vient de supprimer.
     """
     import tomllib
 
     config = tomllib.loads((RACINE / "pyproject.toml").read_text())
     version = config["project"]["version"]
 
-    readme = (RACINE / "README.md").read_text()
-    tags = set(re.findall(r"TortoisePy@v([\d.]+)", readme))
-    assert tags == {version}, f"README annonce {tags}, le paquet est en {version}"
+    # On interroge Git plutôt que d'exclure des dossiers à la main :
+    # `src/tortoisepy.egg-info/PKG-INFO` est un artefact de build qui
+    # porte légitimement la version, et une liste écrite en dur
+    # périmerait au premier dossier ajouté.
+    import subprocess
+
+    suivis = subprocess.run(
+        ["git", "ls-files"], cwd=RACINE,
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+
+    ailleurs = []
+    for relatif in suivis:
+        chemin = RACINE / relatif
+        if relatif == "pyproject.toml" or chemin.suffix in {".png", ".ico"}:
+            continue
+        # Les tests citent des versions dans leurs explications : ils
+        # décrivent l'histoire du projet, ils ne la configurent pas.
+        if relatif.startswith(("tests/", "docs/")):
+            continue
+        try:
+            contenu = chemin.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        if version in contenu:
+            ailleurs.append(relatif)
+
+    assert not ailleurs, (
+        f"la version {version} apparaît hors de pyproject.toml : "
+        f"{ailleurs}"
+    )
 
 
 def test_the_reported_version_follows_the_package():
@@ -183,298 +229,3 @@ def test_the_readme_does_not_promise_uv_tool_upgrade():
         assert "will not work" in section, (
             "si la commande est citée, il faut dire qu'elle ne s'applique pas"
         )
-
-
-# --- La version se change à un seul endroit ------------------------------
-
-
-def _charger_set_version(racine=None):
-    """Charge `scripts/set-version.py`, dont le tiret interdit l'import."""
-    import importlib.util
-
-    base = racine or RACINE
-    spec = importlib.util.spec_from_file_location(
-        "set_version", base / "scripts" / "set-version.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    if racine is not None:
-        module.RACINE = racine
-    return module
-
-
-def test_the_version_script_reports_the_current_version():
-    """`set-version.py` sans argument lit la source unique."""
-    import tomllib
-
-    module = _charger_set_version()
-    config = tomllib.loads((RACINE / "pyproject.toml").read_text())
-    assert module.version_courante() == config["project"]["version"]
-
-
-def test_the_version_script_covers_every_file_that_holds_it(tmp_path):
-    """Le test qui compte : aucun fichier ne doit être oublié.
-
-    Sans lui, ajouter demain une version dans un nouveau fichier sans
-    l'ajouter au script recréerait exactement le problème que le script
-    existe pour supprimer — et personne ne le verrait avant une release
-    incohérente.
-
-    On travaille sur une COPIE : le dépôt réel n'est jamais modifié.
-    """
-    import shutil
-
-    fichiers = ("pyproject.toml", "README.md",
-                "scripts/install.sh", "scripts/install.ps1")
-
-    racine_copie = tmp_path / "depot"
-    (racine_copie / "scripts").mkdir(parents=True)
-    for nom in fichiers:
-        shutil.copy2(RACINE / nom, racine_copie / nom)
-    shutil.copy2(
-        RACINE / "scripts" / "set-version.py",
-        racine_copie / "scripts" / "set-version.py",
-    )
-
-    module = _charger_set_version(racine_copie)
-
-    ancienne = module.version_courante()
-    module.poser("7.8.9")
-
-    for nom in fichiers:
-        contenu = (racine_copie / nom).read_text()
-        assert ancienne not in contenu, (
-            f"{nom} porte encore {ancienne} : le script l'a oublié"
-        )
-        assert "7.8.9" in contenu, f"{nom} n'a pas reçu la nouvelle version"
-
-
-def test_a_version_bump_leaves_the_download_urls_alone(tmp_path):
-    """Monter de version ne doit pas reversionner les URL de `main`.
-
-    `set-version.py` remplace tout `vX.Y.Z` par expression régulière.
-    Le jour où quelqu'un élargit ce motif, les URL repasseraient en
-    `…/v1.2.3/scripts/…` sans que rien ne le dise — et la corvée que ce
-    changement supprime reviendrait en silence.
-
-    On travaille sur une COPIE : le dépôt réel n'est jamais modifié.
-    """
-    import shutil
-
-    fichiers = ("pyproject.toml", "README.md",
-                "scripts/install.sh", "scripts/install.ps1")
-
-    racine = tmp_path / "depot"
-    (racine / "scripts").mkdir(parents=True)
-    for nom in fichiers:
-        shutil.copy2(RACINE / nom, racine / nom)
-    shutil.copy2(
-        RACINE / "scripts" / "set-version.py",
-        racine / "scripts" / "set-version.py",
-    )
-
-    _charger_set_version(racine).poser("9.9.9")
-
-    for nom in fichiers:
-        contenu = (racine / nom).read_text()
-        assert not re.search(r"TortoisePy/v[\d.]+/scripts/", contenu), (
-            f"{nom} : une URL de téléchargement a été reversionnée"
-        )
-
-    readme = (racine / "README.md").read_text()
-    assert "TortoisePy/main/scripts/install.sh" in readme
-    # Et la référence installée, elle, a bien suivi.
-    assert "TortoisePy@v9.9.9" in readme
-
-
-def test_every_version_in_the_repository_is_reachable_by_the_script():
-    """Aucune version codée en dur hors des fichiers que le script couvre.
-
-    Garde-fou contre un futur fichier qui épinglerait la version sans être
-    déclaré dans `set-version.py`.
-    """
-    import tomllib
-
-    config = tomllib.loads((RACINE / "pyproject.toml").read_text())
-    version = config["project"]["version"]
-
-    couverts = {
-        RACINE / "pyproject.toml",
-        RACINE / "README.md",
-        RACINE / "scripts" / "install.sh",
-        RACINE / "scripts" / "install.ps1",
-    }
-
-    oublies = []
-    for chemin in RACINE.rglob("*"):
-        if not chemin.is_file() or chemin in couverts:
-            continue
-        if any(part in {".git", ".venv", ".superpowers", "__pycache__",
-                        "docs"} for part in chemin.parts):
-            continue
-        if chemin.suffix not in {".toml", ".md", ".sh", ".ps1", ".cfg"}:
-            continue
-        if version in chemin.read_text(errors="ignore"):
-            oublies.append(str(chemin.relative_to(RACINE)))
-
-    assert not oublies, (
-        "ces fichiers épinglent la version sans être couverts par "
-        f"scripts/set-version.py : {oublies}"
-    )
-
-
-# --- Le venv de développement suit la version ---------------------------
-
-
-def test_the_script_refreshes_the_local_venv(tmp_path, monkeypatch):
-    """Demandé par l'utilisateur après l'avoir fait à la main deux fois.
-
-    Un venv en mode éditable pointe sur le code source — les
-    modifications sont immédiates — mais sa VERSION est figée à
-    l'installation. Changer `pyproject.toml` ne la met pas à jour, d'où
-    l'écart que `test_the_reported_version_follows_the_package` signale.
-    """
-    import shutil
-
-    module = _charger_set_version()
-
-    racine = tmp_path / "projet"
-    (racine / "scripts").mkdir(parents=True)
-    (racine / ".venv" / "bin").mkdir(parents=True)
-    (racine / ".venv" / "bin" / "python").write_text("")
-    for nom in ("pyproject.toml", "README.md",
-                "scripts/install.sh", "scripts/install.ps1"):
-        shutil.copy2(RACINE / nom, racine / nom)
-
-    module.RACINE = racine
-
-    lances = []
-    monkeypatch.setattr(
-        module.subprocess, "run",
-        lambda commande, **kw: lances.append(commande) or _Termine(),
-    )
-
-    module.rafraichir_venv()
-
-    assert lances, "aucune réinstallation lancée"
-    commande = lances[0]
-    assert str(racine / ".venv" / "bin" / "python") in commande[0]
-    assert "install" in commande and "-e" in commande
-    assert "--no-deps" in commande, (
-        "sans --no-deps, PySide6 et pygit2 seraient réexaminés pour rien"
-    )
-
-
-class _Termine:
-    returncode = 0
-    stdout = ""
-    stderr = ""
-
-
-def test_no_venv_is_not_an_error(tmp_path, monkeypatch):
-    """Sur une machine sans venv, le script doit continuer sans broncher.
-
-    Changer la version et réinstaller sont deux choses : échouer sur la
-    seconde priverait de la première.
-    """
-    module = _charger_set_version()
-    module.RACINE = tmp_path          # aucun .venv ici
-
-    lances = []
-    monkeypatch.setattr(
-        module.subprocess, "run",
-        lambda commande, **kw: lances.append(commande) or _Termine(),
-    )
-
-    module.rafraichir_venv()          # ne doit pas lever
-    assert lances == [], "une réinstallation a été tentée sans venv"
-
-
-class _Echoue:
-    """Un `pip` absent : exactement ce que rend un venv créé par `uv`."""
-
-    returncode = 1
-    stdout = ""
-    stderr = "No module named pip"
-
-
-def test_it_falls_back_to_uv_when_pip_is_missing(tmp_path, monkeypatch):
-    """Un venv créé par `uv` n'embarque pas `pip`.
-
-    Signalé par l'utilisateur : après `release.py 0.15.0`, les quatre
-    fichiers portaient bien 0.15.0 mais `topy --version` répondait
-    encore 0.14.0. La réinstallation échouait en silence, et un
-    avertissement sur stderr ne suffit pas — on croit que le script
-    n'a rien fait.
-
-    Un venv éditable pointe sur les sources, mais sa VERSION est figée
-    à l'installation : sans réinstallation, la commande ment.
-    """
-    module = _charger_set_version()
-    module.RACINE = tmp_path
-    (tmp_path / ".venv" / "bin").mkdir(parents=True)
-    (tmp_path / ".venv" / "bin" / "python").write_text("")
-
-    lances = []
-
-    def faux_run(commande, **kw):
-        lances.append(commande)
-        # Distinguer sur le PREMIER élément, et non sur la présence de
-        # « pip » : la commande `uv` contient elle aussi ce mot
-        # (`uv pip install`), et le test échouait sur sa propre ruse.
-        return _Echoue() if commande[0] != "uv" else _Termine()
-
-    monkeypatch.setattr(module.subprocess, "run", faux_run)
-
-    assert module.rafraichir_venv() is True, (
-        "le repli sur `uv` n'a pas été tenté"
-    )
-    assert len(lances) >= 2, f"un seul essai : {lances}"
-    assert any("uv" in c[0] for c in lances), (
-        f"`uv` n'a jamais été appelé : {lances}"
-    )
-
-
-def test_a_total_failure_is_reported_not_silent(tmp_path, monkeypatch,
-                                                capsys):
-    """Si NI pip NI uv ne marchent, il faut le dire clairement.
-
-    Le piège que l'utilisateur a rencontré : un échec discret laisse
-    croire que le script entier n'a rien fait, alors qu'il a bien posé
-    la version.
-    """
-    module = _charger_set_version()
-    module.RACINE = tmp_path
-    (tmp_path / ".venv" / "bin").mkdir(parents=True)
-    (tmp_path / ".venv" / "bin" / "python").write_text("")
-
-    monkeypatch.setattr(
-        module.subprocess, "run", lambda commande, **kw: _Echoue()
-    )
-
-    assert module.rafraichir_venv() is False
-
-    message = capsys.readouterr().err
-    assert "venv" in message.lower()
-    assert "topy --version" in message, (
-        "le message ne dit pas CE QUI sera faux : la version annoncée"
-    )
-
-
-def test_setting_a_version_also_refreshes(tmp_path, monkeypatch):
-    """Le bout de la chaîne : poser une version rafraîchit le venv."""
-    import shutil
-
-    module = _charger_set_version()
-    racine = tmp_path / "projet"
-    (racine / "scripts").mkdir(parents=True)
-    for nom in ("pyproject.toml", "README.md",
-                "scripts/install.sh", "scripts/install.ps1"):
-        shutil.copy2(RACINE / nom, racine / nom)
-    module.RACINE = racine
-
-    appels = []
-    monkeypatch.setattr(module, "rafraichir_venv", lambda: appels.append(1))
-
-    module.main(["9.8.7"])
-    assert appels == [1], "le venv n'a pas été rafraîchi"

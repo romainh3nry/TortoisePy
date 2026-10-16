@@ -29,7 +29,53 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # La version se pose à la main dans `pyproject.toml` — seul endroit
+  # où elle s'écrit désormais. Ce job la vérifie AVANT les tests :
+  # une version déjà taguée échouait jusqu'ici dix minutes plus tard,
+  # dans le job `tag`, après une suite entière pour rien.
+  check_version:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Les tags doivent être connus pour comparer : un clone
+          # superficiel ne les rapporte pas.
+          fetch-depth: 0
+
+      - name: La version avance-t-elle, et est-elle libre ?
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+
+          if [ -z "$version" ]; then
+            echo "::error::version introuvable dans pyproject.toml"
+            exit 1
+          fi
+
+          if git rev-parse "v$version" >/dev/null 2>&1; then
+            echo "::error::v$version est déjà taguée — montez la version dans pyproject.toml"
+            exit 1
+          fi
+
+          # Comparaison NUMÉRIQUE : en ordre alphabétique, « 0.9.0 »
+          # passerait pour supérieur à « 0.14.0 ».
+          dernier=$(git tag --list 'v*' | sed 's/^v//' | sort -V | tail -1)
+          if [ -n "$dernier" ]; then
+            plus_grand=$(printf '%s\n%s\n' "$dernier" "$version" | sort -V | tail -1)
+            if [ "$plus_grand" != "$version" ]; then
+              echo "::error::$version ne suit pas la dernière version publiée ($dernier)"
+              exit 1
+            fi
+          fi
+
+          echo "::notice::v$version : libre et postérieure à v$dernier"
+
   pytest:
+    # Inutile de lancer dix minutes de tests sur une version qui sera
+    # refusée au moment de taguer.
+    needs: check_version
     # Pas sur `push: main` : ce commit a déjà été testé sur la PR, au
     # contenu près (vérifié avec `git diff` entre les deux).
     if: github.event_name == 'pull_request'
@@ -153,3 +199,47 @@ jobs:
             --title "v$version" \
             --generate-notes
           echo "::notice::Release v$version publiée"
+
+  # Après la release, `develop` reçoit le commit de fusion de `main`.
+  # Demandé par l'utilisateur, et fait trois fois à la main jusqu'ici.
+  #
+  # Sans cette remise à niveau, la pull request suivante affiche
+  # « This branch is out-of-date with the base branch » et impose un
+  # clic sur « Update branch » — la protection exige d'avoir intégré
+  # `main` avant de fusionner.
+  sync_develop:
+    needs: tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Reporter main dans develop
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "develop contient déjà main : rien à faire."
+            exit 0
+          fi
+
+          # `--no-ff` : une fusion explicite, comme les trois faites à
+          # la main. Un rebase réécrirait `develop`, que d'autres
+          # postes ont pu récupérer.
+          if ! git merge --no-ff origin/main -m "Merge branch 'main' into develop"; then
+            # Un conflit ne doit pas rester à moitié appliqué : on
+            # annule, et on le signale pour résolution manuelle.
+            git merge --abort
+            echo "::error::Conflit entre main et develop — à résoudre à la main"
+            exit 1
+          fi
+
+          git push origin develop
+          echo "::notice::develop remis à niveau sur main"
