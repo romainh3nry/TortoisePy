@@ -37,6 +37,7 @@ from tortoisepy.core.graph import build_graph
 from tortoisepy.core.graph_cache import GraphCache, repo_fingerprint
 from tortoisepy.core.credentials import is_https, remember
 from tortoisepy.core.options import GraphOptions
+from tortoisepy.core.editors import find_editors, open_in_editor
 from tortoisepy.core.projects import find_projects
 from tortoisepy.core.pull import (
     PullKind,
@@ -1062,6 +1063,47 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         self.workdir_button.setMenu(workdir_menu)
         toolbar.addWidget(self.workdir_button)
 
+        # Ouvrir le dépôt courant dans un éditeur, comme `code .`.
+        # Demandé par l'utilisateur, avec cette condition : « si pas
+        # installé, on affiche rien » — un bouton qui échouerait au
+        # clic ferait chercher la cause d'un échec évitable.
+        #
+        # La détection est faite UNE fois, à la construction : un
+        # éditeur installé pendant que l'application tourne
+        # n'apparaîtra qu'au prochain lancement. C'est assumé —
+        # scanner à chaque ouverture de menu coûterait pour un cas
+        # qui ne se produit presque jamais.
+        self.editor_button = None
+        editeurs = find_editors()
+        if editeurs:
+            self.editor_button = QToolButton(self)
+            if len(editeurs) == 1:
+                # Un seul éditeur : un bouton direct. Dérouler un menu
+                # pour choisir entre une seule option serait un clic
+                # de trop.
+                seul = editeurs[0]
+                self.editor_button.setText(f"Open in {seul.label}")
+                self.editor_button.clicked.connect(
+                    lambda checked=False, e=seul: self.open_in_editor(e)
+                )
+            else:
+                self.editor_button.setText("Open in editor")
+                self.editor_button.setPopupMode(
+                    QToolButton.ToolButtonPopupMode.InstantPopup
+                )
+                menu = QMenu(self.editor_button)
+                for editeur in editeurs:
+                    action = menu.addAction(editeur.label)
+                    # `e=editeur` fige la valeur : sans ça, toutes les
+                    # actions partageraient la dernière valeur de la
+                    # boucle (piège des fermetures en Python/Qt).
+                    action.triggered.connect(
+                        lambda checked=False, e=editeur:
+                        self.open_in_editor(e)
+                    )
+                self.editor_button.setMenu(menu)
+            toolbar.addWidget(self.editor_button)
+
         return toolbar
 
     def _populate_recent_menu(self) -> None:
@@ -1201,6 +1243,23 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             return
 
         self._ouvrir_dans_une_fenetre(repository)
+
+    def open_in_editor(self, editor) -> None:
+        """Ouvre le dépôt courant dans `editor`.
+
+        Le dossier de TRAVAIL, et non `.git` : c'est le projet qu'on
+        veut éditer, comme le ferait `code .`.
+
+        Un éditeur peut exister et refuser de démarrer — installation
+        abîmée, droits manquants. Sans message, le clic resterait sans
+        effet et l'utilisateur croirait à un bogue de l'application.
+        Le message le nomme (§9).
+        """
+        dossier = (self.repository.workdir or "").rstrip("/")
+        if not open_in_editor(editor, dossier):
+            self.statusBar().showMessage(
+                f"Could not open {editor.label}", 15000
+            )
 
     def _ouvrir_dans_une_fenetre(self, repository) -> None:
         """Ouvre `repository` à côté, avec écran d'attente si besoin.
