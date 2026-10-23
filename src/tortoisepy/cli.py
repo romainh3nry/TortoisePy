@@ -151,6 +151,7 @@ _USAGE = """topy — TortoiseGit Revision Graph
 
 Usage:
   topy [CHEMIN]        Ouvre le dépôt (défaut : le répertoire courant)
+  topy -s MOT          Cherche un dépôt par mot-clé et propose une liste
   topy --wait          Garde le terminal occupé jusqu'à la fermeture
   topy --version       Affiche la version
   topy --install-icon  Installe l'icône système (macOS)
@@ -159,6 +160,7 @@ Usage:
 Exemples:
   topy .                     depuis un projet
   topy ~/code/mon-projet     un dépôt ailleurs
+  topy -s vti                cherche « vti » dans le dossier de projets
 
 Comme git, topy remonte l'arborescence : lancé depuis projet/src/, il
 ouvre projet/.
@@ -168,55 +170,109 @@ topy rend la main au terminal aussitôt la fenêtre ouverte. Utilisez
 """
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Ouvre la fenêtre sur le dépôt demandé."""
-    arguments = list(sys.argv[1:] if argv is None else argv)
+def _workdir_memorise() -> str:
+    """Le dossier de projets choisi depuis « Open Project ».
 
-    # `--wait` est retiré AVANT le contrôle des options inconnues, qui
-    # le rejetterait sinon. Il garde le terminal occupé, pour enchaîner
-    # dans un script.
-    attendre = "--wait" in arguments
-    if attendre:
-        arguments = [a for a in arguments if a != "--wait"]
+    Lu ici plutôt que passé en argument : c'est le même réglage que
+    l'interface, et en avoir deux les ferait diverger.
 
-    if arguments and arguments[0] in ("--help", "-h"):
-        print(_USAGE)
-        return 0
+    L'import de Qt est LOCAL : `topy --version` ne doit pas payer le
+    chargement de PySide6, et `QSettings` en fait partie.
+    """
+    try:
+        from tortoisepy.ui.settings_store import SettingsStore
 
-    if arguments and arguments[0] in ("--version", "-V"):
-        print(f"tortoisePy {__version__}")
-        return 0
+        return str(SettingsStore().value("view/workdir") or "")
+    except Exception:
+        # Réglages illisibles : la recherche échouera avec son propre
+        # message, ce qui vaut mieux qu'une trace d'exécution.
+        return ""
 
-    if arguments and arguments[0] == "--install-icon":
-        from tortoisepy.desktop import install_bundle
 
-        bundle = install_bundle()
-        if bundle is None:
-            print(
-                "Icône système non installée : "
-                "réservée à macOS, et l'icône doit être présente.",
-                file=sys.stderr,
-            )
-            return 1
-        print(f"Icône installée : {bundle}")
-        return 0
+def _choisir(projets) -> str | None:
+    """Affiche la liste numérotée et lit le choix. `None` si annulé.
 
-    # Une option inconnue n'est pas un chemin. Sans ce refus,
-    # `topy --verison` cherchait un dépôt nommé « --verison » et
-    # répondait « Pas de dépôt Git trouvé dans --verison » (vérifié) —
-    # un message qui n'aide pas à corriger la faute de frappe.
-    if arguments and arguments[0].startswith("-"):
+    Numérotée et non à curseur : `curses` est absent de CPython sous
+    Windows, et un menu plein écran ne fonctionne pas dans un tube —
+    il aurait fallu écrire les deux (décidé avec l'utilisateur).
+
+    Mesuré sur son dossier réel : les recherches rendent 1 à 5
+    résultats. Taper « 4 » est plus rapide que quatre flèches.
+    """
+    for rang, projet in enumerate(projets, start=1):
+        print(f"  {rang}. {projet.name}")
+    print()
+
+    try:
+        reponse = input("Projet (numéro, ou Entrée pour annuler) : ")
+    except (KeyboardInterrupt, EOFError):
+        # Annulation volontaire : une trace d'exécution ici serait
+        # effrayante pour un geste normal.
+        print(file=sys.stderr)
+        return None
+
+    reponse = reponse.strip()
+    if not reponse:
+        return None
+
+    try:
+        rang = int(reponse)
+    except ValueError:
+        print(f"« {reponse} » n'est pas un numéro.", file=sys.stderr)
+        return None
+
+    if not 1 <= rang <= len(projets):
         print(
-            f"Option inconnue : {arguments[0]}\n\n{_USAGE}", file=sys.stderr
+            f"Il n'y a pas de projet {rang} dans cette liste.",
+            file=sys.stderr,
         )
-        return 1
+        return None
 
-    target = arguments[0] if arguments else "."
+    return projets[rang - 1].path
 
-    repository = find_repository(target)
-    if repository is None:
-        print(f"Pas de dépôt Git trouvé dans {target}", file=sys.stderr)
-        return 1
+
+def _rechercher(motif: str) -> str | None:
+    """Le chemin du projet choisi, ou `None` si rien n'aboutit.
+
+    Demandé par l'utilisateur : « topy -s vti ».
+    """
+    from tortoisepy.core.projects import find_projects, search_projects
+
+    workdir = _workdir_memorise()
+    if not workdir:
+        print(
+            "Aucun dossier de projets choisi.\n"
+            "Ouvrez-en un depuis « Open Project » dans l'application.",
+            file=sys.stderr,
+        )
+        return None
+
+    trouves = search_projects(find_projects(workdir), motif)
+
+    if not trouves:
+        print(
+            f"Aucun projet ne correspond à « {motif} » dans {workdir}",
+            file=sys.stderr,
+        )
+        return None
+
+    if len(trouves) == 1:
+        # Un seul résultat : pas de question à poser. `topy -s vti`
+        # sans frappe supplémentaire est le but de la fonctionnalité.
+        return trouves[0].path
+
+    return _choisir(trouves)
+
+
+def _afficher(repository, arguments: list[str]) -> int:
+    """Ouvre la fenêtre sur `repository`. Code de sortie du programme.
+
+    Séparé de `main` depuis l'ajout de `-s` : la recherche aboutit au
+    même affichage qu'un argument de chemin, et dupliquer ce bloc
+    l'aurait fait diverger.
+    """
+    attendre = "--wait" in arguments
+
 
     # Le dépôt est validé AVANT de relancer : sinon l'erreur partirait
     # dans le processus détaché, dont les sorties vont vers le vide, et
@@ -293,6 +349,87 @@ def main(argv: list[str] | None = None) -> int:
 
     return app.exec()
 
+
+def _ouvrir(chemin: str, arguments: list[str]) -> int:
+    """Ouvre le dépôt trouvé à `chemin`. Code de sortie du programme.
+
+    Isolé de `main` depuis l'ajout de `-s` : les deux chemins — un
+    argument de chemin, ou un projet choisi dans une liste —
+    aboutissent ici, et les tests l'interceptent pour ne pas ouvrir
+    de fenêtre.
+    """
+    repository = find_repository(chemin)
+    if repository is None:
+        print(f"Pas de dépôt Git trouvé dans {chemin}", file=sys.stderr)
+        return 1
+
+    return _afficher(repository, arguments)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Ouvre la fenêtre sur le dépôt demandé."""
+    arguments = list(sys.argv[1:] if argv is None else argv)
+
+    # `--wait` est retiré AVANT le contrôle des options inconnues, qui
+    # le rejetterait sinon. Il garde le terminal occupé, pour enchaîner
+    # dans un script.
+    attendre = "--wait" in arguments
+    if attendre:
+        arguments = [a for a in arguments if a != "--wait"]
+
+    if arguments and arguments[0] in ("--help", "-h"):
+        print(_USAGE)
+        return 0
+
+    if arguments and arguments[0] in ("--version", "-V"):
+        print(f"tortoisePy {__version__}")
+        return 0
+
+    if arguments and arguments[0] == "--install-icon":
+        from tortoisepy.desktop import install_bundle
+
+        bundle = install_bundle()
+        if bundle is None:
+            print(
+                "Icône système non installée : "
+                "réservée à macOS, et l'icône doit être présente.",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"Icône installée : {bundle}")
+        return 0
+
+    # `-s` AVANT le refus des options inconnues, qui rejetterait tout
+    # ce qui commence par un tiret.
+    if arguments and arguments[0] in ("-s", "--search"):
+        if len(arguments) < 2 or not arguments[1].strip():
+            # `topy -s` seul rendrait 61 lignes sur un dossier réel :
+            # mieux vaut l'usage qu'un terminal noyé.
+            print(
+                f"« {arguments[0]} » attend un mot-clé.\n\n{_USAGE}",
+                file=sys.stderr,
+            )
+            return 1
+
+        trouve = _rechercher(arguments[1])
+        if trouve is None:
+            return 1
+        # Les arguments passés à la relance ne portent plus `-s` : le
+        # processus détaché reçoit un chemin, et ne doit pas refaire
+        # la recherche ni redemander un choix.
+        return _ouvrir(trouve, [trouve])
+
+    # Une option inconnue n'est pas un chemin. Sans ce refus,
+    # `topy --verison` cherchait un dépôt nommé « --verison » et
+    # répondait « Pas de dépôt Git trouvé dans --verison » (vérifié) —
+    # un message qui n'aide pas à corriger la faute de frappe.
+    if arguments and arguments[0].startswith("-"):
+        print(
+            f"Option inconnue : {arguments[0]}\n\n{_USAGE}", file=sys.stderr
+        )
+        return 1
+
+    return _ouvrir(arguments[0] if arguments else ".", arguments)
 
 if __name__ == "__main__":
     raise SystemExit(main())
