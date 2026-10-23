@@ -146,14 +146,20 @@ invérifiable.
 
 Chaque étape laisse la suite verte et le rendu intact.
 
-1. **Extraire `RepositoryPanel`** — déplacer le contenu par dépôt hors
-   de `MainWindow`, qui le garde comme widget central unique. Aucun
-   onglet encore : l'aspect doit être **identique au pixel**, et les
-   1852 tests passent sans modification. C'est l'étape qui porte le
-   risque.
-2. **Introduire le `QTabWidget`** avec les propriétés de façade. Un
-   seul onglet, barre d'onglets masquée quand il est seul : l'aspect ne
-   change toujours pas.
+1. **Extraire `RepositoryPanel`** — en deux temps, et l'ordre importe :
+   - **1a — l'assemblage** (fait, `cf28faf`) : le bandeau et le
+     splitter réunis dans un widget, posé comme widget central. La
+     logique reste dans `MainWindow`. Aucun test modifié.
+   - **1b — la façade, AVANT la logique.** Ma première rédaction
+     plaçait la façade à l'étape 2 : c'était un mauvais ordre. Mesuré,
+     **22 des 39 méthodes « panneau seul » sont appelées par les
+     tests, 150 fois au total** (`refresh` ×24, `_run_action` ×26,
+     `_show_commits` ×15, `_title` ×13, `find_branch` ×13…). Déplacer
+     la logique sans façade obligerait à modifier ces 150 appels,
+     c'est-à-dire à renoncer au seul critère objectif de
+     non-régression. La façade vient donc d'abord, la logique ensuite.
+2. **Introduire le `QTabWidget`.** Un seul onglet, barre d'onglets
+   masquée quand il est seul : l'aspect ne change toujours pas.
 3. **Rebrancher la barre sur l'onglet actif** — la table `slots`, la
    barre d'état, le titre de la fenêtre.
 4. **Ouvrir en onglet** depuis « Open Project » et « Open Recent »,
@@ -173,9 +179,18 @@ projet : *« ne jamais dégrader l'aspect actuel »*.
 - l'étape 1 impose un aspect **identique** avant toute introduction
   d'onglet : c'est le point de contrôle qui rend les suivantes sûres.
 
-**Critère d'acceptation de chaque étape :** 1852 tests verts, et
-aucune modification des tests existants — une modification signalerait
-que la façade ne tient pas sa promesse.
+**Critère d'acceptation de chaque étape :** la suite verte, et
+**aucune modification des tests existants** — une modification
+signalerait que la façade ne tient pas sa promesse. Références
+successives : 1863 avant l'étape 1, 1872 après 1a.
+
+Un piège mesuré sur `showEvent` : un widget enfant le reçoit **avant**
+sa fenêtre, et avec sa largeur réelle déjà posée (mesuré : 1200 px).
+Le code de mise en page du panneau peut donc y vivre — et c'est même
+plus juste pour des onglets, puisqu'un onglet inactif n'est pas encore
+affiché. Mais `closeEvent` ne se déclenche que sur ce qu'on ferme :
+fermer un onglet et fermer la fenêtre sont deux choses, et c'est là
+que se joue l'arrêt du `QThread` par dépôt.
 
 ## 7. Ce que cette spec ne couvre pas
 
