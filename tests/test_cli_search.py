@@ -235,6 +235,108 @@ def test_search_without_a_workdir_explains(tmp_path, ouvertures,
     assert "open project" in message or "dossier" in message
 
 
+def test_a_missing_workdir_is_not_blamed_on_the_keyword(
+    tmp_path, ouvertures, monkeypatch, capsys
+):
+    """Un dossier réglé mais disparu n'est pas « aucun résultat ».
+
+    Demandé par l'utilisateur. Le réglage n'est pas vérifié à la
+    lecture — le dossier peut avoir été renommé, déplacé ou
+    supprimé — et `find_projects` rend un tuple vide plutôt que de
+    lever. On tombait donc dans la branche « aucun projet ne
+    correspond à *vti* », qui accuse le mot-clé alors que le
+    mot-clé n'est pas en cause : l'utilisateur en essaie d'autres
+    pour rien.
+    """
+    import tortoisepy.cli as cli
+
+    absent = tmp_path / "Disparu"
+    monkeypatch.setattr(cli, "_workdir_memorise", lambda: str(absent),
+                        raising=False)
+
+    assert main(["-s", "vti"]) == 1
+    assert not ouvertures
+
+    message = capsys.readouterr().err
+    assert str(absent) in message, (
+        "le message ne nomme pas le dossier fautif"
+    )
+    assert "correspond" not in message, (
+        f"le mot-clé est mis en cause à tort : {message!r}"
+    )
+
+
+def test_a_missing_workdir_says_how_to_fix_it(
+    tmp_path, ouvertures, monkeypatch, capsys
+):
+    """Et il doit dire quoi faire, comme le cas « rien de choisi ».
+
+    Même règle §9 : constater ne suffit pas. La correction est la
+    même dans les deux cas — définir un dossier de projets.
+    """
+    import tortoisepy.cli as cli
+
+    monkeypatch.setattr(cli, "_workdir_memorise",
+                        lambda: str(tmp_path / "Disparu"), raising=False)
+
+    assert main(["-s", "vti"]) == 1
+
+    message = capsys.readouterr().err.lower()
+    assert "open project" in message, (
+        "le message ne dit pas où définir un dossier de projets"
+    )
+
+
+def test_an_empty_workdir_still_blames_nothing_but_itself(
+    tmp_path, ouvertures, monkeypatch, capsys
+):
+    """Un dossier qui EXISTE mais ne contient aucun dépôt.
+
+    Le piège de la correction : confondre « dossier introuvable » et
+    « dossier sans dépôt ». Le second est un vrai « aucun
+    résultat » — le dossier est bien là, le mot-clé n'a simplement
+    rien trouvé. Il doit garder son message d'origine, sinon on
+    renvoie l'utilisateur vers « Open Project » alors que son
+    réglage est bon.
+    """
+    import tortoisepy.cli as cli
+
+    vide = tmp_path / "Vide"
+    vide.mkdir()
+    monkeypatch.setattr(cli, "_workdir_memorise", lambda: str(vide),
+                        raising=False)
+
+    assert main(["-s", "vti"]) == 1
+
+    message = capsys.readouterr().err
+    assert "vti" in message, (
+        "un dossier existant mais vide est un cas « aucun résultat »"
+    )
+
+
+def test_a_workdir_that_is_a_file_is_reported_as_missing(
+    tmp_path, ouvertures, monkeypatch, capsys
+):
+    """Un chemin qui désigne un fichier, pas un dossier.
+
+    `find_projects` le traite déjà comme absent (`is_dir`). Le
+    message doit suivre : parcourir un fichier n'a pas de sens, et
+    le réglage est à refaire.
+    """
+    import tortoisepy.cli as cli
+
+    fichier = tmp_path / "pas-un-dossier.txt"
+    fichier.write_text("x\n")
+    monkeypatch.setattr(cli, "_workdir_memorise", lambda: str(fichier),
+                        raising=False)
+
+    assert main(["-s", "vti"]) == 1
+
+    message = capsys.readouterr().err
+    assert str(fichier) in message
+    assert "correspond" not in message
+
+
 def test_a_path_argument_still_works(espace, ouvertures):
     """La recherche ne doit pas casser l'usage existant.
 

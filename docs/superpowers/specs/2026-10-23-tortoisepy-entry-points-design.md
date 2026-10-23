@@ -87,6 +87,24 @@ vers le vide : une question posée après n'atteindrait personne.
 enchaînant `topy -s crm && deploy` partirait sur un déploiement alors
 que rien n'a été ouvert.
 
+### Les trois refus, et pourquoi ils diffèrent
+
+Le réglage `view/workdir` n'est pas vérifié à l'écriture ; trois états
+mènent donc à zéro résultat, et les confondre envoie l'utilisateur
+chercher au mauvais endroit.
+
+| État | Message | Pourquoi distinct |
+|---|---|---|
+| Aucun dossier choisi | « Aucun dossier de projets choisi » + où en définir un | Le réglage n'existe pas : rien à corriger, tout à faire. |
+| Dossier réglé mais introuvable | « Le dossier de projets est introuvable : *chemin* » + où en définir un | **Le chemin est nommé.** Renommé, déplacé, supprimé : la cause n'est pas devinable, et l'annoncer serait une hypothèse. |
+| Dossier présent, sans dépôt correspondant | « Aucun projet ne correspond à *motif* dans *chemin* » | Le réglage est bon. Renvoyer ici vers « Open Project » ferait refaire un réglage correct. |
+
+Le contrôle teste `is_dir`, pas `exists` : un réglage pointant sur un
+**fichier** est aussi inexploitable, et `find_projects` le traite déjà
+comme absent. Les deux doivent dire la même chose.
+
+Les trois rendent **1**.
+
 ## 3. Ouvrir dans un éditeur (`core/editors.py`)
 
 ### Pourquoi
