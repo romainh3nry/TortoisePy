@@ -61,15 +61,36 @@ inventer, il existe.
 La table `slots` de `_build_actions` centralise déjà les cibles des
 actions — un seul point de passage à rebrancher, pas vingt.
 
-L'état se sépare proprement :
+L'état se sépare proprement. Inventaire par AST du constructeur : **37
+attributs, dont 28 au panneau et 9 au cadre**.
 
-| Par dépôt (va dans l'onglet) | Par fenêtre (reste au cadre) |
+| Panneau (par dépôt) — 28 | Cadre (par fenêtre) — 9 |
 |---|---|
-| `repository`, `graph`, `state` | `window/geometry` |
-| `watcher`, `_task` | `view/panel_width`, `view/panel_hidden` |
-| `_head_avant_refresh` | `view/show_tags`, `view/zoom` |
-| `_selection_avant_refresh` | `view/workdir` |
-| `_dernier_motif_branche` | |
+| `repository`, `graph`, `state` | `settings`, `measurer` |
+| `view`, `commit_panel`, `search_field` | `toolbar`, `progress`, `branch_label` |
+| `splitter`, `panel_handle`, `toggle_panel_action` | `_detail_windows`, `_log_windows` |
+| `_banner`, `operation_banner`, `banner_continue`, `banner_abort` | `_compare_windows`, `_recent_windows` |
+| `watcher`, `_task`, `_fetch_summary` | |
+| `commit_window`, `conflict_window` | |
+| `_graph_cache`, `_panel_cache`, `_panel_cache_key` | |
+| `_selection_avant_refresh`, `_head_avant_refresh` | |
+| `_dernier_motif_branche`, `_index_branche` | |
+| `_defer_graph`, `_on_progress`, `_largeur_panneau_en_attente` | |
+
+Deux pièges que cet inventaire a révélés, et qu'une lecture rapide
+manquait :
+
+- **`_graph_cache` et `_panel_cache` sont par dépôt** : leur clé
+  d'invalidation est l'empreinte du dépôt. Partagés entre onglets, ils
+  rendraient le graphe d'un dépôt dans l'onglet d'un autre.
+- **`commit_window` et `conflict_window` sont par dépôt**, alors que
+  les quatre registres `ChildWindows` sont par fenêtre. Les deux
+  familles se ressemblent et ne se rangent pas du même côté.
+
+Réglages concernés : `window/geometry` au cadre ;
+`view/panel_width`, `view/panel_hidden`, `view/show_tags`,
+`view/zoom`, `view/workdir` — à trancher à l'étape 3, selon qu'ils
+valent pour la fenêtre ou pour l'onglet.
 
 ### Ce qui complique
 
