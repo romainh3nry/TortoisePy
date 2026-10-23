@@ -59,7 +59,7 @@ from tortoisepy.ui.settings_store import SettingsStore
 from tortoisepy.ui.commit_detail_window import CommitDetailWindow
 from tortoisepy.ui.log_window import LogWindow
 from tortoisepy.ui.compare_window import CompareWindow
-from tortoisepy.ui.child_windows import ChildWindows
+from tortoisepy.ui.child_windows import ChildWindows, still_alive
 from tortoisepy.ui.commit_panel import CommitPanel
 from tortoisepy.ui.commit_window import CommitWindow
 from tortoisepy.ui.conflict_window import ConflictWindow
@@ -1104,6 +1104,26 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
                 self.editor_button.setMenu(menu)
             toolbar.addWidget(self.editor_button)
 
+        # Demandé par l'utilisateur : « on ne sait pas très bien combien
+        # de graph est ouvert ». Le Dock de macOS représente des
+        # PROCESSUS, pas des fenêtres : `topy` relance un processus
+        # détaché (une icône chacun), alors que « Open Project »
+        # construit une fenêtre dans le processus courant — une seule
+        # icône pour toutes. Ce menu est la convention macOS pour ce
+        # problème, et il sert aussi à revenir à une fenêtre enfouie.
+        self.windows_button = QToolButton(self)
+        self.windows_button.setText("Windows")
+        self.windows_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        windows_menu = QMenu(self.windows_button)
+        # Peuplé à l'ouverture, comme ses deux voisins : la liste change
+        # à chaque fenêtre ouverte ou fermée, et un menu construit une
+        # fois montrerait l'état du passé.
+        windows_menu.aboutToShow.connect(self._populate_windows_menu)
+        self.windows_button.setMenu(windows_menu)
+        toolbar.addWidget(self.windows_button)
+
         return toolbar
 
     def _populate_recent_menu(self) -> None:
@@ -1127,6 +1147,81 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
                     path
                 )
             )
+
+    def open_windows(self) -> list["MainWindow"]:
+        """Les fenêtres de graphe ouvertes dans ce processus.
+
+        La source est `QApplication`, et non `_recent_windows` : ce
+        registre est PAR fenêtre. La fenêtre A ouvre B et C, mais B ne
+        connaît ni A ni C — un menu alimenté par lui aurait montré une
+        liste différente selon l'endroit d'où on l'ouvre, soit la
+        confusion même qu'il doit lever.
+
+        Le filtre porte sur la VISIBILITÉ, et c'est la condition qui
+        compte : une fenêtre fermée peut rester listée. Mesuré — la
+        fenêtre racine, celle lancée depuis le terminal, ne porte pas
+        `WA_DeleteOnClose` ; fermée, elle demeure dans
+        `topLevelWidgets()` avec `isVisible()` à False.
+
+        Pas de garde `still_alive` ici : mesuré, Qt retire lui-même de
+        `topLevelWidgets()` l'objet qu'il a détruit (`WA_DeleteOnClose`
+        → `isValid` faux → absent de la liste). Le garde serait du code
+        mort, et la mutation l'a confirmé — aucun test ne pouvait le
+        tuer. Il reste nécessaire dans `_raise_window`, où la référence
+        vieillit dans une fermeture.
+
+        L'ordre est celui du titre, car celui de `topLevelWidgets()`
+        est arbitraire (mesuré : beta, gamma, alpha) et changerait
+        d'une ouverture à l'autre.
+        """
+        vues = [
+            widget
+            for widget in QApplication.topLevelWidgets()
+            if isinstance(widget, MainWindow) and widget.isVisible()
+        ]
+        return sorted(vues, key=lambda fenetre: fenetre.windowTitle())
+
+    def _populate_windows_menu(self) -> None:
+        """Reconstruit la liste des fenêtres à chaque ouverture."""
+        menu = self.windows_button.menu()
+        menu.clear()
+
+        for fenetre in self.open_windows():
+            # Le titre porte déjà le dépôt ET la branche
+            # (« alpha [main] — tortoisePy ») ; le suffixe de
+            # l'application n'apporte rien dans un menu qui lui
+            # appartient.
+            intitule = fenetre.windowTitle().removesuffix(
+                " — tortoisePy"
+            )
+            action = menu.addAction(intitule)
+            # Cochée pour la fenêtre d'où le menu est ouvert : sans
+            # repère, le menu dit combien de fenêtres existent mais pas
+            # laquelle on regarde.
+            action.setCheckable(True)
+            action.setChecked(fenetre is self)
+            # `fenetre=fenetre` fige la valeur : sans ça, toutes les
+            # actions viseraient la dernière de la boucle (même piège
+            # que le menu voisin).
+            action.triggered.connect(
+                lambda checked=False, fenetre=fenetre: self._raise_window(
+                    fenetre
+                )
+            )
+
+    def _raise_window(self, fenetre) -> None:
+        """Ramène `fenetre` au premier plan.
+
+        Les trois appels sont nécessaires : `show` rétablit une fenêtre
+        réduite, `raise_` la remonte dans la pile, et `activateWindow`
+        lui donne le focus clavier. Omettre le dernier la fait
+        apparaître sans qu'on puisse y taper.
+        """
+        if not still_alive(fenetre):
+            return
+        fenetre.show()
+        fenetre.raise_()
+        fenetre.activateWindow()
 
     def open_recent_repository(self, path: str) -> None:
         """Ouvre `path` dans une NOUVELLE fenêtre, sans toucher la courante.

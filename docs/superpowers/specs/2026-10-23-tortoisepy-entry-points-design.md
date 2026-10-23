@@ -153,7 +153,78 @@ elle serait morte : listée mais jamais trouvée. Un test l'exige.
 Un fichier du bon nom mais sans droit d'exécution n'est pas un
 éditeur : le proposer ferait cliquer pour rien.
 
-## 4. Les protocoles réseau (`core/protocols.py`)
+## 4. Savoir combien de graphes sont ouverts (menu « Windows »)
+
+### Pourquoi
+
+Signalé par l'utilisateur :
+
+> « si j'ouvre un deuxième repo depuis le open project ou open recent,
+> le graph s'affiche bien mais pas de deuxième icône, ce qui fait qu'on
+> ne sait pas très bien combien de graph est ouvert »
+
+### Ce n'est pas un défaut, c'est la plateforme
+
+Le Dock de macOS représente des **processus**, pas des fenêtres.
+
+| Chemin | Mécanisme | Icônes |
+|---|---|---|
+| `topy <chemin>` | `Popen` → nouveau processus | une par graphe |
+| « Open Project » / « Open Recent » | `MainWindow(...)` dans le processus courant | une seule, partagée |
+
+Aucun réglage ne change cela : une application avec cinq fenêtres a
+une icône. La réponse est donc la convention macOS pour ce problème —
+un menu listant les fenêtres ouvertes — qui règle le **comptage** et
+la **navigation**, le vrai besoin derrière la question.
+
+### Ce qui compte pour la reconstruction
+
+**La source est `QApplication.topLevelWidgets()`, pas
+`_recent_windows`.** Ce registre est **par fenêtre** : la fenêtre A
+ouvre B et C, mais B ne connaît ni A ni C. Un menu alimenté par lui
+aurait montré une liste différente selon l'endroit d'où on l'ouvre —
+exactement la confusion à lever.
+
+**Le filtre porte sur `isVisible()`.** Mesuré : la fenêtre racine,
+celle lancée depuis le terminal, ne porte pas `WA_DeleteOnClose` ;
+fermée, elle **reste** dans `topLevelWidgets()`, `isVisible()` à
+False. Sans ce filtre, le menu listerait une fenêtre fermée.
+
+**Pas de garde `still_alive` dans ce filtre.** Mesuré : Qt retire
+lui-même l'objet qu'il a détruit. Le garde serait du code mort, et la
+mutation l'a confirmé — aucun test ne pouvait le tuer. Il reste
+**nécessaire** dans le gestionnaire de clic, où la référence figée
+dans la fermeture peut vieillir entre l'ouverture du menu et le clic.
+
+**Le test de type est nécessaire** : `topLevelWidgets()` rend toutes
+les fenêtres de premier niveau, écran d'attente et dialogues compris.
+
+**L'ordre suit le titre.** Celui de `topLevelWidgets()` est arbitraire
+(mesuré : beta, gamma, alpha pour trois fenêtres créées dans l'ordre
+inverse) et changerait d'une ouverture à l'autre, faisant cliquer à
+côté.
+
+**Un `QToolButton`, pas un `QMenuBar`** : ce projet n'a pas de barre
+de menus, tout vit dans la barre d'outils. En introduire une pour une
+entrée changerait l'aspect de la fenêtre, que l'utilisateur a validé.
+
+**Trois appels pour remonter une fenêtre** — `show` rétablit une
+fenêtre réduite, `raise_` la remonte dans la pile, `activateWindow`
+donne le focus clavier. Omettre le dernier la fait apparaître sans
+qu'on puisse y taper.
+
+Le titre portait déjà le dépôt et la branche
+(« alpha [main] — tortoisePy ») : le menu le réutilise en retirant le
+suffixe de l'application, inutile dans un menu qui lui appartient.
+**Par `removesuffix`, jamais `rstrip`** : `rstrip(" — tortoisePy")`
+ampute tout titre finissant par une de ces lettres.
+
+**Le bouton se place hors du bloc conditionnel de « Open in editor »**,
+qui n'existe que si un éditeur est installé. À l'intérieur, le bouton
+disparaîtrait chez quelqu'un sans éditeur — invisible en
+développement, où il y en a toujours un. Un test pose le cas.
+
+## 5. Les protocoles réseau (`core/protocols.py`)
 
 ### Pourquoi
 
