@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMenu,
+    QFrame,
+    QScrollArea,
     QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
@@ -64,11 +66,40 @@ class CommitDetailWindow(QMainWindow):
         # `main_window._detail_windows`).
         self.blame_windows: list[BlameWindow | "CommitDetailWindow"] = []
 
+        # Le message dans une zone DÉFILANTE, et séparé des fichiers
+        # par une poignée. Signalé par l'utilisateur, capture à
+        # l'appui : sur un commit de quarante lignes de message,
+        # l'en-tête prenait 900 px et la liste était réduite à trois
+        # lignes pour cinq fichiers.
+        #
+        # La cause : un `QLabel` dans un `QVBoxLayout` réclame la
+        # hauteur que son texte demande, sans limite. Le splitter
+        # existant séparait le haut du diff, pas le message des
+        # fichiers.
+        message = QScrollArea()
+        message.setWidget(self._header)
+        message.setWidgetResizable(True)
+        message.setFrameShape(QFrame.Shape.NoFrame)
+
+        haut = QSplitter(Qt.Orientation.Vertical)
+        haut.addWidget(message)
+        haut.addWidget(self._files)
+        # Tailles EXPLICITES en plus des facteurs : ceux-ci ne jouent
+        # que sur l'espace excédentaire, et Qt part des tailles
+        # souhaitées. Le `QLabel` du message en demande autant que son
+        # texte — c'est la cause même du défaut, et les facteurs seuls
+        # ne la corrigeaient pas (constaté : rendu inchangé).
+        #
+        # Parts égales : la liste montre ses fichiers, le message ses
+        # premières lignes, et la poignée ajuste selon le commit.
+        haut.setStretchFactor(0, 1)
+        haut.setStretchFactor(1, 1)
+        haut.setSizes([200, 200])
+
         top = QWidget()
         layout = QVBoxLayout(top)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.addWidget(self._header)
-        layout.addWidget(self._files)
+        layout.addWidget(haut)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(top)
