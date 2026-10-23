@@ -247,6 +247,21 @@ def _rechercher(motif: str) -> str | None:
         )
         return None
 
+    from pathlib import Path
+
+    # Le réglage n'est pas vérifié à l'écriture : le dossier a pu
+    # être renommé, déplacé ou supprimé depuis. Sans ce contrôle,
+    # `find_projects` rend un tuple vide et le message plus bas
+    # accuse le mot-clé — l'utilisateur en essaie d'autres pour rien.
+    if not Path(workdir).is_dir():
+        print(
+            f"Le dossier de projets est introuvable : {workdir}\n"
+            "Définissez-en un depuis « Open Project » dans "
+            "l'application.",
+            file=sys.stderr,
+        )
+        return None
+
     trouves = search_projects(find_projects(workdir), motif)
 
     if not trouves:
