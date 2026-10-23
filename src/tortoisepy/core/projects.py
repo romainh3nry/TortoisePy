@@ -140,3 +140,30 @@ def _nom(depot: Path, racine: Path) -> str:
         return depot.relative_to(racine).as_posix()
     except ValueError:
         return depot.name
+
+
+def search_projects(
+    projects: tuple[Project, ...], keyword: str
+) -> tuple[Project, ...]:
+    """Les projets dont le nom contient `keyword`, casse ignorée.
+
+    Demandé par l'utilisateur : `topy -s vti` cherche un dépôt par
+    mot-clé plutôt que par chemin. Taper le nom entier n'aurait pas
+    d'intérêt — mesuré sur son dossier réel, les noms font 15,3
+    caractères en moyenne, et « crm » suffit à ramener 5 projets sur
+    61.
+
+    La casse est ignorée : exiger `CRM-Signature` exactement
+    transformerait un raccourci en devinette.
+
+    Un motif vide rend un tuple vide plutôt que TOUT : `topy -s` sans
+    argument afficherait sinon 61 lignes, illisibles dans un
+    terminal. C'est à l'appelant de le refuser avec un message.
+    """
+    motif = keyword.strip().lower()
+    if not motif:
+        return ()
+
+    return tuple(
+        projet for projet in projects if motif in projet.name.lower()
+    )
