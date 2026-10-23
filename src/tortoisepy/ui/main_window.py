@@ -23,10 +23,8 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizePolicy,
-    QSplitter,
     QToolBar,
     QToolButton,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -61,6 +59,7 @@ from tortoisepy.ui.log_window import LogWindow
 from tortoisepy.ui.compare_window import CompareWindow
 from tortoisepy.ui.child_windows import ChildWindows, still_alive
 from tortoisepy.ui.commit_panel import CommitPanel
+from tortoisepy.ui.repository_panel import RepositoryPanel
 from tortoisepy.ui.commit_window import CommitWindow
 from tortoisepy.ui.conflict_window import ConflictWindow
 from tortoisepy.ui.context_menu import MenuEntry, build_menu_model
@@ -231,11 +230,13 @@ class MainWindow(QMainWindow):
         )
         self.toggle_panel_action.toggled.connect(self._on_panel_toggled)
 
-        self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        self.splitter.addWidget(self.view)
-        self.splitter.addWidget(self.commit_panel)
-        self.splitter.setStretchFactor(0, 3)
-        self.splitter.setStretchFactor(1, 2)
+        # Construit par `RepositoryPanel`, qui porte les proportions.
+        # Pas encore assemblé avec le bandeau : l'ordre d'initialisation
+        # impose que le splitter reçoive ses tailles avant que le
+        # bandeau existe (voir `build_splitter`).
+        self.splitter = RepositoryPanel.build_splitter(
+            self.view, self.commit_panel, self
+        )
 
         # Enfant du splitter et placé à la main, PAS un troisième widget
         # dans sa mise en page : signalé par l'utilisateur, « la bordure
@@ -323,13 +324,15 @@ class MainWindow(QMainWindow):
         bandeau.addWidget(self.banner_abort)
         self._banner.hide()
 
-        central = QWidget()
-        disposition = QVBoxLayout(central)
-        disposition.setContentsMargins(0, 0, 0, 0)
-        disposition.setSpacing(4)
-        disposition.addWidget(self._banner)
-        disposition.addWidget(self.splitter)
-        self.setCentralWidget(central)
+        # Le contenu du dépôt, réuni dans un widget à lui. Première
+        # moitié de l'étape 1 du chantier des onglets : c'est cette
+        # unité qui deviendra un onglet, et la réunir maintenant ne
+        # change rien à l'écran — vérifié au pixel par
+        # `test_layout_unchanged.py`.
+        self.repository_panel = RepositoryPanel(
+            self.splitter, self._banner, self
+        )
+        self.setCentralWidget(self.repository_panel)
 
         self.toolbar = self._build_toolbar()
         self._build_actions()
