@@ -52,6 +52,77 @@ l'utilisateur de **tous** ses projets.
 externe débranché, et l'oublier en silence perdrait le réglage. C'est
 à l'affichage de dire qu'il est introuvable.
 
+## 1 bis. Plusieurs dossiers de projets
+
+### Pourquoi
+
+Demandé par l'utilisateur : « possible de pouvoir ajouter plusieurs
+répertoires de projet ? » Un seul dossier ne couvre pas l'usage
+courant — projets perso d'un côté, professionnels de l'autre, parfois
+un disque externe.
+
+### Le piège décisif, mesuré
+
+Deux dossiers contenant chacun un dépôt `api` :
+
+```
+concaténation -> ['api', 'blog', 'api', 'crm']
+```
+
+Deux entrées **indiscernables** dans le menu, et `topy -s api`
+proposant deux lignes identiques — choisir « 1 » ou « 2 » revenait à
+tirer au sort.
+
+Le projet avait déjà résolu ce problème un niveau plus bas : un `api`
+dans deux sous-dossiers s'affiche `client-a/api`. La même idée
+s'applique aux racines.
+
+### Ce qui compte pour la reconstruction
+
+**Le préfixe n'est posé qu'en cas de collision** (choix de
+l'utilisateur) : `vti` reste `vti`, seuls les homonymes portent leur
+dossier. Préfixer systématiquement donnerait `perso/vti` sans qu'aucune
+ambiguïté ne l'exige, y compris avec un seul dossier configuré.
+
+**Seuls les noms en double sont touchés**, pas tout le dossier où une
+collision se produit : `blog` et `crm` gardent leur libellé court.
+
+**Le tri est global**, pas dossier par dossier : concaténer des listes
+déjà triées ferait repartir l'ordre de zéro à chaque dossier.
+
+**Un dossier illisible n'en prive pas des autres.** C'est la raison
+d'être d'en avoir plusieurs : si un disque tombe, le reste fonctionne.
+Le menu les liste **et** signale l'absent, grisé, en fin de liste. En
+terminal, les dossiers absents sont écartés en silence — ils ne sont
+nommés que si plus rien n'est accessible.
+
+**Les doublons sont écartés par chemin** : le même dossier ajouté deux
+fois, ou un dossier et son parent (`~/Projects` puis
+`~/Projects/clients`), donneraient chaque dépôt deux fois — et donc une
+« collision » du dépôt avec lui-même, suivie d'un préfixe absurde.
+
+### La migration du réglage
+
+`view/workdir` (une chaîne) est remplacé par `view/workdirs` (une
+liste), mais **reste déclaré au schéma** : il porte encore le réglage
+des versions précédentes. Il est lu une fois, placé en tête de la
+liste, puis vidé — le laisser le ferait réapparaître à chaque lecture,
+y compris après que l'utilisateur l'a retiré.
+
+Sans cette migration, mettre à jour effacerait silencieusement un
+dossier posé une fois et oublié.
+
+### L'interface
+
+« Add folder… » et les retraits vivent dans un **sous-menu
+« Folders »**, en tête du menu « Open Project ». Le sous-menu existe
+même quand aucun dossier n'est configuré : c'est par lui qu'on en
+ajoute un, le cacher rendrait la fonctionnalité introuvable.
+
+Chaque retrait affiche le **chemin complet**, pas le seul nom du
+dossier : deux dossiers peuvent s'appeler « projets » à deux endroits,
+et on retire d'après ce qu'on voit.
+
 ## 2. La recherche en ligne de commande
 
 ### Pourquoi
@@ -89,15 +160,20 @@ que rien n'a été ouvert.
 
 ### Les trois refus, et pourquoi ils diffèrent
 
-Le réglage `view/workdir` n'est pas vérifié à l'écriture ; trois états
-mènent donc à zéro résultat, et les confondre envoie l'utilisateur
-chercher au mauvais endroit.
+Les dossiers ne sont pas vérifiés à l'écriture ; trois états mènent
+donc à zéro résultat, et les confondre envoie l'utilisateur chercher au
+mauvais endroit.
 
 | État | Message | Pourquoi distinct |
 |---|---|---|
-| Aucun dossier choisi | « Aucun dossier de projets choisi » + où en définir un | Le réglage n'existe pas : rien à corriger, tout à faire. |
-| Dossier réglé mais introuvable | « Le dossier de projets est introuvable : *chemin* » + où en définir un | **Le chemin est nommé.** Renommé, déplacé, supprimé : la cause n'est pas devinable, et l'annoncer serait une hypothèse. |
-| Dossier présent, sans dépôt correspondant | « Aucun projet ne correspond à *motif* dans *chemin* » | Le réglage est bon. Renvoyer ici vers « Open Project » ferait refaire un réglage correct. |
+| Aucun dossier configuré | « Aucun dossier de projets choisi » + où en définir un | Le réglage n'existe pas : rien à corriger, tout à faire. |
+| Tous les dossiers introuvables | « Aucun dossier de projets n'est accessible » + **la liste des chemins** + où en définir un | Les chemins sont nommés : avec plusieurs dossiers, savoir lequel rebrancher est l'information utile. |
+| Dossiers présents, sans dépôt correspondant | « Aucun projet ne correspond à *motif* dans *chemins* » | Le réglage est bon. Renvoyer ici vers « Open Project » ferait refaire un réglage correct. |
+
+**Un seul dossier introuvable parmi plusieurs n'est pas un refus** : il
+est écarté en silence et la recherche se poursuit sur les autres. Le
+signaler à chaque appel serait du bruit pour un disque qu'on sait
+débranché.
 
 Le contrôle teste `is_dir`, pas `exists` : un réglage pointant sur un
 **fichier** est aussi inexploitable, et `find_projects` le traite déjà

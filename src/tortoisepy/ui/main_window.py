@@ -38,7 +38,7 @@ from tortoisepy.core.graph_cache import GraphCache, repo_fingerprint
 from tortoisepy.core.credentials import is_https, remember
 from tortoisepy.core.options import GraphOptions
 from tortoisepy.core.editors import find_editors, open_in_editor
-from tortoisepy.core.projects import find_projects
+from tortoisepy.core.projects import find_projects, find_projects_in
 from tortoisepy.core.pull import (
     PullKind,
     analyse_pull,
@@ -1243,8 +1243,62 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
     # --- le dossier de projets -----------------------------------------
 
     def current_workdir(self) -> str:
-        """Le dossier de projets choisi, « » si aucun."""
-        return str(self.settings.value("view/workdir") or "")
+        """Le premier dossier de projets, « » si aucun.
+
+        Conservée pour les appelants d'avant les dossiers multiples —
+        le sélecteur de `choose_workdir` s'en sert pour se
+        pré-remplir.
+        """
+        dossiers = self.current_workdirs()
+        return dossiers[0] if dossiers else ""
+
+    def current_workdirs(self) -> tuple[str, ...]:
+        """Tous les dossiers de projets configurés.
+
+        Demandé par l'utilisateur : « possible de pouvoir ajouter
+        plusieurs répertoires de projet ? »
+
+        **Migre l'ancien réglage à la lecture.** Une version
+        précédente n'en mémorisait qu'un, dans `view/workdir` ; il
+        devient le premier de la liste. Sans cela, mettre à jour
+        effacerait silencieusement un réglage posé une fois et oublié.
+        """
+        dossiers = self.settings.value("view/workdirs") or ()
+        dossiers = tuple(str(d) for d in dossiers if d)
+
+        ancien = str(self.settings.value("view/workdir") or "")
+        if ancien and ancien not in dossiers:
+            dossiers = (ancien, *dossiers)
+
+        return dossiers
+
+    def add_workdir(self, chemin: str) -> None:
+        """Ajoute un dossier de projets, sans doublon.
+
+        Ajouter deux fois le même ferait apparaître chacun de ses
+        projets en double dans le menu.
+        """
+        if not chemin:
+            return
+        dossiers = self.current_workdirs()
+        if chemin in dossiers:
+            return
+        self._enregistrer_les_dossiers((*dossiers, chemin))
+
+    def remove_workdir(self, chemin: str) -> None:
+        """Retire un dossier, sans toucher aux autres."""
+        dossiers = tuple(d for d in self.current_workdirs() if d != chemin)
+        self._enregistrer_les_dossiers(dossiers)
+
+    def _enregistrer_les_dossiers(self, dossiers: tuple[str, ...]) -> None:
+        """Écrit la liste, et neutralise l'ancien réglage.
+
+        L'ancien `view/workdir` est vidé une fois la migration faite :
+        le laisser le ferait réapparaître à chaque lecture, y compris
+        après que l'utilisateur l'a retiré de la liste.
+        """
+        self.settings.set_value("view/workdirs", list(dossiers))
+        self.settings.set_value("view/workdir", "")
 
     def set_workdir(self, chemin: str) -> None:
         """Mémorise le dossier de projets.
@@ -1263,10 +1317,14 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         qu'on n'en choisit un pour la première fois.
         """
         chemin = QFileDialog.getExistingDirectory(
-            self, "Choose a projects folder", self.current_workdir()
+            self, "Add a projects folder", self.current_workdir()
         )
         if chemin:
-            self.set_workdir(chemin)
+            # AJOUTE, ne remplace plus : plusieurs dossiers peuvent
+            # coexister depuis que l'utilisateur l'a demandé. Pour
+            # n'en garder qu'un, on retire les autres depuis le
+            # sous-menu « Folders ».
+            self.add_workdir(chemin)
 
     def _populate_workdir_menu(self) -> None:
         """Reconstruit le menu des projets à chaque ouverture.
@@ -1277,27 +1335,30 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         menu = self.workdir_button.menu()
         menu.clear()
 
-        choisir = menu.addAction("Choose folder…")
-        choisir.triggered.connect(self.choose_workdir)
+        # Le sous-menu de gestion vient en premier, et existe même
+        # sans dossier configuré : c'est par lui qu'on en ajoute un,
+        # le cacher rendrait la fonctionnalité introuvable.
+        dossiers_menu = menu.addMenu("Folders")
+        dossiers_menu.aboutToShow.connect(
+            lambda: self._populate_folders_menu(dossiers_menu)
+        )
+        self._populate_folders_menu(dossiers_menu)
         menu.addSeparator()
 
-        workdir = self.current_workdir()
-        if not workdir:
+        dossiers = self.current_workdirs()
+        if not dossiers:
             vide = menu.addAction("No folder chosen")
             vide.setEnabled(False)
             return
 
-        if not Path(workdir).is_dir():
-            # Un disque externe débranché, un dossier renommé : le dire
-            # plutôt que de laisser un menu vide, qui ferait croire à
-            # un dossier sans projets et chercher au mauvais endroit.
-            absent = menu.addAction(f"Folder not found: {workdir}")
-            absent.setEnabled(False)
-            return
+        # Les dossiers introuvables sont signalés SANS masquer les
+        # autres : c'est la raison d'être d'en avoir plusieurs — si un
+        # disque tombe, le reste fonctionne.
+        absents = [d for d in dossiers if not Path(d).is_dir()]
 
-        projets = find_projects(workdir)
-        if not projets:
-            vide = menu.addAction("No Git project in this folder")
+        projets = find_projects_in(dossiers)
+        if not projets and not absents:
+            vide = menu.addAction("No Git project in these folders")
             vide.setEnabled(False)
             return
 
@@ -1308,6 +1369,36 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             # classique des fermetures dans une boucle Python/Qt).
             action.triggered.connect(
                 lambda checked=False, chemin=projet.path: self.open_project(
+                    chemin
+                )
+            )
+
+        for absent in absents:
+            if projets:
+                menu.addSeparator()
+                projets = ()
+            entree = menu.addAction(f"Folder not found: {absent}")
+            entree.setEnabled(False)
+
+    def _populate_folders_menu(self, menu) -> None:
+        """Le sous-menu de gestion : ajouter, et retirer un par un."""
+        menu.clear()
+
+        ajouter = menu.addAction("Add folder…")
+        ajouter.triggered.connect(self.choose_workdir)
+
+        dossiers = self.current_workdirs()
+        if not dossiers:
+            return
+
+        menu.addSeparator()
+        for dossier in dossiers:
+            # Le chemin complet, pas son seul nom : deux dossiers
+            # peuvent s'appeler « projets » à deux endroits, et on
+            # retire d'après ce qu'on voit.
+            entree = menu.addAction(f"Remove  {dossier}")
+            entree.triggered.connect(
+                lambda checked=False, chemin=dossier: self.remove_workdir(
                     chemin
                 )
             )

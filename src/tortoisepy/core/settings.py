@@ -21,7 +21,15 @@ DEFAULTS: dict[str, object] = {
     "view/panel_hidden": False,
     # Demandé par l'utilisateur : le dossier de projets choisi une
     # fois, qui doit rester d'un lancement à l'autre.
+    #
+    # Conservé bien que remplacé par `view/workdirs` : il porte encore
+    # le réglage des versions précédentes, que la migration lit une
+    # fois. Le supprimer ferait perdre son dossier à qui met à jour.
     "view/workdir": "",
+    # Demandé par l'utilisateur : « possible de pouvoir ajouter
+    # plusieurs répertoires de projet ? » — perso d'un côté,
+    # professionnel de l'autre, parfois un disque externe.
+    "view/workdirs": (),
     "recent/repositories": (),
 }
 
@@ -99,6 +107,7 @@ _COERCITIONS = {
     "view/show_tags": _vers_booleen,
     "view/panel_hidden": _vers_booleen,
     "view/workdir": _vers_chemin,
+    "view/workdirs": _vers_liste,
     "recent/repositories": _vers_liste,
 }
 

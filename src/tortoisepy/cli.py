@@ -189,6 +189,35 @@ def _workdir_memorise() -> str:
         return ""
 
 
+def _workdirs_memorises() -> tuple[str, ...]:
+    """Tous les dossiers de projets configurés depuis l'interface.
+
+    Demandé par l'utilisateur : plusieurs répertoires de projet. Lit
+    le même réglage que l'interface — en avoir deux les ferait
+    diverger — et **migre l'ancien** `view/workdir` au passage, sans
+    quoi `topy -s` perdrait le dossier d'une version précédente alors
+    que l'interface le garde.
+
+    L'import de Qt est LOCAL : `topy --version` ne doit pas payer le
+    chargement de PySide6.
+    """
+    try:
+        from tortoisepy.ui.settings_store import SettingsStore
+
+        reglages = SettingsStore()
+        dossiers = tuple(
+            str(d) for d in (reglages.value("view/workdirs") or ()) if d
+        )
+        ancien = str(reglages.value("view/workdir") or "")
+        if ancien and ancien not in dossiers:
+            dossiers = (ancien, *dossiers)
+        return dossiers
+    except Exception:
+        # Réglages illisibles : la recherche échouera avec son propre
+        # message, ce qui vaut mieux qu'une trace d'exécution.
+        return ()
+
+
 def _choisir(projets) -> str | None:
     """Affiche la liste numérotée et lit le choix. `None` si annulé.
 
@@ -236,10 +265,13 @@ def _rechercher(motif: str) -> str | None:
 
     Demandé par l'utilisateur : « topy -s vti ».
     """
-    from tortoisepy.core.projects import find_projects, search_projects
+    from tortoisepy.core.projects import (
+        find_projects_in,
+        search_projects,
+    )
 
-    workdir = _workdir_memorise()
-    if not workdir:
+    workdirs = _workdirs_memorises()
+    if not workdirs:
         print(
             "Aucun dossier de projets choisi.\n"
             "Ouvrez-en un depuis « Open Project » dans l'application.",
@@ -249,24 +281,26 @@ def _rechercher(motif: str) -> str | None:
 
     from pathlib import Path
 
-    # Le réglage n'est pas vérifié à l'écriture : le dossier a pu
-    # être renommé, déplacé ou supprimé depuis. Sans ce contrôle,
-    # `find_projects` rend un tuple vide et le message plus bas
-    # accuse le mot-clé — l'utilisateur en essaie d'autres pour rien.
-    if not Path(workdir).is_dir():
+    # Les dossiers introuvables sont écartés SANS faire échouer la
+    # recherche : avec plusieurs dossiers, un disque débranché ne doit
+    # pas priver des autres. Ils ne sont signalés que si rien ne reste.
+    lisibles = tuple(w for w in workdirs if Path(w).is_dir())
+    if not lisibles:
+        manquants = "\n  ".join(workdirs)
         print(
-            f"Le dossier de projets est introuvable : {workdir}\n"
+            f"Aucun dossier de projets n'est accessible :\n  {manquants}\n"
             "Définissez-en un depuis « Open Project » dans "
             "l'application.",
             file=sys.stderr,
         )
         return None
 
-    trouves = search_projects(find_projects(workdir), motif)
+    trouves = search_projects(find_projects_in(lisibles), motif)
 
     if not trouves:
         print(
-            f"Aucun projet ne correspond à « {motif} » dans {workdir}",
+            f"Aucun projet ne correspond à « {motif} » dans "
+            + ", ".join(lisibles),
             file=sys.stderr,
         )
         return None

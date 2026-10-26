@@ -55,8 +55,9 @@ def espace(tmp_path, monkeypatch):
 
     import tortoisepy.cli as cli
 
+    # Depuis les dossiers multiples, la recherche lit une LISTE.
     monkeypatch.setattr(
-        cli, "_workdir_memorise", lambda: str(racine), raising=False
+        cli, "_workdirs_memorises", lambda: (str(racine),), raising=False
     )
     return racine
 
@@ -226,7 +227,7 @@ def test_search_without_a_workdir_explains(tmp_path, ouvertures,
     """
     import tortoisepy.cli as cli
 
-    monkeypatch.setattr(cli, "_workdir_memorise", lambda: "",
+    monkeypatch.setattr(cli, "_workdirs_memorises", lambda: (),
                         raising=False)
 
     assert main(["-s", "vti"]) == 1
@@ -251,8 +252,8 @@ def test_a_missing_workdir_is_not_blamed_on_the_keyword(
     import tortoisepy.cli as cli
 
     absent = tmp_path / "Disparu"
-    monkeypatch.setattr(cli, "_workdir_memorise", lambda: str(absent),
-                        raising=False)
+    monkeypatch.setattr(cli, "_workdirs_memorises",
+                        lambda: (str(absent),), raising=False)
 
     assert main(["-s", "vti"]) == 1
     assert not ouvertures
@@ -276,8 +277,8 @@ def test_a_missing_workdir_says_how_to_fix_it(
     """
     import tortoisepy.cli as cli
 
-    monkeypatch.setattr(cli, "_workdir_memorise",
-                        lambda: str(tmp_path / "Disparu"), raising=False)
+    monkeypatch.setattr(cli, "_workdirs_memorises",
+                        lambda: (str(tmp_path / "Disparu"),), raising=False)
 
     assert main(["-s", "vti"]) == 1
 
@@ -303,8 +304,8 @@ def test_an_empty_workdir_still_blames_nothing_but_itself(
 
     vide = tmp_path / "Vide"
     vide.mkdir()
-    monkeypatch.setattr(cli, "_workdir_memorise", lambda: str(vide),
-                        raising=False)
+    monkeypatch.setattr(cli, "_workdirs_memorises",
+                        lambda: (str(vide),), raising=False)
 
     assert main(["-s", "vti"]) == 1
 
@@ -327,13 +328,108 @@ def test_a_workdir_that_is_a_file_is_reported_as_missing(
 
     fichier = tmp_path / "pas-un-dossier.txt"
     fichier.write_text("x\n")
-    monkeypatch.setattr(cli, "_workdir_memorise", lambda: str(fichier),
-                        raising=False)
+    monkeypatch.setattr(cli, "_workdirs_memorises",
+                        lambda: (str(fichier),), raising=False)
 
     assert main(["-s", "vti"]) == 1
 
     message = capsys.readouterr().err
     assert str(fichier) in message
+    assert "correspond" not in message
+
+
+# --- plusieurs dossiers de projets --------------------------------------
+
+
+def test_the_search_spans_every_folder(tmp_path, ouvertures, monkeypatch,
+                                       capsys):
+    """`topy -s` cherche dans TOUS les dossiers configurés.
+
+    Demandé par l'utilisateur : plusieurs répertoires de projet. Ne
+    chercher que dans le premier rendrait la moitié de ses dépôts
+    introuvables depuis le terminal.
+    """
+    import tortoisepy.cli as cli
+
+    perso, boulot = tmp_path / "perso", tmp_path / "boulot"
+    _depot(perso / "vti")
+    _depot(boulot / "crm-equipment")
+    monkeypatch.setattr(
+        cli, "_workdirs_memorises",
+        lambda: (str(perso), str(boulot)), raising=False,
+    )
+
+    assert main(["-s", "crm"]) == 0
+    assert ouvertures and ouvertures[0].endswith("crm-equipment")
+
+
+def test_a_missing_folder_does_not_break_the_search(tmp_path, ouvertures,
+                                                    monkeypatch):
+    """Un disque débranché ne prive pas des autres dossiers.
+
+    C'est la raison d'être d'en avoir plusieurs : si l'un tombe, le
+    reste fonctionne. Échouer parce qu'un seul manque annulerait
+    l'intérêt.
+    """
+    import tortoisepy.cli as cli
+
+    bon = tmp_path / "bon"
+    _depot(bon / "vti")
+    monkeypatch.setattr(
+        cli, "_workdirs_memorises",
+        lambda: (str(tmp_path / "jamais-cree"), str(bon)), raising=False,
+    )
+
+    assert main(["-s", "vti"]) == 0
+    assert ouvertures and ouvertures[0].endswith("vti")
+
+
+def test_homonyms_across_folders_are_distinguishable(tmp_path, ouvertures,
+                                                     monkeypatch, capsys):
+    """Deux dépôts « api » doivent être discernables dans la liste.
+
+    Mesuré avant d'écrire : la simple concaténation proposait deux
+    lignes identiques, et choisir « 1 » ou « 2 » revenait à tirer au
+    sort.
+    """
+    import tortoisepy.cli as cli
+
+    perso, boulot = tmp_path / "perso", tmp_path / "boulot"
+    _depot(perso / "api")
+    _depot(boulot / "api")
+    monkeypatch.setattr(
+        cli, "_workdirs_memorises",
+        lambda: (str(perso), str(boulot)), raising=False,
+    )
+    monkeypatch.setattr("builtins.input", lambda *a: "1")
+
+    assert main(["-s", "api"]) == 0
+
+    sortie = capsys.readouterr().out
+    assert "perso/api" in sortie, sortie
+    assert "boulot/api" in sortie, sortie
+
+
+def test_every_folder_missing_is_reported(tmp_path, ouvertures, monkeypatch,
+                                          capsys):
+    """Tous les dossiers introuvables : on les nomme.
+
+    Le message ne doit pas accuser le mot-clé, et doit dire lesquels
+    manquent — avec plusieurs dossiers, « le dossier est introuvable »
+    ne suffirait pas à savoir lequel rebrancher.
+    """
+    import tortoisepy.cli as cli
+
+    absents = (str(tmp_path / "un"), str(tmp_path / "deux"))
+    monkeypatch.setattr(cli, "_workdirs_memorises", lambda: absents,
+                        raising=False)
+
+    assert main(["-s", "vti"]) == 1
+    assert not ouvertures
+
+    message = capsys.readouterr().err
+    for absent in absents:
+        assert absent in message, f"« {absent} » non signalé : {message}"
     assert "correspond" not in message
 
 
