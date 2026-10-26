@@ -14,7 +14,12 @@ def test_defaults_cover_every_persisted_key():
         "view/zoom",
         "view/panel_width",
         "view/panel_hidden",
+        # `view/workdir` est remplacé par `view/workdirs` mais reste
+        # déclaré : il porte encore le réglage des versions
+        # précédentes, que la migration lit une fois. Le retirer
+        # ferait perdre son dossier à qui met à jour.
         "view/workdir",
+        "view/workdirs",
         "view/show_tags",
         "recent/repositories",
     }

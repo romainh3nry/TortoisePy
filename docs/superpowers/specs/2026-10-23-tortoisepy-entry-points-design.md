@@ -52,6 +52,77 @@ l'utilisateur de **tous** ses projets.
 externe débranché, et l'oublier en silence perdrait le réglage. C'est
 à l'affichage de dire qu'il est introuvable.
 
+## 1 bis. Plusieurs dossiers de projets
+
+### Pourquoi
+
+Demandé par l'utilisateur : « possible de pouvoir ajouter plusieurs
+répertoires de projet ? » Un seul dossier ne couvre pas l'usage
+courant — projets perso d'un côté, professionnels de l'autre, parfois
+un disque externe.
+
+### Le piège décisif, mesuré
+
+Deux dossiers contenant chacun un dépôt `api` :
+
+```
+concaténation -> ['api', 'blog', 'api', 'crm']
+```
+
+Deux entrées **indiscernables** dans le menu, et `topy -s api`
+proposant deux lignes identiques — choisir « 1 » ou « 2 » revenait à
+tirer au sort.
+
+Le projet avait déjà résolu ce problème un niveau plus bas : un `api`
+dans deux sous-dossiers s'affiche `client-a/api`. La même idée
+s'applique aux racines.
+
+### Ce qui compte pour la reconstruction
+
+**Le préfixe n'est posé qu'en cas de collision** (choix de
+l'utilisateur) : `vti` reste `vti`, seuls les homonymes portent leur
+dossier. Préfixer systématiquement donnerait `perso/vti` sans qu'aucune
+ambiguïté ne l'exige, y compris avec un seul dossier configuré.
+
+**Seuls les noms en double sont touchés**, pas tout le dossier où une
+collision se produit : `blog` et `crm` gardent leur libellé court.
+
+**Le tri est global**, pas dossier par dossier : concaténer des listes
+déjà triées ferait repartir l'ordre de zéro à chaque dossier.
+
+**Un dossier illisible n'en prive pas des autres.** C'est la raison
+d'être d'en avoir plusieurs : si un disque tombe, le reste fonctionne.
+Le menu les liste **et** signale l'absent, grisé, en fin de liste. En
+terminal, les dossiers absents sont écartés en silence — ils ne sont
+nommés que si plus rien n'est accessible.
+
+**Les doublons sont écartés par chemin** : le même dossier ajouté deux
+fois, ou un dossier et son parent (`~/Projects` puis
+`~/Projects/clients`), donneraient chaque dépôt deux fois — et donc une
+« collision » du dépôt avec lui-même, suivie d'un préfixe absurde.
+
+### La migration du réglage
+
+`view/workdir` (une chaîne) est remplacé par `view/workdirs` (une
+liste), mais **reste déclaré au schéma** : il porte encore le réglage
+des versions précédentes. Il est lu une fois, placé en tête de la
+liste, puis vidé — le laisser le ferait réapparaître à chaque lecture,
+y compris après que l'utilisateur l'a retiré.
+
+Sans cette migration, mettre à jour effacerait silencieusement un
+dossier posé une fois et oublié.
+
+### L'interface
+
+« Add folder… » et les retraits vivent dans un **sous-menu
+« Folders »**, en tête du menu « Open Project ». Le sous-menu existe
+même quand aucun dossier n'est configuré : c'est par lui qu'on en
+ajoute un, le cacher rendrait la fonctionnalité introuvable.
+
+Chaque retrait affiche le **chemin complet**, pas le seul nom du
+dossier : deux dossiers peuvent s'appeler « projets » à deux endroits,
+et on retire d'après ce qu'on voit.
+
 ## 2. La recherche en ligne de commande
 
 ### Pourquoi
@@ -89,15 +160,20 @@ que rien n'a été ouvert.
 
 ### Les trois refus, et pourquoi ils diffèrent
 
-Le réglage `view/workdir` n'est pas vérifié à l'écriture ; trois états
-mènent donc à zéro résultat, et les confondre envoie l'utilisateur
-chercher au mauvais endroit.
+Les dossiers ne sont pas vérifiés à l'écriture ; trois états mènent
+donc à zéro résultat, et les confondre envoie l'utilisateur chercher au
+mauvais endroit.
 
 | État | Message | Pourquoi distinct |
 |---|---|---|
-| Aucun dossier choisi | « Aucun dossier de projets choisi » + où en définir un | Le réglage n'existe pas : rien à corriger, tout à faire. |
-| Dossier réglé mais introuvable | « Le dossier de projets est introuvable : *chemin* » + où en définir un | **Le chemin est nommé.** Renommé, déplacé, supprimé : la cause n'est pas devinable, et l'annoncer serait une hypothèse. |
-| Dossier présent, sans dépôt correspondant | « Aucun projet ne correspond à *motif* dans *chemin* » | Le réglage est bon. Renvoyer ici vers « Open Project » ferait refaire un réglage correct. |
+| Aucun dossier configuré | « Aucun dossier de projets choisi » + où en définir un | Le réglage n'existe pas : rien à corriger, tout à faire. |
+| Tous les dossiers introuvables | « Aucun dossier de projets n'est accessible » + **la liste des chemins** + où en définir un | Les chemins sont nommés : avec plusieurs dossiers, savoir lequel rebrancher est l'information utile. |
+| Dossiers présents, sans dépôt correspondant | « Aucun projet ne correspond à *motif* dans *chemins* » | Le réglage est bon. Renvoyer ici vers « Open Project » ferait refaire un réglage correct. |
+
+**Un seul dossier introuvable parmi plusieurs n'est pas un refus** : il
+est écarté en silence et la recherche se poursuit sur les autres. Le
+signaler à chaque appel serait du bruit pour un disque qu'on sait
+débranché.
 
 Le contrôle teste `is_dir`, pas `exists` : un réglage pointant sur un
 **fichier** est aussi inexploitable, et `find_projects` le traite déjà
@@ -153,7 +229,78 @@ elle serait morte : listée mais jamais trouvée. Un test l'exige.
 Un fichier du bon nom mais sans droit d'exécution n'est pas un
 éditeur : le proposer ferait cliquer pour rien.
 
-## 4. Les protocoles réseau (`core/protocols.py`)
+## 4. Savoir combien de graphes sont ouverts (menu « Windows »)
+
+### Pourquoi
+
+Signalé par l'utilisateur :
+
+> « si j'ouvre un deuxième repo depuis le open project ou open recent,
+> le graph s'affiche bien mais pas de deuxième icône, ce qui fait qu'on
+> ne sait pas très bien combien de graph est ouvert »
+
+### Ce n'est pas un défaut, c'est la plateforme
+
+Le Dock de macOS représente des **processus**, pas des fenêtres.
+
+| Chemin | Mécanisme | Icônes |
+|---|---|---|
+| `topy <chemin>` | `Popen` → nouveau processus | une par graphe |
+| « Open Project » / « Open Recent » | `MainWindow(...)` dans le processus courant | une seule, partagée |
+
+Aucun réglage ne change cela : une application avec cinq fenêtres a
+une icône. La réponse est donc la convention macOS pour ce problème —
+un menu listant les fenêtres ouvertes — qui règle le **comptage** et
+la **navigation**, le vrai besoin derrière la question.
+
+### Ce qui compte pour la reconstruction
+
+**La source est `QApplication.topLevelWidgets()`, pas
+`_recent_windows`.** Ce registre est **par fenêtre** : la fenêtre A
+ouvre B et C, mais B ne connaît ni A ni C. Un menu alimenté par lui
+aurait montré une liste différente selon l'endroit d'où on l'ouvre —
+exactement la confusion à lever.
+
+**Le filtre porte sur `isVisible()`.** Mesuré : la fenêtre racine,
+celle lancée depuis le terminal, ne porte pas `WA_DeleteOnClose` ;
+fermée, elle **reste** dans `topLevelWidgets()`, `isVisible()` à
+False. Sans ce filtre, le menu listerait une fenêtre fermée.
+
+**Pas de garde `still_alive` dans ce filtre.** Mesuré : Qt retire
+lui-même l'objet qu'il a détruit. Le garde serait du code mort, et la
+mutation l'a confirmé — aucun test ne pouvait le tuer. Il reste
+**nécessaire** dans le gestionnaire de clic, où la référence figée
+dans la fermeture peut vieillir entre l'ouverture du menu et le clic.
+
+**Le test de type est nécessaire** : `topLevelWidgets()` rend toutes
+les fenêtres de premier niveau, écran d'attente et dialogues compris.
+
+**L'ordre suit le titre.** Celui de `topLevelWidgets()` est arbitraire
+(mesuré : beta, gamma, alpha pour trois fenêtres créées dans l'ordre
+inverse) et changerait d'une ouverture à l'autre, faisant cliquer à
+côté.
+
+**Un `QToolButton`, pas un `QMenuBar`** : ce projet n'a pas de barre
+de menus, tout vit dans la barre d'outils. En introduire une pour une
+entrée changerait l'aspect de la fenêtre, que l'utilisateur a validé.
+
+**Trois appels pour remonter une fenêtre** — `show` rétablit une
+fenêtre réduite, `raise_` la remonte dans la pile, `activateWindow`
+donne le focus clavier. Omettre le dernier la fait apparaître sans
+qu'on puisse y taper.
+
+Le titre portait déjà le dépôt et la branche
+(« alpha [main] — tortoisePy ») : le menu le réutilise en retirant le
+suffixe de l'application, inutile dans un menu qui lui appartient.
+**Par `removesuffix`, jamais `rstrip`** : `rstrip(" — tortoisePy")`
+ampute tout titre finissant par une de ces lettres.
+
+**Le bouton se place hors du bloc conditionnel de « Open in editor »**,
+qui n'existe que si un éditeur est installé. À l'intérieur, le bouton
+disparaîtrait chez quelqu'un sans éditeur — invisible en
+développement, où il y en a toujours un. Un test pose le cas.
+
+## 5. Les protocoles réseau (`core/protocols.py`)
 
 ### Pourquoi
 

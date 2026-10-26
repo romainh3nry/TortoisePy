@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 PROFONDEUR = 2
 """Niveaux explorés sous le dossier choisi.
@@ -140,6 +141,106 @@ def _nom(depot: Path, racine: Path) -> str:
         return depot.relative_to(racine).as_posix()
     except ValueError:
         return depot.name
+
+
+def find_projects_in(
+    workdirs: "Iterable[str] | None",
+) -> tuple[Project, ...]:
+    """Les dépôts contenus dans plusieurs dossiers de projets.
+
+    Demandé par l'utilisateur : « possible de pouvoir ajouter
+    plusieurs répertoires de projet ? » — des projets perso d'un côté,
+    professionnels de l'autre, parfois un disque externe.
+
+    **Les noms ne sont préfixés qu'en cas de collision** (choix de
+    l'utilisateur). Mesuré avant d'écrire : deux dossiers contenant
+    chacun un dépôt `api` donnaient deux entrées indiscernables, dans
+    le menu comme dans `topy -s`. Préfixer systématiquement aurait
+    rendu `vti` en `perso/vti` sans qu'aucune ambiguïté ne l'exige.
+
+    Le tri est **global**, pas dossier par dossier : concaténer des
+    listes déjà triées ferait repartir l'ordre de zéro à chaque
+    dossier, et le menu paraîtrait désordonné.
+
+    Un dossier illisible n'en prive pas des autres — c'est la raison
+    d'être d'en avoir plusieurs : si un disque tombe, le reste
+    fonctionne.
+    """
+    if not workdirs:
+        return ()
+
+    trouves: list[Project] = []
+    vus: set[str] = set()
+    for workdir in workdirs:
+        for projet in find_projects(workdir):
+            # Le même dépôt peut venir de deux dossiers configurés :
+            # le même ajouté deux fois, ou un dossier et son parent
+            # (`~/Projects` puis `~/Projects/clients`). Le lister
+            # deux fois créerait une « collision » du dépôt avec
+            # lui-même, et donc un préfixe absurde.
+            if projet.path in vus:
+                continue
+            vus.add(projet.path)
+            trouves.append(
+                Project(name=projet.name, path=projet.path)
+            )
+
+    trouves = _lever_les_ambiguites(trouves, workdirs)
+    return tuple(sorted(trouves, key=lambda projet: projet.name.lower()))
+
+
+def _lever_les_ambiguites(
+    projets: list[Project], workdirs: "Iterable[str]"
+) -> list[Project]:
+    """Préfixe du nom de son dossier chaque projet homonyme d'un autre.
+
+    Seuls les noms en double sont touchés : leurs voisins gardent
+    leur libellé court. Le piège de la correction serait de préfixer
+    tout un dossier dès qu'une seule collision s'y produit.
+    """
+    comptes: dict[str, int] = {}
+    for projet in projets:
+        comptes[projet.name] = comptes.get(projet.name, 0) + 1
+
+    # Pas de raccourci « aucune collision -> on rend tel quel » : la
+    # boucle ci-dessous ne touche déjà que les noms dont le compte
+    # dépasse 1. Vérifié par mutation — le retirer ne changeait
+    # strictement rien, donc c'était du code qu'aucun test ne pouvait
+    # justifier.
+    racines = [Path(w) for w in workdirs]
+    leves: list[Project] = []
+    for projet in projets:
+        if comptes[projet.name] == 1:
+            leves.append(projet)
+            continue
+        leves.append(
+            Project(
+                name=f"{_dossier_de(projet, racines)}/{projet.name}",
+                path=projet.path,
+            )
+        )
+    return leves
+
+
+def _dossier_de(projet: Project, racines: list[Path]) -> str:
+    """Le nom du dossier de projets d'où vient `projet`.
+
+    Une seule racine configurée peut le contenir : les doublons ont
+    été écartés en amont, et deux racines imbriquées donneraient le
+    même dépôt deux fois. Départager par longueur de chemin serait du
+    code qu'aucun scénario n'atteint — vérifié par mutation, `max` et
+    `min` rendent le même résultat sur tous les cas réels.
+    """
+    chemin = Path(projet.path)
+    for racine in racines:
+        try:
+            chemin.relative_to(racine)
+        except ValueError:
+            continue
+        return racine.name
+    # Hors de toute racine connue : son dossier parent reste la
+    # meilleure information disponible.
+    return chemin.parent.name
 
 
 def search_projects(

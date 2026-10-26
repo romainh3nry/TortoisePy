@@ -154,18 +154,35 @@ def test_a_folder_without_git_is_not_listed(window, espace):
     assert not any("documents" in e for e in _entrees(window))
 
 
-def test_the_menu_always_offers_to_choose_a_folder(window, espace):
+def test_the_menu_always_offers_to_manage_folders(window, espace):
     """Changer de dossier doit rester accessible depuis le menu.
 
-    Sans cette entrée, le réglage serait posé une fois pour toutes et
+    Sans cela, le réglage serait posé une fois pour toutes et
     l'utilisateur n'aurait aucun moyen d'en changer depuis l'UI.
-    """
-    entrees_vides = _entrees(window)
-    window.set_workdir(str(espace))
-    entrees_pleines = _entrees(window)
 
-    for entrees in (entrees_vides, entrees_pleines):
-        assert any("Choose" in e for e in entrees), entrees
+    Depuis les dossiers multiples, « Add folder… » vit dans le
+    sous-menu « Folders » — qui existe même quand aucun dossier n'est
+    configuré, justement pour que l'ajout reste trouvable.
+    """
+    from PySide6.QtWidgets import QMenu
+
+    def ajout_accessible():
+        menu = window.workdir_button.menu()
+        menu.aboutToShow.emit()
+        for action in menu.actions():
+            sous_menu = action.menu()
+            if sous_menu is None:
+                continue
+            sous_menu.aboutToShow.emit()
+            if any("Add folder" in a.text() for a in sous_menu.actions()):
+                return True
+        return False
+
+    assert ajout_accessible(), "aucun dossier configuré : ajout introuvable"
+
+    window.add_workdir(str(espace))
+
+    assert ajout_accessible(), "avec un dossier : ajout introuvable"
 
 
 def test_an_empty_workdir_says_so(window, tmp_path):

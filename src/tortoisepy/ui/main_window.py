@@ -38,7 +38,7 @@ from tortoisepy.core.graph_cache import GraphCache, repo_fingerprint
 from tortoisepy.core.credentials import is_https, remember
 from tortoisepy.core.options import GraphOptions
 from tortoisepy.core.editors import find_editors, open_in_editor
-from tortoisepy.core.projects import find_projects
+from tortoisepy.core.projects import find_projects, find_projects_in
 from tortoisepy.core.pull import (
     PullKind,
     analyse_pull,
@@ -59,7 +59,7 @@ from tortoisepy.ui.settings_store import SettingsStore
 from tortoisepy.ui.commit_detail_window import CommitDetailWindow
 from tortoisepy.ui.log_window import LogWindow
 from tortoisepy.ui.compare_window import CompareWindow
-from tortoisepy.ui.child_windows import ChildWindows
+from tortoisepy.ui.child_windows import ChildWindows, still_alive
 from tortoisepy.ui.commit_panel import CommitPanel
 from tortoisepy.ui.commit_window import CommitWindow
 from tortoisepy.ui.conflict_window import ConflictWindow
@@ -1104,6 +1104,26 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
                 self.editor_button.setMenu(menu)
             toolbar.addWidget(self.editor_button)
 
+        # Demandé par l'utilisateur : « on ne sait pas très bien combien
+        # de graph est ouvert ». Le Dock de macOS représente des
+        # PROCESSUS, pas des fenêtres : `topy` relance un processus
+        # détaché (une icône chacun), alors que « Open Project »
+        # construit une fenêtre dans le processus courant — une seule
+        # icône pour toutes. Ce menu est la convention macOS pour ce
+        # problème, et il sert aussi à revenir à une fenêtre enfouie.
+        self.windows_button = QToolButton(self)
+        self.windows_button.setText("Windows")
+        self.windows_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        windows_menu = QMenu(self.windows_button)
+        # Peuplé à l'ouverture, comme ses deux voisins : la liste change
+        # à chaque fenêtre ouverte ou fermée, et un menu construit une
+        # fois montrerait l'état du passé.
+        windows_menu.aboutToShow.connect(self._populate_windows_menu)
+        self.windows_button.setMenu(windows_menu)
+        toolbar.addWidget(self.windows_button)
+
         return toolbar
 
     def _populate_recent_menu(self) -> None:
@@ -1128,6 +1148,81 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
                 )
             )
 
+    def open_windows(self) -> list["MainWindow"]:
+        """Les fenêtres de graphe ouvertes dans ce processus.
+
+        La source est `QApplication`, et non `_recent_windows` : ce
+        registre est PAR fenêtre. La fenêtre A ouvre B et C, mais B ne
+        connaît ni A ni C — un menu alimenté par lui aurait montré une
+        liste différente selon l'endroit d'où on l'ouvre, soit la
+        confusion même qu'il doit lever.
+
+        Le filtre porte sur la VISIBILITÉ, et c'est la condition qui
+        compte : une fenêtre fermée peut rester listée. Mesuré — la
+        fenêtre racine, celle lancée depuis le terminal, ne porte pas
+        `WA_DeleteOnClose` ; fermée, elle demeure dans
+        `topLevelWidgets()` avec `isVisible()` à False.
+
+        Pas de garde `still_alive` ici : mesuré, Qt retire lui-même de
+        `topLevelWidgets()` l'objet qu'il a détruit (`WA_DeleteOnClose`
+        → `isValid` faux → absent de la liste). Le garde serait du code
+        mort, et la mutation l'a confirmé — aucun test ne pouvait le
+        tuer. Il reste nécessaire dans `_raise_window`, où la référence
+        vieillit dans une fermeture.
+
+        L'ordre est celui du titre, car celui de `topLevelWidgets()`
+        est arbitraire (mesuré : beta, gamma, alpha) et changerait
+        d'une ouverture à l'autre.
+        """
+        vues = [
+            widget
+            for widget in QApplication.topLevelWidgets()
+            if isinstance(widget, MainWindow) and widget.isVisible()
+        ]
+        return sorted(vues, key=lambda fenetre: fenetre.windowTitle())
+
+    def _populate_windows_menu(self) -> None:
+        """Reconstruit la liste des fenêtres à chaque ouverture."""
+        menu = self.windows_button.menu()
+        menu.clear()
+
+        for fenetre in self.open_windows():
+            # Le titre porte déjà le dépôt ET la branche
+            # (« alpha [main] — tortoisePy ») ; le suffixe de
+            # l'application n'apporte rien dans un menu qui lui
+            # appartient.
+            intitule = fenetre.windowTitle().removesuffix(
+                " — tortoisePy"
+            )
+            action = menu.addAction(intitule)
+            # Cochée pour la fenêtre d'où le menu est ouvert : sans
+            # repère, le menu dit combien de fenêtres existent mais pas
+            # laquelle on regarde.
+            action.setCheckable(True)
+            action.setChecked(fenetre is self)
+            # `fenetre=fenetre` fige la valeur : sans ça, toutes les
+            # actions viseraient la dernière de la boucle (même piège
+            # que le menu voisin).
+            action.triggered.connect(
+                lambda checked=False, fenetre=fenetre: self._raise_window(
+                    fenetre
+                )
+            )
+
+    def _raise_window(self, fenetre) -> None:
+        """Ramène `fenetre` au premier plan.
+
+        Les trois appels sont nécessaires : `show` rétablit une fenêtre
+        réduite, `raise_` la remonte dans la pile, et `activateWindow`
+        lui donne le focus clavier. Omettre le dernier la fait
+        apparaître sans qu'on puisse y taper.
+        """
+        if not still_alive(fenetre):
+            return
+        fenetre.show()
+        fenetre.raise_()
+        fenetre.activateWindow()
+
     def open_recent_repository(self, path: str) -> None:
         """Ouvre `path` dans une NOUVELLE fenêtre, sans toucher la courante.
 
@@ -1148,8 +1243,62 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
     # --- le dossier de projets -----------------------------------------
 
     def current_workdir(self) -> str:
-        """Le dossier de projets choisi, « » si aucun."""
-        return str(self.settings.value("view/workdir") or "")
+        """Le premier dossier de projets, « » si aucun.
+
+        Conservée pour les appelants d'avant les dossiers multiples —
+        le sélecteur de `choose_workdir` s'en sert pour se
+        pré-remplir.
+        """
+        dossiers = self.current_workdirs()
+        return dossiers[0] if dossiers else ""
+
+    def current_workdirs(self) -> tuple[str, ...]:
+        """Tous les dossiers de projets configurés.
+
+        Demandé par l'utilisateur : « possible de pouvoir ajouter
+        plusieurs répertoires de projet ? »
+
+        **Migre l'ancien réglage à la lecture.** Une version
+        précédente n'en mémorisait qu'un, dans `view/workdir` ; il
+        devient le premier de la liste. Sans cela, mettre à jour
+        effacerait silencieusement un réglage posé une fois et oublié.
+        """
+        dossiers = self.settings.value("view/workdirs") or ()
+        dossiers = tuple(str(d) for d in dossiers if d)
+
+        ancien = str(self.settings.value("view/workdir") or "")
+        if ancien and ancien not in dossiers:
+            dossiers = (ancien, *dossiers)
+
+        return dossiers
+
+    def add_workdir(self, chemin: str) -> None:
+        """Ajoute un dossier de projets, sans doublon.
+
+        Ajouter deux fois le même ferait apparaître chacun de ses
+        projets en double dans le menu.
+        """
+        if not chemin:
+            return
+        dossiers = self.current_workdirs()
+        if chemin in dossiers:
+            return
+        self._enregistrer_les_dossiers((*dossiers, chemin))
+
+    def remove_workdir(self, chemin: str) -> None:
+        """Retire un dossier, sans toucher aux autres."""
+        dossiers = tuple(d for d in self.current_workdirs() if d != chemin)
+        self._enregistrer_les_dossiers(dossiers)
+
+    def _enregistrer_les_dossiers(self, dossiers: tuple[str, ...]) -> None:
+        """Écrit la liste, et neutralise l'ancien réglage.
+
+        L'ancien `view/workdir` est vidé une fois la migration faite :
+        le laisser le ferait réapparaître à chaque lecture, y compris
+        après que l'utilisateur l'a retiré de la liste.
+        """
+        self.settings.set_value("view/workdirs", list(dossiers))
+        self.settings.set_value("view/workdir", "")
 
     def set_workdir(self, chemin: str) -> None:
         """Mémorise le dossier de projets.
@@ -1168,10 +1317,14 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         qu'on n'en choisit un pour la première fois.
         """
         chemin = QFileDialog.getExistingDirectory(
-            self, "Choose a projects folder", self.current_workdir()
+            self, "Add a projects folder", self.current_workdir()
         )
         if chemin:
-            self.set_workdir(chemin)
+            # AJOUTE, ne remplace plus : plusieurs dossiers peuvent
+            # coexister depuis que l'utilisateur l'a demandé. Pour
+            # n'en garder qu'un, on retire les autres depuis le
+            # sous-menu « Folders ».
+            self.add_workdir(chemin)
 
     def _populate_workdir_menu(self) -> None:
         """Reconstruit le menu des projets à chaque ouverture.
@@ -1182,27 +1335,30 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
         menu = self.workdir_button.menu()
         menu.clear()
 
-        choisir = menu.addAction("Choose folder…")
-        choisir.triggered.connect(self.choose_workdir)
+        # Le sous-menu de gestion vient en premier, et existe même
+        # sans dossier configuré : c'est par lui qu'on en ajoute un,
+        # le cacher rendrait la fonctionnalité introuvable.
+        dossiers_menu = menu.addMenu("Folders")
+        dossiers_menu.aboutToShow.connect(
+            lambda: self._populate_folders_menu(dossiers_menu)
+        )
+        self._populate_folders_menu(dossiers_menu)
         menu.addSeparator()
 
-        workdir = self.current_workdir()
-        if not workdir:
+        dossiers = self.current_workdirs()
+        if not dossiers:
             vide = menu.addAction("No folder chosen")
             vide.setEnabled(False)
             return
 
-        if not Path(workdir).is_dir():
-            # Un disque externe débranché, un dossier renommé : le dire
-            # plutôt que de laisser un menu vide, qui ferait croire à
-            # un dossier sans projets et chercher au mauvais endroit.
-            absent = menu.addAction(f"Folder not found: {workdir}")
-            absent.setEnabled(False)
-            return
+        # Les dossiers introuvables sont signalés SANS masquer les
+        # autres : c'est la raison d'être d'en avoir plusieurs — si un
+        # disque tombe, le reste fonctionne.
+        absents = [d for d in dossiers if not Path(d).is_dir()]
 
-        projets = find_projects(workdir)
-        if not projets:
-            vide = menu.addAction("No Git project in this folder")
+        projets = find_projects_in(dossiers)
+        if not projets and not absents:
+            vide = menu.addAction("No Git project in these folders")
             vide.setEnabled(False)
             return
 
@@ -1213,6 +1369,36 @@ L'attente passe par `stop()`, qui **demande** l'arrêt avant
             # classique des fermetures dans une boucle Python/Qt).
             action.triggered.connect(
                 lambda checked=False, chemin=projet.path: self.open_project(
+                    chemin
+                )
+            )
+
+        for absent in absents:
+            if projets:
+                menu.addSeparator()
+                projets = ()
+            entree = menu.addAction(f"Folder not found: {absent}")
+            entree.setEnabled(False)
+
+    def _populate_folders_menu(self, menu) -> None:
+        """Le sous-menu de gestion : ajouter, et retirer un par un."""
+        menu.clear()
+
+        ajouter = menu.addAction("Add folder…")
+        ajouter.triggered.connect(self.choose_workdir)
+
+        dossiers = self.current_workdirs()
+        if not dossiers:
+            return
+
+        menu.addSeparator()
+        for dossier in dossiers:
+            # Le chemin complet, pas son seul nom : deux dossiers
+            # peuvent s'appeler « projets » à deux endroits, et on
+            # retire d'après ce qu'on voit.
+            entree = menu.addAction(f"Remove  {dossier}")
+            entree.triggered.connect(
+                lambda checked=False, chemin=dossier: self.remove_workdir(
                     chemin
                 )
             )
