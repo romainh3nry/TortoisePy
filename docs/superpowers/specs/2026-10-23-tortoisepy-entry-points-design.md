@@ -153,6 +153,33 @@ résultats, taper « 4 » est plus rapide que quatre flèches.
 arrière-plan pour rendre la main au terminal en 0,07 s, les trois flux
 vers le vide : une question posée après n'atteindrait personne.
 
+**« Suis-je déjà le processus relancé ? » ne se lit PAS dans
+l'environnement.** Signalé par l'utilisateur : le prompt restait occupé
+depuis le terminal de VSCode, mais pas depuis Terminal.app.
+
+La cause tenait à une variable, `TORTOISEPY_DETACHE`, posée sur
+l'enfant pour qu'il ne se relance pas à l'infini. Or une variable
+d'environnement est **héritée par tout descendant, indéfiniment** : il
+suffit qu'un `topy` ait un jour lancé un shell — ou que l'éditeur ait
+démarré depuis un contexte contaminé — pour que tous ses terminaux la
+portent. Constaté chez l'utilisateur : `TORTOISEPY_DETACHE=1` dans son
+shell VSCode, sans qu'aucun fichier de configuration ne la pose.
+`topy` se croyait alors déjà détaché et ouvrait la fenêtre dans le
+processus courant.
+
+Le critère est donc **observable et non héritable** :
+`start_new_session=True` fait du processus le chef de sa session.
+
+| Cas | `pid == getsid(0)` | variable héritée |
+|---|---|---|
+| Shell ordinaire | `False` → relance | `True` → bloquait |
+| Processus détaché | `True` → ne se relance pas | `True` |
+| Petit-enfant d'un détaché | `False` → relance | `True` → bloquait |
+
+Windows conserve le marqueur : `getsid` n'y existe pas, et
+`DETACHED_PROCESS` ne crée pas de session héritée — le problème ne s'y
+pose pas de la même façon.
+
 **Toute annulation rend 1, pas 0.** Entrée vide, `Ctrl-C`, `Ctrl-D` :
 `0` signifierait « ce qui était demandé a été fait », et un script
 enchaînant `topy -s crm && deploy` partirait sur un déploiement alors

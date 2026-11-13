@@ -15,6 +15,7 @@ tests ferment la porte, chacun à un endroit différent.
 from __future__ import annotations
 
 import pathlib
+import os
 import subprocess
 
 import pytest
@@ -48,14 +49,20 @@ def test_the_guard_fixture_itself_fires(popen_interdit):
         cli.subprocess.Popen(["/bin/true"])
 
 
-def test_the_detach_marker_stops_the_relaunch(monkeypatch, popen_interdit):
-    """Le marqueur d'environnement suffit à couper la relance.
+def test_being_session_leader_stops_the_relaunch(monkeypatch,
+                                                 popen_interdit):
+    """Se faire passer pour le processus détaché coupe la relance.
 
     C'est la protection la moins coûteuse pour un test qui doit
-    traverser `_afficher` : poser le marqueur, et `_relancer_detache`
-    rend `False` sans jamais appeler `Popen`.
+    traverser `_afficher` : `_relancer_detache` rend `False` sans
+    jamais appeler `Popen`.
+
+    Le critère n'est plus le marqueur d'environnement — il était
+    hérité par tout descendant, et laissait `topy` se croire détaché
+    dans un terminal VSCode contaminé (signalé par l'utilisateur).
     """
-    monkeypatch.setenv(cli._MARQUEUR_DETACHE, "1")
+    monkeypatch.setattr(cli.os, "getpid", lambda: 4242)
+    monkeypatch.setattr(cli.os, "getsid", lambda _pid: 4242)
 
     assert cli._relancer_detache(["/un/chemin"]) is False
 
@@ -72,6 +79,8 @@ def test_relaunching_without_the_marker_would_spawn(monkeypatch):
         lambda *args, **kwargs: vus.append((args, kwargs)),
     )
     monkeypatch.delenv(cli._MARQUEUR_DETACHE, raising=False)
+    # Pas chef de session : un shell ordinaire, qui doit relancer.
+    monkeypatch.setattr(cli.os, "getsid", lambda _pid: os.getpid() + 1)
 
     assert cli._relancer_detache(["/un/chemin"]) is True
     assert len(vus) == 1

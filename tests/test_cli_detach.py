@@ -12,6 +12,7 @@ les deux plateformes.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 
@@ -65,14 +66,102 @@ def test_the_detach_flags_match_the_platform():
         )
 
 
+def test_an_inherited_marker_does_not_block_the_relaunch(monkeypatch):
+    """Signalé par l'utilisateur : le prompt n'est pas rendu sous VSCode.
+
+        « quand j'ouvre un graph avec la commande topy depuis le cli de
+          vscode, le prompt n'est pas libéré, par contre depuis mon
+          terminal oui »
+
+    Diagnostic : `TORTOISEPY_DETACHE=1` traînait dans son shell. Une
+    variable d'environnement est **héritée par tout descendant,
+    indéfiniment** — il suffit qu'un `topy` ait un jour lancé un shell,
+    ou que VSCode ait démarré depuis un contexte contaminé, pour que
+    tous ses terminaux la portent. `topy` se croyait alors déjà
+    détaché, ouvrait la fenêtre dans le processus courant et gardait le
+    prompt.
+
+    Le marqueur ne doit donc plus décider de rien.
+    """
+    import tortoisepy.cli as cli
+
+    monkeypatch.setenv("TORTOISEPY_DETACHE", "1")
+    vus = []
+    monkeypatch.setattr(
+        cli.subprocess, "Popen",
+        lambda *a, **k: vus.append((a, k)),
+    )
+    # Pas chef de session : un shell ordinaire.
+    monkeypatch.setattr(cli.os, "getpid", lambda: 1000)
+    monkeypatch.setattr(cli.os, "getsid", lambda _pid: 999)
+
+    assert cli._relancer_detache(["/un/chemin"]) is True, (
+        "une variable héritée empêche encore le détachement"
+    )
+    assert vus, "aucune relance lancée"
+
+
+def test_a_session_leader_does_not_relaunch_itself(monkeypatch):
+    """Le processus DÉJÀ détaché ne doit pas en relancer un autre.
+
+    C'est ce que le marqueur assurait, et que le test de session
+    remplace. Mesuré : `start_new_session=True` fait du processus le
+    chef de sa session — propriété observable, et contrairement à une
+    variable, **non héritable**. Un petit-enfant rend `False` et peut
+    donc se relancer normalement.
+    """
+    import tortoisepy.cli as cli
+
+    monkeypatch.delenv("TORTOISEPY_DETACHE", raising=False)
+    vus = []
+    monkeypatch.setattr(
+        cli.subprocess, "Popen",
+        lambda *a, **k: vus.append((a, k)),
+    )
+    monkeypatch.setattr(cli.os, "getpid", lambda: 1000)
+    monkeypatch.setattr(cli.os, "getsid", lambda _pid: 1000)
+
+    assert cli._relancer_detache(["/un/chemin"]) is False
+    assert not vus, "le processus détaché s'est relancé lui-même"
+
+
+def test_a_grandchild_is_not_mistaken_for_the_detached_process(monkeypatch):
+    """LE cas que la variable rendait faux.
+
+    Mesuré : un petit-enfant d'un processus détaché n'est PAS chef de
+    session (sid différent de son pid), alors qu'il héritait bien de
+    `TORTOISEPY_DETACHE=1`.
+    """
+    import tortoisepy.cli as cli
+
+    monkeypatch.setenv("TORTOISEPY_DETACHE", "1")
+    vus = []
+    monkeypatch.setattr(
+        cli.subprocess, "Popen",
+        lambda *a, **k: vus.append((a, k)),
+    )
+    # Petit-enfant : la session est celle de son parent détaché.
+    monkeypatch.setattr(cli.os, "getpid", lambda: 2000)
+    monkeypatch.setattr(cli.os, "getsid", lambda _pid: 1000)
+
+    assert cli._relancer_detache(["/un/chemin"]) is True
+    assert vus
+
+
 def test_relaunching_is_skipped_when_already_detached(monkeypatch):
-    """Sans ce garde-fou, `topy` se relancerait à l'infini."""
+    """Sans ce garde-fou, `topy` se relancerait à l'infini.
+
+    Le critère n'est plus une variable d'environnement mais la qualité
+    de chef de session : elle dit la même chose, sans être héritée par
+    les descendants. Voir `_deja_detache`.
+    """
     lancements = []
     monkeypatch.setattr(
         cli.subprocess, "Popen",
         lambda *a, **k: lancements.append(a) or None,
     )
-    monkeypatch.setenv(cli._MARQUEUR_DETACHE, "1")
+    monkeypatch.setattr(cli.os, "getpid", lambda: 1000)
+    monkeypatch.setattr(cli.os, "getsid", lambda _pid: 1000)
 
     assert cli._relancer_detache([".", ]) is False
     assert lancements == [], "l'enfant ne doit jamais se relancer"
@@ -86,6 +175,8 @@ def test_relaunching_passes_the_arguments(monkeypatch):
         lambda commande, **k: captures.append((commande, k)) or None,
     )
     monkeypatch.delenv(cli._MARQUEUR_DETACHE, raising=False)
+    # Pas chef de session : un shell ordinaire, qui doit relancer.
+    monkeypatch.setattr(cli.os, "getsid", lambda _pid: os.getpid() + 1)
 
     assert cli._relancer_detache(["/un/chemin"]) is True
     commande, options = captures[0]
@@ -105,6 +196,8 @@ def test_the_detached_child_is_cut_from_the_terminal(monkeypatch):
         lambda commande, **k: captures.append(k) or None,
     )
     monkeypatch.delenv(cli._MARQUEUR_DETACHE, raising=False)
+    # Pas chef de session : un shell ordinaire, qui doit relancer.
+    monkeypatch.setattr(cli.os, "getsid", lambda _pid: os.getpid() + 1)
 
     cli._relancer_detache([])
     options = captures[0]
@@ -121,6 +214,8 @@ def test_wait_keeps_the_old_behaviour(monkeypatch):
         lambda *a, **k: lancements.append(a) or None,
     )
     monkeypatch.delenv(cli._MARQUEUR_DETACHE, raising=False)
+    # Pas chef de session : un shell ordinaire, qui doit relancer.
+    monkeypatch.setattr(cli.os, "getsid", lambda _pid: os.getpid() + 1)
     monkeypatch.setattr(cli, "find_repository", lambda cible: None)
 
     # `--wait` est consommé, et aucune relance n'a lieu.
@@ -136,4 +231,6 @@ def test_wait_is_documented():
 
 def test_an_unknown_option_is_still_refused(monkeypatch):
     monkeypatch.delenv(cli._MARQUEUR_DETACHE, raising=False)
+    # Pas chef de session : un shell ordinaire, qui doit relancer.
+    monkeypatch.setattr(cli.os, "getsid", lambda _pid: os.getpid() + 1)
     assert cli.main(["--verison"]) == 1
