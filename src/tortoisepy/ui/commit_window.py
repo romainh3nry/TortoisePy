@@ -29,10 +29,16 @@ from PySide6.QtWidgets import (
 from tortoisepy.core import operations
 from tortoisepy.core.amend import amend_commit, can_amend, last_commit_message
 from tortoisepy.core.changes import diff_for, list_changes
+from tortoisepy.core.discard import (
+    discard_all,
+    discard_file,
+    discardable_paths,
+)
 from tortoisepy.core.push_state import unpushed_oids
 from tortoisepy.ui.diff_view import DiffView
 from tortoisepy.ui.dialogs import (
     confirm,
+    confirmation_for,
     copy_to_clipboard,
     show_error,
     show_message,
@@ -167,6 +173,18 @@ class CommitWindow(QMainWindow):
         )
         self.check_all_button.clicked.connect(self.check_all)
 
+        # À GAUCHE lui aussi, et pour une raison plus forte : il
+        # DÉTRUIT du travail. Le placer près de « Commit » inviterait
+        # au clic de trop, exactement ce que l'utilisateur veut éviter
+        # — « une confirmation pour chaque annulation en cas d'erreur
+        # de click ».
+        self.discard_all_button = QPushButton("Discard all")
+        self.discard_all_button.setToolTip(
+            "Rend tous les fichiers suivis à leur état commité. "
+            "Un stash est posé avant : rien n'est perdu."
+        )
+        self.discard_all_button.clicked.connect(self.discard_all)
+
         # Le push traverse le réseau — plusieurs secondes — et le commit
         # écrit l'index et l'arbre. Sans retour visuel, la fenêtre paraît
         # figée (signalé par l'utilisateur).
@@ -182,6 +200,7 @@ class CommitWindow(QMainWindow):
 
         buttons = QHBoxLayout()
         buttons.addWidget(self.check_all_button)
+        buttons.addWidget(self.discard_all_button)
         buttons.addWidget(self.progress)
         buttons.addStretch(1)
         buttons.addWidget(cancel)
@@ -323,9 +342,25 @@ class CommitWindow(QMainWindow):
         Séparé du `QMenu`, pour qu'un test lise les entrées sans ouvrir
         un vrai menu — même principe que les autres fenêtres à liste.
         """
-        if self._files.topLevelItem(index) is None:
+        item = self._files.topLevelItem(index)
+        if item is None:
             return ()
+
+        # « Discard » n'est pas proposé sur un fichier non suivi : il
+        # n'a aucune version à restaurer, et l'« annuler » reviendrait
+        # à le supprimer. Choix de l'utilisateur, et comportement de
+        # `git checkout --`.
+        if self._est_annulable(index):
+            return ("Copy path", "Discard changes")
         return ("Copy path",)
+
+    def _est_annulable(self, index: int) -> bool:
+        """Le fichier de la ligne `index` a-t-il une version commitée ?"""
+        item = self._files.topLevelItem(index)
+        if item is None:
+            return False
+        chemin = item.data(0, PATH_ROLE)
+        return chemin in discardable_paths(self.repository)
 
     def copy_path_row(self, index: int) -> None:
         """Copie le chemin du fichier de la ligne `index`.
@@ -341,6 +376,92 @@ class CommitWindow(QMainWindow):
         if item is None:
             return
         copy_to_clipboard(item.data(0, PATH_ROLE))
+
+    def _confirmer(self, demande) -> bool:
+        """Pose la question, rend la réponse.
+
+        Isolée pour que les tests puissent répondre sans ouvrir de
+        dialogue — et surtout pour qu'ils vérifient qu'un refus ne
+        change rien.
+        """
+        return confirm(self, demande)
+
+    def discard_row(self, index: int) -> None:
+        """Annule les modifications du fichier de la ligne `index`.
+
+        Demandé par l'utilisateur, avec une exigence explicite : « il
+        faudra mettre une confirmation pour chaque annulation en cas
+        d'erreur de click ». Un seul fichier se confirme donc comme le
+        reste — l'entrée vit à côté de « Copy path », où un clic de
+        travers est vite arrivé.
+        """
+        item = self._files.topLevelItem(index)
+        if item is None:
+            return
+        chemin = item.data(0, PATH_ROLE)
+
+        if not self._est_annulable(index):
+            return
+
+        demande = confirmation_for("discard_file", chemin, self._etat())
+        if demande is None or not self._confirmer(demande):
+            return
+
+        self._lancer_en_fond(
+            lambda: discard_file(self.repository, chemin),
+            self._apres_annulation,
+        )
+
+    def discard_all(self) -> None:
+        """Annule tous les fichiers suivis, après confirmation.
+
+        Les fichiers non suivis sont laissés en place : « tout
+        annuler » ne veut pas dire « tout supprimer », et un fichier
+        qu'on vient d'écrire n'est pas un changement à défaire.
+        """
+        chemins = discardable_paths(self.repository)
+        if not chemins:
+            return
+
+        combien = f"{len(chemins)} file(s)"
+        demande = confirmation_for("discard_all", combien, self._etat())
+        if demande is None or not self._confirmer(demande):
+            return
+
+        self._lancer_en_fond(
+            lambda: discard_all(self.repository),
+            self._apres_annulation,
+        )
+
+    def _apres_annulation(self, resultat) -> None:
+        """Rafraîchit la liste et dit ce qui s'est passé."""
+        if isinstance(resultat, Exception):
+            show_error(self, "Discard", str(resultat))
+            return
+        if not resultat.success:
+            show_error(self, resultat.summary, resultat.git_error or "")
+            return
+        # Dans la barre d'état, PAS dans une boîte de dialogue : une
+        # modale après chaque annulation réussie obligerait à cliquer
+        # deux fois pour une opération qu'on vient de confirmer. Elle
+        # bloquait d'ailleurs les tests, ce qui est le même symptôme vu
+        # autrement.
+        #
+        # Le message porte la commande de récupération — l'information
+        # dont on a besoin si l'annulation était une erreur. 30 s, le
+        # temps de la lire ou de la copier.
+        self.statusBar().showMessage(resultat.summary, 30000)
+        self.refresh()
+
+    def _etat(self):
+        """L'état du dépôt, pour les confirmations.
+
+        Lu à chaque appel plutôt que mémorisé : l'arbre de travail
+        change pendant que la fenêtre est ouverte.
+        """
+        from tortoisepy.core.state import read_state
+
+        return read_state(self.repository)
 
     def _show_file_menu(self, position) -> None:
         item = self._files.itemAt(position)
@@ -363,10 +484,18 @@ class CommitWindow(QMainWindow):
             )
         menu.exec(self._files.viewport().mapToGlobal(position))
 
-        if choix and choix[0] == "Copy path":
-            # Au tour suivant : le NSMenu natif de macOS n'a pas fini son
-            # démontage dans cette pile (cf. `main_window`).
+        if not choix:
+            return
+
+        # Au tour suivant : le NSMenu natif de macOS n'a pas fini son
+        # démontage dans cette pile (cf. `main_window`). C'est d'autant
+        # plus nécessaire ici que l'annulation ouvre une confirmation —
+        # une fenêtre par-dessus un menu encore vivant, ce que macOS 27
+        # refuse (crash signalé).
+        if choix[0] == "Copy path":
             QTimer.singleShot(0, lambda: self.copy_path_row(index))
+        elif choix[0] == "Discard changes":
+            QTimer.singleShot(0, lambda: self.discard_row(index))
 
     def _lancer_en_fond(self, appelable, suite) -> None:
         """Exécute `appelable` hors du fil principal, puis `suite` dessus.
@@ -820,6 +949,17 @@ class CommitWindow(QMainWindow):
         )
         self.commit_button.setEnabled(ready)
         self.push_button.setEnabled(ready)
+
+        # Rien à annuler : le bouton ne doit pas inviter au clic. Sans
+        # cela, cliquer poserait la question puis répondrait « rien à
+        # faire », ce qui fait douter de ce qu'on vient de voir.
+        #
+        # Les fichiers NON SUIVIS ne comptent pas : ils ne seront pas
+        # touchés, et les compter ferait proposer une annulation sans
+        # effet.
+        self.discard_all_button.setEnabled(
+            bool(discardable_paths(self.repository))
+        )
 
     def _items(self) -> list[QTreeWidgetItem]:
         return [

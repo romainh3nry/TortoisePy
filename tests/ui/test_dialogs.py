@@ -730,3 +730,107 @@ def test_the_choice_runs_outside_the_event_stack(qtbot, tmp_path):
     )
 
     qtbot.waitUntil(lambda: bool(executees), timeout=2000)
+
+
+# --- annuler des changements -------------------------------------------
+#
+# Demandé par l'utilisateur, avec une exigence explicite :
+#
+#     « il faudra mettre une confirmation pour chaque annulation en cas
+#       d'erreur de click »
+#
+# Donc pas de raccourci pour le cas unitaire sous prétexte qu'il ne
+# porte que sur un fichier.
+
+
+def test_discarding_one_file_always_needs_confirmation():
+    """Un seul fichier se confirme aussi — demande de l'utilisateur.
+
+    L'entrée est dans un menu contextuel, à côté de « Copy path » :
+    un clic de travers y est vite arrivé, et le travail perdu ne se
+    retrouve pas sans connaître la commande de récupération.
+    """
+    demande = confirmation_for("discard_file", "src/api.py", state())
+
+    assert demande is not None, "aucune confirmation demandée"
+    assert demande.destructive
+
+
+def test_discarding_one_file_names_the_file():
+    """« Confirmer ? » sans contexte ne permet pas de décider (§7.5)."""
+    demande = confirmation_for("discard_file", "src/api.py", state())
+
+    assert "src/api.py" in demande.message
+
+
+def test_discarding_one_file_says_how_to_recover():
+    """La confirmation doit donner la commande qui marche VRAIMENT.
+
+    Mesuré : après une annulation unitaire, `git stash pop` échoue sur
+    « 1 conflict prevents checkout » dès qu'un autre fichier du stash
+    est encore modifié — le cas habituel. Promettre `pop` au moment
+    précis où l'utilisateur cherche à récupérer son travail serait pire
+    que ne rien dire.
+    """
+    demande = confirmation_for("discard_file", "src/api.py", state())
+
+    assert "checkout stash@{0}" in demande.message, demande.message
+    assert "stash pop" not in demande.message
+
+
+def test_discarding_all_needs_confirmation():
+    """Le bouton « tout annuler » : la plus coûteuse des deux."""
+    demande = confirmation_for("discard_all", "7 files", state())
+
+    assert demande is not None
+    assert demande.destructive
+
+
+def test_discarding_all_says_how_many_files():
+    """Le nombre est l'information qui fait décider.
+
+    « Annuler tous les changements ? » ne dit pas s'il s'agit d'une
+    coquille ou d'une journée de travail.
+    """
+    demande = confirmation_for("discard_all", "7 files", state())
+
+    assert "7 files" in demande.message
+
+
+def test_discarding_all_says_pop_works_here():
+    """Pour « tout annuler », `git stash pop` fonctionne.
+
+    L'arbre est propre après l'opération, donc rien n'entre en
+    conflit — mesuré. Donner la même commande que pour le cas
+    unitaire serait inutilement compliqué.
+    """
+    demande = confirmation_for("discard_all", "7 files", state())
+
+    assert "stash pop" in demande.message
+
+
+def test_both_discards_promise_the_stash():
+    """Le filet doit être annoncé, sinon il ne rassure personne.
+
+    C'est ce qui distingue cette opération d'un `git checkout --` nu,
+    et c'est la raison pour laquelle l'utilisateur l'a acceptée.
+    """
+    for action, cible in (
+        ("discard_file", "src/api.py"),
+        ("discard_all", "3 files"),
+    ):
+        demande = confirmation_for(action, cible, state())
+        assert "stash" in demande.message.lower(), action
+
+
+def test_discarding_warns_untracked_files_are_kept():
+    """Ce que l'opération NE fait pas doit être dit.
+
+    Choix de l'utilisateur : les fichiers non suivis ne sont jamais
+    touchés. Sans cette ligne, « tout annuler » laisserait croire que
+    le dossier revient à son état commité — et on chercherait pourquoi
+    des fichiers restent.
+    """
+    demande = confirmation_for("discard_all", "3 files", state())
+
+    assert "untracked" in demande.message.lower()

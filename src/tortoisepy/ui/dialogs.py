@@ -151,6 +151,40 @@ def confirmation_for(
             destructive=True,
         )
 
+    if action == "discard_file":
+        # Confirmation même pour un seul fichier, demandé explicitement
+        # par l'utilisateur : « il faudra mettre une confirmation pour
+        # chaque annulation en cas d'erreur de click ». L'entrée vit
+        # dans un menu contextuel, à côté de « Copy path » — un clic de
+        # travers y est vite arrivé.
+        return ConfirmationRequest(
+            title="Discard changes — destructive",
+            message=(
+                f"git checkout -- {target}\n\n"
+                f"{target} goes back to its committed state. This is "
+                "the only operation here that destroys work Git has "
+                "never seen.\n\n"
+                "A stash is taken first, so nothing is lost for good:\n"
+                f"  git checkout stash@{{0}} -- {target}\n\n"
+                "Untracked files are left alone."
+            ),
+            destructive=True,
+        )
+
+    if action == "discard_all":
+        return ConfirmationRequest(
+            title="Discard all changes — destructive",
+            message=(
+                f"{target} go back to their committed state.\n\n"
+                "This is the only operation here that destroys work Git "
+                "has never seen.\n\n"
+                "A stash is taken first, so nothing is lost for good:\n"
+                "  git stash pop\n\n"
+                "Untracked files are left alone."
+            ),
+            destructive=True,
+        )
+
     if action == "revert_commit":
         return ConfirmationRequest(
             title="Revert commit",

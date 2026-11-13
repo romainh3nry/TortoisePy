@@ -115,6 +115,45 @@ def _options_de_detachement() -> dict:
     return {"start_new_session": True}
 
 
+def _deja_detache() -> bool:
+    """Ce processus est-il DÉJÀ celui qu'on aurait relancé ?
+
+    Signalé par l'utilisateur : « quand j'ouvre un graph avec la
+    commande topy depuis le cli de vscode, le prompt n'est pas libéré,
+    par contre depuis mon terminal oui ».
+
+    La réponse se lisait dans `TORTOISEPY_DETACHE`, et c'était le
+    défaut : une variable d'environnement est **héritée par tout
+    descendant, indéfiniment**. Il suffit qu'un `topy` ait un jour
+    lancé un shell — ou que l'éditeur ait démarré depuis un contexte
+    contaminé — pour que tous ses terminaux la portent. `topy` se
+    croyait alors déjà détaché, ouvrait la fenêtre dans le processus
+    courant, et gardait le prompt. Constaté chez l'utilisateur :
+    `TORTOISEPY_DETACHE=1` dans son shell VSCode sans qu'aucun fichier
+    de configuration ne la pose.
+
+    Le critère est désormais **observable et non héritable** :
+    `start_new_session=True` fait du processus le chef de sa session.
+    Mesuré — shell ordinaire : `sid != pid` ; processus détaché :
+    `sid == pid` ; petit-enfant d'un détaché : `sid != pid`, alors
+    qu'il héritait bien de la variable.
+
+    `getsid` n'existe pas sous Windows : là-bas, le marqueur reste le
+    seul moyen, et le problème ne se pose pas de la même façon
+    (`DETACHED_PROCESS` ne crée pas de session héritée).
+    """
+    chef_de_session = getattr(os, "getsid", None)
+    if chef_de_session is None:
+        return os.environ.get(_MARQUEUR_DETACHE) == "1"
+
+    try:
+        return os.getpid() == chef_de_session(0)
+    except OSError:
+        # Système qui refuse la question : on retombe sur le marqueur
+        # plutôt que de relancer en boucle.
+        return os.environ.get(_MARQUEUR_DETACHE) == "1"
+
+
 def _relancer_detache(arguments: list[str]) -> bool:
     """Relance `topy` détaché du terminal. `True` si la relance a eu lieu.
 
@@ -129,7 +168,7 @@ def _relancer_detache(arguments: list[str]) -> bool:
     normalement. Mieux vaut un shell bloqué qu'une application qui refuse
     de démarrer.
     """
-    if os.environ.get(_MARQUEUR_DETACHE) == "1":
+    if _deja_detache():
         return False
 
     try:
